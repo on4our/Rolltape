@@ -73,6 +73,27 @@ outputs/        Rendered MP4s land here
 Price data is cached in `.cache/` so repeated renders of the same range don't re-download.
 **Clear price cache** in the interface wipes it when you want fresh numbers.
 
+## Where the numbers come from
+
+Yahoo first, via yfinance. Yahoo breaks periodically when they change their endpoints, so
+when that happens Rolltape falls back to [Stooq](https://stooq.com) — free daily bars, no
+account, a completely independent source. A failed render is worse than one drawn from
+second choice. If both fail you get one error naming both causes.
+
+**The footer tells you which source answered.** Yahoo says nothing, since that's the
+assumed source. A chart built from the fallback reads `Data: Stooq`, and one built from
+`--demo` reads `Demo data` — which also stops generated prices reaching a video by accident.
+
+This matters because the two sources adjust prices differently: yfinance is asked for
+split- *and* dividend-adjusted closes, Stooq adjusts on its own terms. The same ticker over
+the same window can show a different total return depending on which one answered. Check the
+footer before you narrate a number.
+
+Stooq is a reliability fallback for personal use. It does not change the licensing position
+for a paid tier — see CLAUDE.md.
+
+Run the tests with `python -m unittest`. They mock both sources, so they need no network.
+
 ## Deploying
 
 Rolltape is a local tool and runs best that way — rendering is CPU-bound, so your own

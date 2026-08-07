@@ -129,6 +129,19 @@ def _new_fig(ctx):
     return fig
 
 
+def _footer_text(footer):
+    """Combine the user's footer with a data-source note.
+
+    Yahoo says nothing — it's the assumed source. Stooq and demo data announce themselves,
+    because a total return drawn from either can differ from what the viewer expects and
+    these charts get narrated on camera.
+    """
+    note = datasrc.attribution()
+    if not note:
+        return footer
+    return f"{footer}  ·  {note}" if footer else note
+
+
 def _titles(fig, ctx, title, subtitle, footer):
     t = ctx.theme
     top = 0.955 if not ctx.tall else 0.965
@@ -139,6 +152,7 @@ def _titles(fig, ctx, title, subtitle, footer):
         fig.text(0.07, top - (0.052 if not ctx.tall else 0.030), subtitle,
                  color=t["muted"], fontsize=17 * ctx.s, va="top",
                  fontfamily=MONO_STACK)
+    footer = _footer_text(footer)
     if footer:
         fig.text(0.93, 0.035, footer, color=t["muted"], fontsize=13 * ctx.s,
                  ha="right", va="center", alpha=0.8)
@@ -748,6 +762,7 @@ def render(cfg, out_path, progress=None):
     kind = cfg.get("chart", "line")
     if kind not in CHARTS:
         raise ValueError(f"Unknown chart type: {kind}")
+    datasrc.reset_sources()
     ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"),
                    cfg.get("quality", "final"))
     return CHARTS[kind]["fn"](cfg, ctx, out_path, progress=progress)
@@ -755,5 +770,7 @@ def render(cfg, out_path, progress=None):
 
 def still_frame(cfg, at=0.72):
     kind = cfg.get("chart", "line")
+    # Reset here too, so the preview footer matches what the render will produce.
+    datasrc.reset_sources()
     ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"), "draft")
     return CHARTS[kind]["fn"](cfg, ctx, None, still=at)
