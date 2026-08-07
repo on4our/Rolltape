@@ -311,6 +311,14 @@ button,input,select,textarea{font:inherit;color:inherit}
           <button data-v="max" aria-pressed="false">Max</button>
         </div>
       </div>
+      <div class="field">
+        <label>Encoder</label>
+        <div class="seg" id="presetSeg">
+          <button data-v="auto" aria-pressed="true">Auto</button>
+          <button data-v="veryfast" aria-pressed="false">Faster</button>
+          <button data-v="slow" aria-pressed="false">Slower</button>
+        </div>
+      </div>
     </div>
 
     <div class="group">
@@ -355,7 +363,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 const $ = s => document.querySelector(s);
 const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight",
-  aspect:"16:9", quality:"final", meta:null, maxTickers:1
+  aspect:"16:9", quality:"final", preset:"auto", meta:null, maxTickers:1
 };
 
 /* ---------- boot ---------- */
@@ -388,12 +396,14 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
 });
 
 /* ---------- segmented controls ---------- */
-function seg(id, key, cast = v=>v){
+// slateOnly skips the preview re-render for settings the preview can't show — the still
+// frame is never encoded, so the encoder preset would cost a render and change nothing.
+function seg(id, key, cast = v=>v, slateOnly = false){
   $(id).addEventListener("click", e=>{
     const b = e.target.closest("button"); if(!b) return;
     state[key] = cast(b.dataset.v);
     [...$(id).children].forEach(x=>x.setAttribute("aria-pressed", x===b));
-    schedule();
+    slateOnly ? slate() : schedule();
   });
 }
 $("#tickers").addEventListener("input", ()=>{ state.tickersTouched = true; });
@@ -401,6 +411,7 @@ seg("#normalizeSeg","normalize",Number);
 seg("#easingSeg","easing");
 seg("#aspectSeg","aspect");
 seg("#qualitySeg","quality");
+seg("#presetSeg","preset",v=>v,true);
 
 /* ---------- chart-specific fields ---------- */
 function applyChart(){
@@ -464,7 +475,7 @@ function config(){
     start: $("#start").value, end: $("#end").value || null,
     duration: +$("#duration").value, hold: +$("#hold").value,
     easing: state.easing, theme: state.theme,
-    aspect: state.aspect, quality: state.quality,
+    aspect: state.aspect, quality: state.quality, preset: state.preset,
     title: $("#title").value, subtitle: $("#subtitle").value, footer: $("#footer").value,
     normalize: !!state.normalize,
     max_candles: +$("#maxCandles").value,
@@ -483,8 +494,10 @@ function slate(){
   const frames = Math.round(secs * fps);
   const mm = String(Math.floor(secs/60)).padStart(2,"0");
   const ss = (secs%60).toFixed(1).padStart(4,"0");
+  // Spell out what Auto resolved to, so the tier's choice isn't something to guess at.
+  const preset = state.preset === "auto" ? m.auto_preset[state.quality] : state.preset;
   $("#slate").innerHTML =
-    `<b>${w}×${h}</b> · ${fps} fps · <b>${frames}</b> frames · ${mm}:${ss}`;
+    `<b>${w}×${h}</b> · ${fps} fps · <b>${frames}</b> frames · ${mm}:${ss} · ${preset}`;
 }
 
 /* ---------- preview ---------- */

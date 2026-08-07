@@ -47,6 +47,15 @@ def clean_config(raw):
     if chart in ("compare", "race") and len(tickers) < 2:
         raise ValueError("This chart needs at least two tickers.")
 
+    # Both are indexed directly downstream, so a bad value has to fail here as a 400
+    # rather than as a KeyError once the job is already queued.
+    quality = raw.get("quality") or "final"
+    if quality not in renderers.ENCODE:
+        raise ValueError(f"Unknown quality: {quality}")
+    preset = str(raw.get("preset") or "auto").strip().lower()
+    if preset != "auto" and preset not in renderers.PRESETS:
+        raise ValueError(f"Unknown encoder preset: {preset}")
+
     cfg = {
         "chart": chart,
         "tickers": tickers,
@@ -57,7 +66,8 @@ def clean_config(raw):
         "easing": raw.get("easing", "out"),
         "theme": raw.get("theme", "midnight"),
         "aspect": raw.get("aspect", "16:9"),
-        "quality": raw.get("quality", "final"),
+        "quality": quality,
+        "preset": preset,
         "title": (raw.get("title") or "").strip() or None,
         "subtitle": (raw.get("subtitle") or "").strip() or None,
         "footer": (raw.get("footer") or "").strip() or None,
@@ -132,6 +142,8 @@ def meta():
         "sizes": {a: {q: list(s) for q, s in qs.items()}
                   for a, qs in renderers.SIZES.items()},
         "fps": {k: v["fps"] for k, v in renderers.ENCODE.items()},
+        "presets": list(renderers.PRESETS),
+        "auto_preset": {k: v["preset"] for k, v in renderers.ENCODE.items()},
         "demo": datasrc.is_demo(),
     })
 

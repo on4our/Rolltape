@@ -57,9 +57,15 @@ SIZES = {
 
 ENCODE = {
     "draft": {"fps": 30, "crf": "23", "preset": "veryfast"},
-    "final": {"fps": 60, "crf": "16", "preset": "slow"},
+    "final": {"fps": 60, "crf": "16", "preset": "medium"},
     "max": {"fps": 60, "crf": "14", "preset": "slow"},
 }
+
+# x264 presets a config may ask for. Measured on a 7.5s 1080p60 line chart, the whole
+# spread is ~3s of encode (veryfast 3.5s, medium 4.3s, slow 6.5s) and medium and slow come
+# out the same size — chart content is flat enough that x264 runs out of wins early. So
+# `final` sits on medium, and the override exists to trim seconds, not to change the file.
+PRESETS = ("veryfast", "medium", "slow")
 
 FONT_STACK = ["Inter", "Helvetica Neue", "Arial", "Liberation Sans", "DejaVu Sans"]
 MONO_STACK = ["JetBrains Mono", "SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono"]
@@ -85,11 +91,13 @@ class Ctx:
         return self.h > self.w
 
 
-def make_ctx(theme_name, aspect, quality) -> Ctx:
+def make_ctx(theme_name, aspect, quality, preset=None) -> Ctx:
     theme = THEMES.get(theme_name, THEMES["midnight"])
     w, h = SIZES.get(aspect, SIZES["16:9"]).get(quality, SIZES["16:9"]["final"])
     enc = ENCODE.get(quality, ENCODE["final"])
-    return Ctx(theme=theme, w=w, h=h, fps=enc["fps"], crf=enc["crf"], preset=enc["preset"])
+    if preset in (None, "auto") or preset not in PRESETS:
+        preset = enc["preset"]
+    return Ctx(theme=theme, w=w, h=h, fps=enc["fps"], crf=enc["crf"], preset=preset)
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +772,7 @@ def render(cfg, out_path, progress=None):
         raise ValueError(f"Unknown chart type: {kind}")
     datasrc.reset_sources()
     ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"),
-                   cfg.get("quality", "final"))
+                   cfg.get("quality", "final"), cfg.get("preset"))
     return CHARTS[kind]["fn"](cfg, ctx, out_path, progress=progress)
 
 

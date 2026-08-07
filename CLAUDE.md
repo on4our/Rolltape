@@ -86,11 +86,14 @@ matters.
 
 ## Known rough edges
 
-- `preset=slow` on the `max` and `final` quality tiers is genuinely slow — roughly 70s for
-  a 7.5s 1080p60 clip. Worth exposing the preset in the UI, or dropping to `medium`.
-- yfinance breaks periodically when Yahoo changes their endpoints. A Stooq fallback in
-  `data.py` would make this robust; not yet written.
+- **Render time is matplotlib, not ffmpeg.** A 7.5s 1080p60 clip takes ~90s, and drawing
+  the 450 frames is nearly all of it. The x264 preset spans only ~3s of that (veryfast
+  3.5s, medium 4.3s, slow 6.5s), and medium and slow produce the same file size. Anything
+  that meaningfully speeds up a render has to make `_new_fig`/draw cheaper — blitting,
+  reusing artists between frames, or rendering in parallel processes. Chasing the encoder
+  settings is not worth it; that was measured, not assumed.
 - Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
+  Note that Stooq's CSV endpoint is daily-only, so intraday would have no fallback source.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
 
@@ -98,11 +101,13 @@ matters.
 
 Near term, in rough priority order:
 
-1. Stooq fallback in `data.py` so renders don't fail when yfinance breaks.
-2. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
-3. Encoder preset exposed in the UI; `final` should probably default to `medium`.
-4. Brand kit: save theme, footer, and default title format as a named preset.
-5. Batch render — one config, many tickers, queued.
+1. Brand kit: save theme, footer, and default title format as a named preset.
+2. Batch render — one config, many tickers, queued.
+3. Frame-drawing speed — the only lever that actually shortens a render. See the first
+   known rough edge for where the time really goes.
+
+Done: the Stooq fallback, and the encoder preset (`final` moved from `slow` to `medium`,
+with an Auto/Faster/Slower override in the UI). Intraday is deliberately not planned.
 
 Further out, this is being explored as a product. That means watermarking on a free tier,
 render credits, and eventually an API endpoint that accepts a config and returns an MP4.
