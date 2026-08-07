@@ -55,9 +55,13 @@ SIZES = {
     "1:1": {"draft": (720, 720), "final": (1080, 1080), "max": (1440, 1440)},
 }
 
+# "final" used preset=slow, but slow's extra reference/lookahead frames were getting
+# ffmpeg OOM-killed on small container hosts (and took ~70s for a 7.5s clip). At CRF 16
+# the visual difference from medium is not worth either cost. "max" keeps slow for the
+# rare render where it matters — on a memory-limited host, that's the tier to avoid.
 ENCODE = {
     "draft": {"fps": 30, "crf": "23", "preset": "veryfast"},
-    "final": {"fps": 60, "crf": "16", "preset": "slow"},
+    "final": {"fps": 60, "crf": "16", "preset": "medium"},
     "max": {"fps": 60, "crf": "14", "preset": "slow"},
 }
 
@@ -221,10 +225,14 @@ def _resolve_ffmpeg():
 
 def _export(fig, anim, path, ctx, progress):
     _resolve_ffmpeg()
+    # Containers advertise the host's CPU count, so x264's auto threading can spawn
+    # dozens of threads whose per-thread buffers blow a small memory limit and get
+    # ffmpeg OOM-killed. Four threads keeps memory bounded and encoding is not the
+    # bottleneck here anyway — matplotlib drawing the frames is.
     writer = FFMpegWriter(
         fps=ctx.fps, codec="libx264", bitrate=-1,
         extra_args=["-pix_fmt", "yuv420p", "-crf", ctx.crf, "-preset", ctx.preset,
-                    "-movflags", "+faststart"],
+                    "-threads", "4", "-movflags", "+faststart"],
     )
     anim.save(path, writer=writer, dpi=ctx.dpi,
               savefig_kwargs={"facecolor": ctx.theme["bg"]},

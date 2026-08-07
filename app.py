@@ -5,6 +5,8 @@ import base64
 import io
 import os
 import re
+import signal
+import subprocess
 import threading
 import time
 import uuid
@@ -78,6 +80,33 @@ def slug(cfg):
     return re.sub(r"[^A-Za-z0-9_.-]", "", name) + ".mp4"
 
 
+def describe_error(exc):
+    """Turn a render exception into something a user can act on.
+
+    matplotlib surfaces an ffmpeg death as CalledProcessError, whose str() buries the
+    ffmpeg command line in the message and, for a signal death, says only
+    "died with <Signals.SIGKILL: 9>". On a container host a SIGKILLed ffmpeg is almost
+    always the memory limit, so say that instead of making the user decode signal numbers.
+    """
+    if isinstance(exc, subprocess.CalledProcessError):
+        if exc.returncode < 0:
+            try:
+                name = signal.Signals(-exc.returncode).name
+            except ValueError:
+                name = f"signal {-exc.returncode}"
+            msg = f"ffmpeg was killed by {name}."
+            if -exc.returncode == signal.SIGKILL:
+                msg += (" The host most likely ran out of memory — try the draft "
+                        "quality tier, or give the container more RAM.")
+            return msg
+        err = exc.stderr or b""
+        if isinstance(err, bytes):
+            err = err.decode(errors="replace")
+        tail = err.strip().splitlines()[-1] if err.strip() else ""
+        return f"ffmpeg failed (exit {exc.returncode})" + (f": {tail}" if tail else ".")
+    return str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
@@ -104,7 +133,7 @@ def worker():
             jobstore.update(job_id, status="done", url=url, size_mb=size_mb,
                             seconds=round(time.time() - started, 1))
         except Exception as exc:  # noqa: BLE001
-            jobstore.update(job_id, status="failed", error=str(exc))
+            jobstore.update(job_id, status="failed", error=describe_error(exc))
         finally:
             QUEUE.task_done()
 

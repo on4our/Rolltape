@@ -353,6 +353,10 @@ button,input,select,textarea{font:inherit;color:inherit}
 
 <script>
 const $ = s => document.querySelector(s);
+// Error strings and job labels reach innerHTML. A backend exception like
+// "died with <Signals.SIGKILL: 9>" parses as a tag and vanishes without this.
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight",
   aspect:"16:9", quality:"final", meta:null, maxTickers:1
@@ -513,14 +517,14 @@ async function preview(){
     const j = await r.json();
     if (mine !== seq) return;
     if (j.error){
-      $("#frame").innerHTML = `<div class="err">${j.error}</div>`;
+      $("#frame").innerHTML = `<div class="err">${esc(j.error)}</div>`;
       $("#stageLabel").textContent = "Preview unavailable";
     } else {
       $("#frame").innerHTML = `<img alt="Preview frame" src="${j.image}">`;
       $("#stageLabel").textContent = "Preview";
     }
   } catch(e){
-    if (mine === seq) $("#frame").innerHTML = `<div class="err">${e}</div>`;
+    if (mine === seq) $("#frame").innerHTML = `<div class="err">${esc(e)}</div>`;
   } finally{
     if (mine === seq) $("#stageDot").classList.remove("busy");
   }
@@ -564,13 +568,13 @@ async function pollJobs(){
       const meta = j.status === "done"
         ? `<span class="status-done">Done</span> · ${j.seconds}s · ${j.size_mb} MB · ${j.file}`
         : j.status === "failed"
-          ? `<span class="status-failed">Failed</span> · ${j.error||""}`
+          ? `<span class="status-failed">Failed</span> · ${esc(j.error||"")}`
           : j.status === "rendering"
             ? `<span class="status-rendering">Rendering</span> · ${j.progress}/${j.total} frames · ${pct}%`
             : `Queued`;
       return `<div class="job">
         <div>
-          <div class="job-title">${j.label} — ${j.chart}</div>
+          <div class="job-title">${esc(j.label)} — ${j.chart}</div>
           <div class="job-meta">${meta}</div>
           ${j.status==="rendering" ? `<div class="bar"><i style="width:${pct}%"></i></div>`:""}
         </div>

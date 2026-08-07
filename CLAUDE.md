@@ -86,8 +86,9 @@ matters.
 
 ## Known rough edges
 
-- `preset=slow` on the `max` and `final` quality tiers is genuinely slow — roughly 70s for
-  a 7.5s 1080p60 clip. Worth exposing the preset in the UI, or dropping to `medium`.
+- `preset=slow` on the `max` quality tier is genuinely slow — roughly 70s for a 7.5s
+  1080p60 clip — and needs enough memory that small container hosts may OOM-kill ffmpeg.
+  `final` uses `medium` for this reason. Worth exposing the preset in the UI.
 - yfinance breaks periodically when Yahoo changes their endpoints. A Stooq fallback in
   `data.py` would make this robust; not yet written.
 - Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
@@ -100,7 +101,7 @@ Near term, in rough priority order:
 
 1. Stooq fallback in `data.py` so renders don't fail when yfinance breaks.
 2. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
-3. Encoder preset exposed in the UI; `final` should probably default to `medium`.
+3. Encoder preset exposed in the UI (`final` now defaults to `medium`).
 4. Brand kit: save theme, footer, and default title format as a named preset.
 5. Batch render — one config, many tickers, queued.
 
