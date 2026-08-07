@@ -5,10 +5,13 @@ forced to fail to exercise the fallback. Run with: python -m unittest
 """
 
 import io
+import os
 import shutil
 import tempfile
 import unittest
 from unittest import mock
+
+import pandas as pd
 
 import data
 import renderers
@@ -80,7 +83,6 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(data.sources_used(), {"stooq"})
 
     def test_yahoo_is_preferred_and_stays_silent(self):
-        import pandas as pd
         frame = pd.read_csv(io.StringIO(STOOQ_CSV), parse_dates=["Date"], index_col="Date")
 
         with mock.patch.object(data, "_yahoo", return_value=frame) as yahoo, \
@@ -136,6 +138,106 @@ class FallbackTests(unittest.TestCase):
 
         self.assertFalse(df.empty)
         self.assertEqual(data.sources_used(), {"demo"})
+
+
+class CacheFreshnessTests(unittest.TestCase):
+    """A range running up to now keeps gaining bars, so its cache entry has to expire.
+
+    The End field is empty by default, so this is the path nearly every render takes. When
+    it went stale nothing failed — the chart just quietly ended on an old bar.
+    """
+
+    DAY1 = "2026-08-07"
+    DAY2 = "2026-08-19"  # eight sessions later
+
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        patcher = mock.patch.object(data, "CACHE_DIR", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        data.set_demo(False)
+        data.reset_sources()
+        self.addCleanup(data.reset_sources)
+
+    def _on(self, day):
+        return mock.patch.object(data, "_today", lambda: pd.Timestamp(day))
+
+    def _yahoo_through(self, last):
+        idx = pd.bdate_range("2024-01-02", last)
+        frame = pd.DataFrame({c: range(len(idx)) for c in data.COLUMNS}, index=idx)
+        return mock.patch.object(data, "_yahoo", lambda t, s, e: frame.astype(float))
+
+    def _files(self):
+        return sorted(os.listdir(self.cache))
+
+    def test_open_ended_range_refetches_the_next_day(self):
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            first = data.fetch("AAPL", "2024-01-01", None)
+        with self._on(self.DAY2), self._yahoo_through("2024-01-19"):
+            later = data.fetch("AAPL", "2024-01-01", None)
+
+        self.assertEqual(str(first.index[-1].date()), "2024-01-08")
+        self.assertEqual(str(later.index[-1].date()), "2024-01-19")
+
+    def test_open_ended_range_is_cached_within_the_day(self):
+        # The preview refires on a debounce as the form changes, so same-day repeats have
+        # to stay local — expiring per request would put Yahoo behind every keystroke.
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", None)
+
+        with self._on(self.DAY1), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("refetched")), \
+             mock.patch("urllib.request.urlopen", side_effect=AssertionError("refetched")):
+            df = data.fetch("AAPL", "2024-01-01", None)
+
+        self.assertEqual(str(df.index[-1].date()), "2024-01-08")
+
+    def test_an_end_date_of_today_counts_as_open_ended(self):
+        # "Through today" is the same request as "through now" — today's bar is still open.
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", self.DAY1)
+        with self._on(self.DAY2), self._yahoo_through("2024-01-19"):
+            df = data.fetch("AAPL", "2024-01-01", self.DAY1)
+
+        self.assertEqual(str(df.index[-1].date()), "2024-01-19")
+
+    def test_closed_range_is_cached_indefinitely(self):
+        # A finished historical window never changes; re-downloading it would be waste.
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", "2024-01-08")
+
+        with self._on(self.DAY2), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("refetched")), \
+             mock.patch("urllib.request.urlopen", side_effect=AssertionError("refetched")):
+            df = data.fetch("AAPL", "2024-01-01", "2024-01-08")
+
+        self.assertEqual(len(df), 5)
+
+    def test_yesterdays_copy_is_pruned(self):
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", None)
+        self.assertEqual(len(self._files()), 1)
+
+        with self._on(self.DAY2), self._yahoo_through("2024-01-19"):
+            data.fetch("AAPL", "2024-01-01", None)
+
+        # One file per ticker per day would otherwise pile up forever.
+        self.assertEqual(self._files(), [f"AAPL_{data._cache_key('AAPL', '2024-01-01', None)}"
+                                         f".{self.DAY2}.yahoo.csv"])
+
+    def test_undated_entries_from_before_the_fix_are_retired(self):
+        key = data._cache_key("AAPL", "2024-01-01", None)
+        legacy = os.path.join(self.cache, f"AAPL_{key}.yahoo.csv")
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", None)
+            os.rename(os.path.join(self.cache, f"AAPL_{key}.{self.DAY1}.yahoo.csv"), legacy)
+
+        with self._on(self.DAY2), self._yahoo_through("2024-01-19"):
+            df = data.fetch("AAPL", "2024-01-01", None)
+
+        self.assertEqual(str(df.index[-1].date()), "2024-01-19")
+        self.assertFalse(os.path.exists(legacy))
 
 
 class FooterTests(unittest.TestCase):

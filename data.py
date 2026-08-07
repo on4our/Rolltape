@@ -1,5 +1,6 @@
 """Price data: Yahoo first, Stooq when Yahoo breaks, cached to disk, plus a demo mode."""
 
+import glob
 import hashlib
 import io
 import os
@@ -14,6 +15,8 @@ CACHE_DIR = config.CACHE_DIR
 _DEMO = False
 
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+
+SOURCES = ("yahoo", "stooq")
 
 # Which source answered for each ticker in the current render. app.py's RENDER_LOCK
 # serialises previews and renders, so one module-level record is safe without locking.
@@ -52,14 +55,64 @@ def attribution():
     return None
 
 
+def _today():
+    return pd.Timestamp.today().normalize()
+
+
+def _is_open_ended(end) -> bool:
+    """True when the requested range runs up to now, so the data is still being written.
+
+    An end date of today is no different from no end date at all — both mean "through the
+    latest bar", and the latest bar changes.
+    """
+    if not end:
+        return True
+    try:
+        return pd.Timestamp(end).normalize() >= _today()
+    except (ValueError, TypeError):
+        return False  # unparseable; fetch will complain about it in a more useful place
+
+
+def _cache_key(ticker, start, end):
+    return hashlib.md5(f"{ticker}|{start}|{end}".encode()).hexdigest()[:16]
+
+
 def _cache_path(ticker, start, end, source):
-    key = hashlib.md5(f"{ticker}|{start}|{end}".encode()).hexdigest()[:16]
-    return os.path.join(CACHE_DIR, f"{ticker.upper()}_{key}.{source}.csv")
+    """Where a frame for this request is cached.
+
+    A closed historical range never changes, so it is cached under the request alone. An
+    open-ended one gains a bar every session, so the day it was fetched is part of its
+    identity — without that, a chart rendered today is served a file written weeks ago and
+    silently ends on a stale bar.
+    """
+    stamp = f"{_today().date()}." if _is_open_ended(end) else ""
+    return os.path.join(
+        CACHE_DIR, f"{ticker.upper()}_{_cache_key(ticker, start, end)}.{stamp}{source}.csv"
+    )
+
+
+def _drop_superseded(ticker, start, end):
+    """Delete earlier copies of an open-ended range once today's has been written.
+
+    The key covers the exact request, so everything matching the glob is a copy of this
+    same range differing only by fetch date or source. That includes files written before
+    dated names existed, which is what retires them.
+    """
+    if not _is_open_ended(end):
+        return
+    keep = {_cache_path(ticker, start, end, s) for s in SOURCES}
+    pattern = f"{ticker.upper()}_{_cache_key(ticker, start, end)}.*.csv"
+    for path in glob.glob(os.path.join(CACHE_DIR, pattern)):
+        if path not in keep:
+            try:
+                os.remove(path)
+            except OSError:  # a concurrent render got there first
+                pass
 
 
 def _find_cached(ticker, start, end):
     """Return (path, source) for a cached frame, whichever source wrote it."""
-    for source in ("yahoo", "stooq"):
+    for source in SOURCES:
         path = _cache_path(ticker, start, end, source)
         if os.path.exists(path):
             return path, source
@@ -162,14 +215,16 @@ def fetch(ticker: str, start: str, end: str | None = None) -> pd.DataFrame:
             _SOURCES[ticker] = source
             return df
 
+    fetchers = {"yahoo": _yahoo, "stooq": _stooq}
     problems = []
-    for source, fn in (("yahoo", _yahoo), ("stooq", _stooq)):
+    for source in SOURCES:  # SOURCES is the preference order, here and in _find_cached
         try:
-            df = fn(ticker, start, end)
+            df = fetchers[source](ticker, start, end)
         except Exception as exc:  # noqa: BLE001
             problems.append(f"{source}: {exc}")
             continue
         df.to_csv(_cache_path(ticker, start, end, source))
+        _drop_superseded(ticker, start, end)
         _SOURCES[ticker] = source
         return df
 

@@ -71,7 +71,13 @@ outputs/        Rendered MP4s land here
 ```
 
 Price data is cached in `.cache/` so repeated renders of the same range don't re-download.
-**Clear price cache** in the interface wipes it when you want fresh numbers.
+A finished historical window is cached for good — it can't change. A range with **End**
+left empty runs to the latest bar, so it's cached only for the day it was fetched and
+refreshes on the next render the following day. You get today's close without thinking
+about it, and previews still don't re-download on every keystroke.
+
+**Clear price cache** in the interface wipes the lot, for when you want a source to be
+re-asked immediately.
 
 ## Where the numbers come from
 
