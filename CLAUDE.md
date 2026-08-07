@@ -21,16 +21,24 @@ ffmpeg must be on PATH. Everything else is pip.
 ## Architecture
 
 ```
-app.py          Flask routes, single-threaded render queue, job state
+app.py          Flask routes, single-threaded render queue, config validation
 renderers.py    Six chart types + themes + easing + ffmpeg export
-data.py         Yahoo fetch (yfinance) with CSV disk cache, plus demo generator
+data.py         Yahoo fetch, Stooq fallback, CSV disk cache, demo generator
+config.py       Env-var configuration; every default reproduces the local setup
+storage.py      Where a finished MP4 lands — local disk or object storage
+jobs.py         The render job registry
 templates/      One HTML file, inline CSS and JS, no build step
 outputs/        Rendered MP4s
 ```
 
+Deployment support sits off to the side and nothing local reads it: `Dockerfile`,
+`api/index.py` (WSGI entrypoint), `vercel.json`, `requirements-vercel.txt`,
+`scripts/trim-bundle.sh`.
+
 There is deliberately no frontend build step and no database. Job state is an in-memory
-`OrderedDict` that resets on restart. Don't add a build pipeline or an ORM without a
-concrete reason.
+`OrderedDict` in `jobs.py` that resets on restart. `config.py`, `storage.py` and
+`jobs.py` exist as seams so the app can boot on a read-only filesystem — they are not an
+abstraction layer to grow. Don't add a build pipeline or an ORM without a concrete reason.
 
 ## How a render works
 
@@ -108,21 +116,27 @@ matters.
 - `preset=slow` on the `max` quality tier is genuinely slow — roughly 70s for a 7.5s
   1080p60 clip — and needs enough memory that small container hosts may OOM-kill ffmpeg.
   `final` uses `medium` for this reason. Worth exposing the preset in the UI.
-- yfinance breaks periodically when Yahoo changes their endpoints. A Stooq fallback in
-  `data.py` would make this robust; not yet written.
 - Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
+  Note that Stooq's CSV endpoint is daily-grain, so intraday would have no fallback — it
+  is the one feature that breaks outright when Yahoo does.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
+- Tests cover `data.py` only. `clean_config()` holds all validation and has none.
+- A serverless deploy can't finish a render. `/api/render` returns as soon as the job is
+  queued and the work happens on a daemon thread, but the instance is frozen once the
+  response is sent — so the render may never run, not merely go missing from the
+  registry. A container host is the shape this app was written for; see README.
 
 ## Roadmap
 
 Near term, in rough priority order:
 
-1. Stooq fallback in `data.py` so renders don't fail when yfinance breaks.
-2. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
-3. Encoder preset exposed in the UI (`final` now defaults to `medium`).
-4. Brand kit: save theme, footer, and default title format as a named preset.
-5. Batch render — one config, many tickers, queued.
+1. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
+2. Encoder preset exposed in the UI (`final` now defaults to `medium`).
+3. Brand kit: save theme, footer, and default title format as a named preset.
+4. Batch render — one config, many tickers, queued.
+
+Done: Stooq fallback in `data.py`, so a render survives Yahoo changing its endpoints.
 
 ### Cinematography — camera moves and transitions
 

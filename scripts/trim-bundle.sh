@@ -2,9 +2,10 @@
 # Trim installed packages to fit Vercel's function size ceiling.
 #
 # A stock install of matplotlib + pandas + numpy + a bundled ffmpeg measures ~253MB
-# against a 225MB limit. Three cuts, none of which touch anything reachable at runtime,
-# bring it to ~202MB. Verified by rendering line, candlestick and comparison charts on a
-# trimmed install.
+# against a 225MB limit. Four cuts, none of which touch anything reachable at runtime,
+# bring it to ~222MB. Stripping debug symbols would take it to ~202MB, but Vercel's build
+# image has no strip — so ~222MB is the number that has to fit, and the margin is ~3MB.
+# Verified by rendering line, candlestick and comparison charts on a trimmed install.
 #
 # Not a cut: fontTools. matplotlib's dviread imports fontTools.agl at module level, so
 # removing it breaks rendering outright — tested, not assumed.
