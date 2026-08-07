@@ -1,5 +1,6 @@
 """Animated chart renderers. Every chart type shares one theme, easing and export path."""
 
+import logging
 import shutil
 from dataclasses import dataclass
 
@@ -8,6 +9,12 @@ import pandas as pd
 import matplotlib
 
 matplotlib.use("Agg")
+
+# When a font in the preference stacks isn't installed, matplotlib warns once per text
+# object per frame — tens of thousands of lines for one render, enough that Railway's
+# 500 logs/sec limit starts dropping messages. The stacks end in DejaVu, which ships
+# with matplotlib, so the fallback always works and the warning is pure noise.
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter, FuncAnimation

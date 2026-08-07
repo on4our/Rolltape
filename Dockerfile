@@ -6,9 +6,11 @@
 FROM python:3.11-slim
 
 # ffmpeg does the encoding. Being able to apt-get it is the entire reason a container host
-# is simpler than serverless for this app.
+# is simpler than serverless for this app. Inter and JetBrains Mono are the first choices
+# in the renderer's font stacks — without them every render falls back to DejaVu, which
+# doesn't match the broadcast look the themes were designed around.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-inter fonts-jetbrains-mono \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -27,6 +29,9 @@ ENV ROLLTAPE_OUT_DIR=/data/outputs \
     MPLCONFIGDIR=/tmp/matplotlib \
     PYTHONUNBUFFERED=1
 RUN mkdir -p /data/outputs /data/.cache /tmp/matplotlib
+
+# Index the fonts at build time so the first render doesn't pay for the font scan.
+RUN python -c "import matplotlib.font_manager"
 
 EXPOSE 5000
 
