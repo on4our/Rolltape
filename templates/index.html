@@ -228,6 +228,12 @@ button,input,select,textarea{font:inherit;color:inherit}
           <input class="ctrl" id="end" type="date"></div>
       </div>
 
+      <div class="field">
+        <label for="interval">Bar interval</label>
+        <select class="ctrl" id="interval"></select>
+        <div class="hint" id="intervalHint">One bar per trading day</div>
+      </div>
+
       <div class="field" data-for="compare race">
         <label>Scale</label>
         <div class="seg" id="normalizeSeg">
@@ -239,7 +245,7 @@ button,input,select,textarea{font:inherit;color:inherit}
       <div class="field" data-for="candles">
         <label for="maxCandles">Maximum candles</label>
         <input class="ctrl" id="maxCandles" type="number" min="20" max="250" value="90">
-        <div class="hint">Longer ranges roll up to weekly or monthly</div>
+        <div class="hint" id="candleHint">Longer ranges roll up to weekly or monthly</div>
       </div>
 
       <div class="field" data-for="bars">
@@ -388,8 +394,28 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
     [...$("#themes").children].forEach(x=>x.setAttribute("aria-pressed", x===b));
     schedule();
   });
+  // Intraday is Yahoo-only, and a deploy without yfinance can't serve it. Offering a
+  // control that always errors is worse than not offering it.
+  $("#interval").innerHTML = m.intervals
+    .filter(i=>m.intraday || !i.days)
+    .map(i=>`<option value="${i.id}">${esc(i.label)}</option>`).join("");
+  $("#interval").onchange = ()=>{ applyInterval(); schedule(); };
+  applyInterval();
   applyChart(); schedule(); pollJobs();
 });
+
+/* Yahoo keeps a limited window of intraday history, so say so before the render does. */
+function applyInterval(){
+  const m = state.meta, id = $("#interval").value;
+  const spec = (m.intervals||[]).find(i=>i.id===id) || {};
+  state.interval = id;
+  $("#intervalHint").textContent = spec.days
+    ? `Yahoo keeps about ${spec.days} days of history at this interval — an earlier start is pulled forward`
+    : "One bar per trading day";
+  $("#candleHint").textContent = spec.days
+    ? "Keeps the most recent candles at this interval"
+    : "Longer ranges roll up to weekly or monthly";
+}
 
 /* ---------- segmented controls ---------- */
 function seg(id, key, cast = v=>v){
@@ -466,6 +492,7 @@ function config(){
     chart: state.chart,
     tickers: raw.slice(0, state.maxTickers),
     start: $("#start").value, end: $("#end").value || null,
+    interval: $("#interval").value || "1d",
     duration: +$("#duration").value, hold: +$("#hold").value,
     easing: state.easing, theme: state.theme,
     aspect: state.aspect, quality: state.quality,

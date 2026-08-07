@@ -35,6 +35,26 @@ Bar comparison can pull total return, max drawdown, annualised volatility or lat
 close — or switch it to **My own numbers** and type revenue, margins, whatever you're
 narrating.
 
+## Bar interval
+
+Daily by default. **Bar interval** also offers 1 minute, 5, 15, 30 and 1 hour, which is
+what you want for a Fed afternoon or an earnings gap — the move is inside a single session,
+so a daily chart shows it as one candle.
+
+Yahoo only keeps intraday history for a while, and by a different amount per interval:
+about a week of 1-minute bars, two months of 5- to 30-minute, two years of hourly. A start
+date earlier than that is pulled forward to whatever exists rather than refused, and the
+subtitle names the range actually drawn.
+
+Intraday charts are plotted by bar rather than by clock time, so the overnight hours are
+closed up and the ticks land on the session opens. Without that, a week of 5-minute bars
+would be about two thirds empty.
+
+**Intraday needs Yahoo.** Stooq serves daily bars and coarser, so unlike a daily render
+there is no fallback — if Yahoo is down, an intraday render fails rather than quietly
+handing you daily bars with a 5-minute label. It's also unavailable on the Vercel deploy,
+which ships without yfinance; the option is hidden there rather than offered and broken.
+
 ## Output settings
 
 - **Frame** — 16:9 for the main video, 9:16 for Shorts, 1:1 for square posts.
@@ -95,8 +115,9 @@ split- *and* dividend-adjusted closes, Stooq adjusts on its own terms. The same 
 the same window can show a different total return depending on which one answered. Check the
 footer before you narrate a number.
 
-Stooq is a reliability fallback for personal use. It does not change the licensing position
-for a paid tier — see CLAUDE.md.
+Stooq is a reliability fallback for personal use, and a daily-bars one — see **Bar
+interval** for what that means when Yahoo is down. It does not change the licensing
+position for a paid tier — see CLAUDE.md.
 
 Run the tests with `python -m unittest`. They mock both sources, so they need no network.
 

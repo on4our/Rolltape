@@ -35,6 +35,27 @@ datasrc.set_demo(config.DEMO)
 # ---------------------------------------------------------------------------
 # Config normalising
 # ---------------------------------------------------------------------------
+def _clamp_start(start, interval):
+    """Pull a start date forward to the furthest back this interval can reach.
+
+    Yahoo keeps only a window of intraday history — a week of minute bars, two months of
+    five-minute. Asking for more returns silence rather than an error. Rejecting the
+    request would be the strict reading, but the start date defaults to a year that no
+    intraday interval can serve, so every first switch to 5m would be an error message
+    instead of a chart. Clamping renders the window that exists, and the subtitle names
+    the range it actually drew.
+    """
+    days = datasrc.max_lookback_days(interval)
+    if not days:
+        return start
+    floor = (time.time() - days * 86400)
+    try:
+        asked = time.mktime(time.strptime(start, "%Y-%m-%d"))
+    except (ValueError, TypeError):
+        return time.strftime("%Y-%m-%d", time.localtime(floor))
+    return time.strftime("%Y-%m-%d", time.localtime(max(asked, floor)))
+
+
 def clean_config(raw):
     chart = raw.get("chart", "line")
     spec = renderers.CHARTS.get(chart)
@@ -49,10 +70,19 @@ def clean_config(raw):
     if chart in ("compare", "race") and len(tickers) < 2:
         raise ValueError("This chart needs at least two tickers.")
 
+    interval = raw.get("interval") or datasrc.DEFAULT_INTERVAL
+    if interval not in datasrc.INTERVALS:
+        raise ValueError(f"Unknown interval: {interval}")
+    if datasrc.is_intraday(interval) and not datasrc.intraday_available():
+        raise ValueError(
+            "Intraday needs yfinance, which this deployment doesn't ship. "
+            "Use daily bars, or run Rolltape locally.")
+
     cfg = {
         "chart": chart,
         "tickers": tickers,
-        "start": raw.get("start") or "2024-01-01",
+        "interval": interval,
+        "start": _clamp_start(raw.get("start") or "2024-01-01", interval),
         "end": raw.get("end") or None,
         "duration": max(float(raw.get("duration", 6)), 0.5),
         "hold": max(float(raw.get("hold", 1.5)), 0.0),
@@ -161,6 +191,9 @@ def meta():
         "sizes": {a: {q: list(s) for q, s in qs.items()}
                   for a, qs in renderers.SIZES.items()},
         "fps": {k: v["fps"] for k, v in renderers.ENCODE.items()},
+        "intervals": [{"id": k, "label": v["label"], "days": v["days"]}
+                      for k, v in datasrc.INTERVALS.items()],
+        "intraday": datasrc.intraday_available(),
         "demo": datasrc.is_demo(),
     })
 

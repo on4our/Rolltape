@@ -75,6 +75,20 @@ before animating so the line head moves smoothly rather than hopping between dai
 Any time-based motion should be frame-rate independent — see the race renderer's
 `1 - exp(-11/fps)` smoothing rather than a fixed per-frame constant.
 
+**The x axis depends on the interval.** Daily bars go on a real date axis; intraday bars go
+on their *position*, with the timestamps moved onto the tick labels. This is not a style
+preference — five-minute bars across a week are about two thirds overnight by wall clock,
+so a date axis spends most of the frame drawing a flat line between sessions. Any renderer
+that plots against time must take `x` from `_x_values(index, intraday)`, pass
+`x_dates=not intraday` to `_style_axes`, and call `_position_ticks` when intraday. Label
+text goes through `_range_label` and `_stamp` so a one-day chart reads `09:30` and a
+multi-day one reads `06 Aug`. Anything that maps a date onto the axis — the timeline's
+callouts, the race clock — has to resolve to a bar position too, not to a coordinate.
+
+**Anything per-year is per-bar.** `sqrt(252)` is a count of daily bars. Annualising against
+it on five-minute returns understates volatility by about 8.8x. Use
+`datasrc.periods_per_year(interval)`.
+
 **Mobile CSS.** The narrow-screen media query sits at the *end* of the stylesheet and must
 stay there. It has the same specificity as the base rules, so moving it earlier silently
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
@@ -89,9 +103,12 @@ matters.
 - `preset=slow` on the `max` quality tier is genuinely slow — roughly 70s for a 7.5s
   1080p60 clip — and needs enough memory that small container hosts may OOM-kill ffmpeg.
   `final` uses `medium` for this reason. Worth exposing the preset in the UI.
-- yfinance breaks periodically when Yahoo changes their endpoints. A Stooq fallback in
-  `data.py` would make this robust; not yet written.
-- Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
+- yfinance breaks periodically when Yahoo changes their endpoints. Daily renders survive
+  it — `data.py` falls through to Stooq and the footer names the source. Intraday does not:
+  Stooq serves daily bars and coarser, so there is nothing to fall through to.
+- Intraday is therefore unavailable on the serverless deploy, which ships without yfinance
+  to stay under the bundle ceiling. `/api/meta` reports `intraday: false` there and the
+  interface drops the option rather than offering one that always fails.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
 
@@ -99,11 +116,12 @@ matters.
 
 Near term, in rough priority order:
 
-1. Stooq fallback in `data.py` so renders don't fail when yfinance breaks.
-2. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
-3. Encoder preset exposed in the UI (`final` now defaults to `medium`).
-4. Brand kit: save theme, footer, and default title format as a named preset.
-5. Batch render — one config, many tickers, queued.
+1. Encoder preset exposed in the UI (`final` now defaults to `medium`).
+2. Brand kit: save theme, footer, and default title format as a named preset.
+3. Batch render — one config, many tickers, queued.
+4. Intraday on a deploy. It is local-only while Stooq is the sole serverless source; a
+   licensed feed with an intraday endpoint would close it, and that purchase is already
+   required before a paid tier ships.
 
 Further out, this is being explored as a product. That means watermarking on a free tier,
 render credits, and eventually an API endpoint that accepts a config and returns an MP4.
