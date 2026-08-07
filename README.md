@@ -114,10 +114,26 @@ The code is deployment-ready. These env vars all default to the local behaviour:
 | `ROLLTAPE_STORAGE` | `local` | `local` or `blob` (Vercel Blob) |
 | `ROLLTAPE_JOBS` | `memory` | Job registry backend |
 
-For Vercel specifically: `vercel.json` and `api/index.py` are in place, and
-`requirements-vercel.txt` adds a bundled ffmpeg binary since serverless runtimes ship
-none. Set `ROLLTAPE_STORAGE=blob` and `BLOB_READ_WRITE_TOKEN`, because a serverless
-filesystem is read-only apart from `/tmp` and doesn't persist.
+### Vercel
+
+`vercel.json` and `api/index.py` are in place. Three things in that config are load-bearing,
+so don't drop them:
+
+- `installCommand` points at `requirements-vercel.txt`, which adds a bundled ffmpeg binary.
+  Vercel installs from `requirements.txt` by default and would never see that file — without
+  this, every render fails at the encode step.
+- `includeFiles: templates/**` puts `index.html` in the function bundle. Without it the
+  homepage 404s.
+- `maxDuration: 300` covers a render that takes longer than the old default.
+
+`config.py` detects Vercel via its `VERCEL` env var and moves the writable paths to `/tmp`,
+so the cache doesn't try to write next to the read-only source.
+
+You still have to set up storage yourself: create a Blob store in the Vercel dashboard
+(which injects `BLOB_READ_WRITE_TOKEN`) and set `ROLLTAPE_STORAGE=blob`. `/tmp` doesn't
+survive past an invocation, so without this a finished MP4 is gone before you can download it.
+
+Expect a slow first request after idle — importing matplotlib and pandas is not quick.
 
 **Two things are still open before a deploy is production-safe:**
 

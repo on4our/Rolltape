@@ -9,9 +9,14 @@ import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Vercel sets this. Everything next to the source is read-only there, and /tmp is the only
+# writable location — so the defaults have to move rather than fail on first write.
+SERVERLESS = bool(os.environ.get("VERCEL"))
+_WRITABLE = "/tmp/rolltape" if SERVERLESS else HERE
+
 
 def _path(env, default):
-    return os.path.abspath(os.environ.get(env) or os.path.join(HERE, default))
+    return os.path.abspath(os.environ.get(env) or os.path.join(_WRITABLE, default))
 
 
 def _flag(env):
