@@ -67,7 +67,7 @@ time.
 ```
 app.py          Flask server, render queue, job tracking
 renderers.py    All six chart types, themes, easing, export
-data.py         Yahoo fetch with disk cache, plus the demo generator
+data.py         Yahoo fetch, Stooq fallback, disk cache, plus the demo generator
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go — local disk or object storage
 jobs.py         The render job registry
@@ -142,11 +142,15 @@ the progress polling.
 A render peaks around 127 MB of RAM at 1080p, so a small instance is fine. It's CPU, not
 memory, that decides how fast a clip renders.
 
-### Vercel
+### Vercel — experimental, and currently can't finish a render
 
-Serverless costs noticeably more effort than the above, and the job-registry caveat at the
-bottom of this section applies to it specifically. `vercel.json` and `api/index.py` are in
-place. Four things in that setup are load-bearing, so don't drop them:
+Serverless costs noticeably more effort than the above, and the first caveat at the bottom
+of this section is a blocker rather than a rough edge: a render started on Vercel today may
+never produce a file. The plumbing below is real and worth keeping — it is most of what a
+working deploy needs — but read that caveat before spending time here.
+
+`vercel.json` and `api/index.py` are in place. Four things in that setup are load-bearing,
+so don't drop them:
 
 - `MPLCONFIGDIR` is set in `api/index.py` before anything imports matplotlib. matplotlib
   builds a font cache under `$HOME` on first import, which is read-only there — the crash
@@ -173,12 +177,17 @@ Expect a slow first request after idle — importing matplotlib and pandas is no
 
 **Two things are still open before a deploy is production-safe:**
 
-1. **The job registry is process memory** — a serverless problem only. `ROLLTAPE_JOBS=memory`
-   is the only backend implemented. Serverless instances don't share memory, so a
-   `/api/jobs` poll can land on an instance that never saw the job; at single-user traffic
-   this mostly works and fails silently when it doesn't. A shared KV backend behind the seam
-   in `jobs.py` fixes it. On a container host the question doesn't arise — there's one
-   process, which is what the design assumes.
+1. **Renders don't survive the request** — a serverless problem only, and a bigger one than
+   a missing job registry. `/api/render` returns as soon as the job is queued, and the
+   render itself happens on a background thread. A serverless instance is frozen once its
+   response is sent, so that thread may never get to finish — the MP4 is not late, it is
+   never produced. On top of that, `ROLLTAPE_JOBS=memory` is the only backend implemented,
+   so a `/api/jobs` poll landing on a different instance sees no job at all.
+
+   Both have the same fix and it isn't a small one: an external queue, a worker that runs
+   outside the request, and a shared registry behind the seam in `jobs.py`. Until that
+   exists, treat Vercel as experimental. On a container host neither problem arises —
+   one long-lived process is what the design assumes, and that path works today.
 2. **The data source.** yfinance scrapes Yahoo, and redistributing that data to paying
    users isn't permitted. A licensed feed has to replace it before anything ships
    commercially — see CLAUDE.md.
