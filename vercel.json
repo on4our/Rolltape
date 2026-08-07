@@ -1,5 +1,5 @@
 {
-  "installCommand": "pip install --no-cache-dir -r requirements-vercel.txt",
+  "installCommand": "pip install --no-cache-dir -r requirements-vercel.txt && sh scripts/trim-bundle.sh",
   "functions": {
     "api/index.py": {
       "maxDuration": 300,
