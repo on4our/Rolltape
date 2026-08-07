@@ -12,8 +12,7 @@ import time
 import uuid
 from queue import Queue
 
-import matplotlib.pyplot as plt
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 import config
 import data as datasrc
@@ -28,6 +27,11 @@ app = Flask(__name__, static_folder=None, template_folder="templates")
 
 QUEUE = Queue()
 RENDER_LOCK = threading.Lock()  # matplotlib state is global; one draw at a time
+
+# The preview is drawn at draft dimensions and then base64'd into a JSON response, so it
+# trades a little sharpness for a smaller payload. The still export renders at the real
+# frame size instead — see /api/still.
+PREVIEW_DPI = 90
 
 datasrc.set_demo(config.DEMO)
 
@@ -70,14 +74,18 @@ def clean_config(raw):
         "annotations": raw.get("annotations") or [],
         "unit": raw.get("unit", ""),
         "decimals": int(raw.get("decimals", 1) or 1),
+        "transparent": bool(raw.get("transparent", False)),
     }
     return cfg
 
 
-def slug(cfg):
+def slug(cfg, ext=None):
     base = "-".join(cfg["tickers"][:3]) or cfg["chart"]
     name = f"{cfg['chart']}_{base}_{time.strftime('%m%d-%H%M%S')}"
-    return re.sub(r"[^A-Za-z0-9_.-]", "", name) + ".mp4"
+    # The container follows the codec, and the codec follows the alpha setting — ask
+    # renderers rather than deciding it twice.
+    ext = ext or renderers.output_extension(cfg["transparent"])
+    return re.sub(r"[^A-Za-z0-9_.-]", "", name) + ext
 
 
 def describe_error(exc):
@@ -170,16 +178,34 @@ def preview():
     try:
         cfg = clean_config(request.get_json(force=True))
         at = float(request.args.get("at", 0.75))
+        buf = io.BytesIO()
         with RENDER_LOCK:
-            fig = renderers.still_frame(cfg, at=at)
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png",
-                        facecolor=renderers.THEMES[cfg["theme"]]["bg"], dpi=90)
-            plt.close(fig)
+            renderers.save_still(cfg, buf, at=at, dpi=PREVIEW_DPI)
         b64 = base64.b64encode(buf.getvalue()).decode()
         return jsonify({"image": f"data:image/png;base64,{b64}"})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/still")
+def still():
+    """One frame at full output resolution, as a downloadable PNG.
+
+    Same config, same frame, same size as the video — which makes it the thumbnail for
+    the video without a screenshot or a round trip through an editor.
+    """
+    try:
+        cfg = clean_config(request.get_json(force=True))
+        at = float(request.args.get("at", 0.75))
+        buf = io.BytesIO()
+        with RENDER_LOCK:
+            renderers.save_still(cfg, buf, at=at, quality=cfg["quality"])
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+
+    name = slug(cfg, ext=".png")
+    return Response(buf.getvalue(), mimetype="image/png",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.post("/api/render")

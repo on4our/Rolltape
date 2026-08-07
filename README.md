@@ -42,9 +42,29 @@ narrating.
   Final is 1080p60. Max is 1440p60.
 - **Theme** — Midnight, Carbon, Paper and Terminal. Edit the `THEMES` dict at the top
   of `renderers.py` to add your channel's colours.
+- **Background** — Solid paints the theme colour and writes an H.264 MP4. Transparent
+  drops the backdrop entirely and writes ProRes 4444 in a `.mov`.
 
 The slate in the top bar always shows exactly what you're about to produce: resolution,
-frame rate, frame count and running time.
+frame rate, frame count, running time and codec.
+
+## Overlays
+
+Set **Background** to Transparent and the chart comes out with a real alpha channel —
+drop it on a timeline over your talking-head footage and only the line, labels and grid
+are drawn. No keying, no mattes, no luma tricks.
+
+The format is ProRes 4444 in a `.mov`, because that is what every editor ingests without
+a transcode. It is an intermediate rather than a delivery format, so expect large files —
+a few hundred MB for a 1080p60 clip is normal. The preview shows a checkerboard behind the
+chart so you can see what is actually transparent before you commit to the render.
+
+## Thumbnails
+
+**Save this frame** writes the frame you are previewing as a PNG at the full output
+resolution — the same chart, the same moment, the same size as the video. Drag the scrub
+bar to the point you want, hit the button, and that is your thumbnail. With Background set
+to Transparent you get a transparent PNG instead, ready to composite.
 
 ## Timing
 

@@ -54,9 +54,16 @@ def render_x(cfg, ctx, out, progress=None, still=None) -> str | Figure
   font/line scale factor so a 720p draft is visually proportional to a 1080p final.
   **Multiply every font size and line width by `ctx.s`.** Forgetting this is the most
   common bug when adding a chart type.
+- **Anything drawn *behind* the chart must use `ctx.bg`, never `theme["bg"]`.** `ctx.bg`
+  is `"none"` on a transparent export, so a renderer that reaches for the theme colour
+  directly paints an opaque backdrop into what was supposed to be an overlay. Same class
+  of bug as forgetting `ctx.s`, and just as invisible until someone drops the clip on a
+  timeline. The one deliberate exception is the candlestick readout plate, which is a
+  legibility device rather than a background — it stays on the theme colour.
 - `still=<float 0..1>` returns the Figure at that point through the animation instead of
-  encoding. This powers the live preview. Every renderer must support it — the preview is
-  the main reason the tool is pleasant to use.
+  encoding. This powers the live preview *and* the PNG still export, so it has to be the
+  real frame — `save_still()` renders it at full output resolution for thumbnails. Every
+  renderer must support it.
 - `progress(i, n)` is passed straight to matplotlib's `progress_callback`.
 
 To add a chart type: write the function, add an entry to `CHARTS` at the bottom of
@@ -68,6 +75,10 @@ automatically. Chart-specific form fields need a `data-for="yourchart"` attribut
 
 **Themes.** All colour lives in the `THEMES` dict at the top of `renderers.py`. Never
 hardcode a colour inside a renderer. Adding a theme requires no other change.
+
+**Alpha.** Transparent renders swap codec *and* container — h264 in an MP4 has no alpha
+channel, so they go out as ProRes 4444 in a `.mov`. `renderers.output_extension()` is the
+single source of truth for which; `app.py` asks it rather than deciding separately.
 
 **Motion.** `ease()` maps normalised time to progress; `_plan()` maps frame index to a
 position along a densely-interpolated series. Series are upsampled to ~2x the frame count
