@@ -69,6 +69,12 @@ automatically. Chart-specific form fields need a `data-for="yourchart"` attribut
 **Themes.** All colour lives in the `THEMES` dict at the top of `renderers.py`. Never
 hardcode a colour inside a renderer. Adding a theme requires no other change.
 
+**Quality tiers.** A tier owns `crf` and `preset` outright, but only *seeds* `fps` and
+`res` — the slate overrides those two independently. `clean_config()` resolves both to
+concrete numbers, so `cfg["fps"]` and `cfg["resolution"]` are always set and nothing
+downstream re-derives them from the tier. `SIZES` is keyed by the short side (720, 1080,
+1440), and the aspect decides which side that is.
+
 **Motion.** `ease()` maps normalised time to progress; `_plan()` maps frame index to a
 position along a densely-interpolated series. Series are upsampled to ~2x the frame count
 before animating so the line head moves smoothly rather than hopping between daily closes.

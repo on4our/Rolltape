@@ -42,6 +42,14 @@ button,input,select,textarea{font:inherit;color:inherit}
   letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 .slate b{color:var(--ink);font-weight:500}
+/* The two editable numbers. Dotted underline is the only affordance that fits in a
+   slate this small — a border or a chip would read as a second toolbar. */
+.slate button{
+  background:none;border:0;border-bottom:1px dotted var(--dim);border-radius:0;
+  padding:1px 2px;margin:0;cursor:pointer;color:var(--ink);font-weight:500;
+}
+.slate button:hover{color:var(--amber);border-bottom-color:var(--amber)}
+.slate button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 
 .layout{display:grid;grid-template-columns:352px minmax(0,1fr);align-items:start}
 
@@ -186,6 +194,7 @@ button,input,select,textarea{font:inherit;color:inherit}
   .topbar{height:auto;padding:8px 14px;flex-wrap:wrap;row-gap:6px}
   .pill{white-space:nowrap}
   .slate{margin-left:0;flex-basis:100%;font-size:11px}
+  .slate button{padding:5px 4px}  /* thumb-sized tap target, not an 11px word */
   .rail{height:auto;position:static;border-right:0;border-top:1px solid var(--edge)}
   .stage{padding:10px}
   .frame{min-height:0}
@@ -206,7 +215,11 @@ button,input,select,textarea{font:inherit;color:inherit}
 <div class="topbar">
   <div class="wordmark">Roll<span>·</span>tape</div>
   <div class="pill warn" id="demoPill" hidden>Demo data</div>
-  <div class="slate" id="slate">—</div>
+  <div class="slate" id="slate">
+    <button type="button" id="resBtn">—</button> ·
+    <button type="button" id="fpsBtn">—</button> ·
+    <span id="slateRest"></span>
+  </div>
 </div>
 
 <div class="layout">
@@ -310,6 +323,7 @@ button,input,select,textarea{font:inherit;color:inherit}
           <button data-v="final" aria-pressed="true">Final</button>
           <button data-v="max" aria-pressed="false">Max</button>
         </div>
+        <div class="hint">Click the size or frame rate in the slate to change either one</div>
       </div>
     </div>
 
@@ -359,12 +373,13 @@ const esc = s => String(s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight",
-  aspect:"16:9", quality:"final", meta:null, maxTickers:1
+  aspect:"16:9", quality:"final", fps:60, resolution:1080, meta:null, maxTickers:1
 };
 
 /* ---------- boot ---------- */
 fetch("/api/meta").then(r=>r.json()).then(m=>{
   state.meta = m;
+  applyTier();
   $("#demoPill").hidden = !m.demo;
   $("#modes").innerHTML = m.charts.map(c=>`
     <button class="mode" data-id="${c.id}" aria-pressed="${c.id===state.chart}">
@@ -392,11 +407,12 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
 });
 
 /* ---------- segmented controls ---------- */
-function seg(id, key, cast = v=>v){
+function seg(id, key, cast = v=>v, after = null){
   $(id).addEventListener("click", e=>{
     const b = e.target.closest("button"); if(!b) return;
     state[key] = cast(b.dataset.v);
     [...$(id).children].forEach(x=>x.setAttribute("aria-pressed", x===b));
+    if (after) after();
     schedule();
   });
 }
@@ -404,7 +420,25 @@ $("#tickers").addEventListener("input", ()=>{ state.tickersTouched = true; });
 seg("#normalizeSeg","normalize",Number);
 seg("#easingSeg","easing");
 seg("#aspectSeg","aspect");
-seg("#qualitySeg","quality");
+seg("#qualitySeg","quality", v=>v, applyTier);
+
+/* ---------- editable slate ---------- */
+// A tier seeds frame rate and resolution; the slate then overrides either one. Picking a
+// tier again is how you get back to its pairing, so the two controls can't drift apart.
+function applyTier(){
+  const t = state.meta.tiers[state.quality];
+  state.fps = t.fps; state.resolution = t.res;
+}
+function cycle(btn, list, key){
+  $(btn).addEventListener("click", ()=>{
+    if (!state.meta) return;
+    const opts = state.meta[list];
+    state[key] = opts[(opts.indexOf(state[key]) + 1) % opts.length];
+    slate();  // the preview always renders at draft size, so nothing else to redraw
+  });
+}
+cycle("#resBtn", "resolutions", "resolution");
+cycle("#fpsBtn", "fps_choices", "fps");
 
 /* ---------- chart-specific fields ---------- */
 function applyChart(){
@@ -469,6 +503,7 @@ function config(){
     duration: +$("#duration").value, hold: +$("#hold").value,
     easing: state.easing, theme: state.theme,
     aspect: state.aspect, quality: state.quality,
+    fps: state.fps, resolution: state.resolution,
     title: $("#title").value, subtitle: $("#subtitle").value, footer: $("#footer").value,
     normalize: !!state.normalize,
     max_candles: +$("#maxCandles").value,
@@ -481,14 +516,21 @@ function config(){
 
 function slate(){
   const m = state.meta; if(!m) return;
-  const [w,h] = m.sizes[state.aspect][state.quality];
-  const fps = m.fps[state.quality];
+  const [w,h] = m.sizes[state.aspect][state.resolution];
+  const fps = state.fps;
   const secs = (+$("#duration").value) + (+$("#hold").value);
   const frames = Math.round(secs * fps);
   const mm = String(Math.floor(secs/60)).padStart(2,"0");
   const ss = (secs%60).toFixed(1).padStart(4,"0");
-  $("#slate").innerHTML =
-    `<b>${w}×${h}</b> · ${fps} fps · <b>${frames}</b> frames · ${mm}:${ss}`;
+  const res = $("#resBtn"), rate = $("#fpsBtn");
+  res.textContent = `${w}×${h}`;
+  res.setAttribute("aria-label",
+    `Resolution ${state.resolution}p, ${w} by ${h}. Activate to change.`);
+  res.title = `${state.resolution}p — click for ${m.resolutions.join("p / ")}p`;
+  rate.textContent = `${fps} fps`;
+  rate.setAttribute("aria-label", `Frame rate ${fps} fps. Activate to change.`);
+  rate.title = `click for ${m.fps_choices.join(" / ")} fps`;
+  $("#slateRest").innerHTML = `<b>${frames}</b> frames · ${mm}:${ss}`;
 }
 
 /* ---------- preview ---------- */

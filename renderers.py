@@ -56,20 +56,28 @@ THEMES = {
     },
 }
 
+# Keyed by the short side — the number people say when they name a resolution. The aspect
+# decides which side it lands on, so 720 is 1280x720 wide and 720x1280 tall.
 SIZES = {
-    "16:9": {"draft": (1280, 720), "final": (1920, 1080), "max": (2560, 1440)},
-    "9:16": {"draft": (720, 1280), "final": (1080, 1920), "max": (1440, 2560)},
-    "1:1": {"draft": (720, 720), "final": (1080, 1080), "max": (1440, 1440)},
+    "16:9": {720: (1280, 720), 1080: (1920, 1080), 1440: (2560, 1440)},
+    "9:16": {720: (720, 1280), 1080: (1080, 1920), 1440: (1440, 2560)},
+    "1:1": {720: (720, 720), 1080: (1080, 1080), 1440: (1440, 1440)},
 }
+RESOLUTIONS = (720, 1080, 1440)
+FPS_CHOICES = (30, 60)
 
 # "final" used preset=slow, but slow's extra reference/lookahead frames were getting
 # ffmpeg OOM-killed on small container hosts (and took ~70s for a 7.5s clip). At CRF 16
 # the visual difference from medium is not worth either cost. "max" keeps slow for the
 # rare render where it matters — on a memory-limited host, that's the tier to avoid.
+#
+# "fps" and "res" are the tier's starting point, not a fixed property of it: the slate in
+# the UI overrides either one, so a 1080p tier can be sent out at 30fps or 720p without
+# giving up CRF 16. crf and preset stay tied to the tier.
 ENCODE = {
-    "draft": {"fps": 30, "crf": "23", "preset": "veryfast"},
-    "final": {"fps": 60, "crf": "16", "preset": "medium"},
-    "max": {"fps": 60, "crf": "14", "preset": "slow"},
+    "draft": {"fps": 30, "crf": "23", "preset": "veryfast", "res": 720},
+    "final": {"fps": 60, "crf": "16", "preset": "medium", "res": 1080},
+    "max": {"fps": 60, "crf": "14", "preset": "slow", "res": 1440},
 }
 
 FONT_STACK = ["Inter", "Helvetica Neue", "Arial", "Liberation Sans", "DejaVu Sans"]
@@ -96,11 +104,13 @@ class Ctx:
         return self.h > self.w
 
 
-def make_ctx(theme_name, aspect, quality) -> Ctx:
+def make_ctx(theme_name, aspect, quality, fps=None, res=None) -> Ctx:
     theme = THEMES.get(theme_name, THEMES["midnight"])
-    w, h = SIZES.get(aspect, SIZES["16:9"]).get(quality, SIZES["16:9"]["final"])
     enc = ENCODE.get(quality, ENCODE["final"])
-    return Ctx(theme=theme, w=w, h=h, fps=enc["fps"], crf=enc["crf"], preset=enc["preset"])
+    sizes = SIZES.get(aspect, SIZES["16:9"])
+    w, h = sizes.get(res or enc["res"], sizes[enc["res"]])
+    return Ctx(theme=theme, w=w, h=h, fps=int(fps or enc["fps"]),
+               crf=enc["crf"], preset=enc["preset"])
 
 
 # ---------------------------------------------------------------------------
@@ -779,7 +789,7 @@ def render(cfg, out_path, progress=None):
         raise ValueError(f"Unknown chart type: {kind}")
     datasrc.reset_sources()
     ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"),
-                   cfg.get("quality", "final"))
+                   cfg.get("quality", "final"), cfg.get("fps"), cfg.get("resolution"))
     return CHARTS[kind]["fn"](cfg, ctx, out_path, progress=progress)
 
 

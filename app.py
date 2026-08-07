@@ -35,6 +35,20 @@ datasrc.set_demo(config.DEMO)
 # ---------------------------------------------------------------------------
 # Config normalising
 # ---------------------------------------------------------------------------
+def _choice(value, options, default, label):
+    """Pick one of a fixed set of numbers, falling back to the tier default when unset."""
+    if value in (None, "", 0):
+        return default
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = None
+    if value not in options:
+        allowed = ", ".join(str(o) for o in options)
+        raise ValueError(f"{label} must be one of: {allowed}.")
+    return value
+
+
 def clean_config(raw):
     chart = raw.get("chart", "line")
     spec = renderers.CHARTS.get(chart)
@@ -49,6 +63,16 @@ def clean_config(raw):
     if chart in ("compare", "race") and len(tickers) < 2:
         raise ValueError("This chart needs at least two tickers.")
 
+    # The quality tier sets crf and preset, and seeds frame rate and resolution. Either of
+    # those two can be overridden on its own — the slate in the UI edits them directly —
+    # so resolve them to concrete numbers here and let the renderers stop caring which
+    # tier they came from.
+    quality = raw.get("quality", "final")
+    enc = renderers.ENCODE.get(quality) or renderers.ENCODE["final"]
+    fps = _choice(raw.get("fps"), renderers.FPS_CHOICES, enc["fps"], "Frame rate")
+    resolution = _choice(raw.get("resolution"), renderers.RESOLUTIONS, enc["res"],
+                         "Resolution")
+
     cfg = {
         "chart": chart,
         "tickers": tickers,
@@ -59,7 +83,9 @@ def clean_config(raw):
         "easing": raw.get("easing", "out"),
         "theme": raw.get("theme", "midnight"),
         "aspect": raw.get("aspect", "16:9"),
-        "quality": raw.get("quality", "final"),
+        "quality": quality,
+        "fps": fps,
+        "resolution": resolution,
         "title": (raw.get("title") or "").strip() or None,
         "subtitle": (raw.get("subtitle") or "").strip() or None,
         "footer": (raw.get("footer") or "").strip() or None,
@@ -158,9 +184,12 @@ def meta():
         "themes": [{"id": k, "label": v["label"], "bg": v["bg"],
                     "swatch": [v["up"], v["down"], *v["series"][:3]]}
                    for k, v in renderers.THEMES.items()],
-        "sizes": {a: {q: list(s) for q, s in qs.items()}
-                  for a, qs in renderers.SIZES.items()},
-        "fps": {k: v["fps"] for k, v in renderers.ENCODE.items()},
+        "sizes": {a: {str(r): list(s) for r, s in rs.items()}
+                  for a, rs in renderers.SIZES.items()},
+        "resolutions": list(renderers.RESOLUTIONS),
+        "fps_choices": list(renderers.FPS_CHOICES),
+        "tiers": {k: {"fps": v["fps"], "res": v["res"]}
+                  for k, v in renderers.ENCODE.items()},
         "demo": datasrc.is_demo(),
     })
 
@@ -190,7 +219,6 @@ def start_render():
         return jsonify({"error": str(exc)}), 400
 
     job_id = uuid.uuid4().hex[:10]
-    fps = renderers.ENCODE[cfg["quality"]]["fps"]
     jobstore.create({
         "id": job_id,
         "cfg": cfg,
@@ -199,7 +227,7 @@ def start_render():
         "chart": renderers.CHARTS[cfg["chart"]]["label"],
         "status": "queued",
         "progress": 0,
-        "total": int((cfg["duration"] + cfg["hold"]) * fps),
+        "total": int((cfg["duration"] + cfg["hold"]) * cfg["fps"]),
         "created": time.time(),
         "url": None,
         "error": None,

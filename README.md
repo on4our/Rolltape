@@ -46,6 +46,11 @@ narrating.
 The slate in the top bar always shows exactly what you're about to produce: resolution,
 frame rate, frame count and running time.
 
+The resolution and frame rate in the slate are clickable. Resolution cycles 720p, 1080p
+and 1440p; frame rate toggles 30 and 60. Either can be changed on its own, so a Final
+render at 30fps keeps CRF 16 rather than dropping to Draft's compression. A quality tier
+sets both back to its own pairing, which is how you undo an override.
+
 ## Timing
 
 Reveal length plus hold equals total video length. The hold freezes the finished chart
