@@ -6,7 +6,9 @@ import os
 import numpy as np
 import pandas as pd
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+import config
+
+CACHE_DIR = config.CACHE_DIR
 _DEMO = False
 
 

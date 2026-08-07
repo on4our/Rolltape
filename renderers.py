@@ -1,5 +1,6 @@
 """Animated chart renderers. Every chart type shares one theme, easing and export path."""
 
+import shutil
 from dataclasses import dataclass
 
 import numpy as np
@@ -182,7 +183,30 @@ def _glow(ax, color, ctx, zorder=2):
             for w, a in ((11, 0.05), (7, 0.09), (4.5, 0.15))]
 
 
+_FFMPEG_CHECKED = False
+
+
+def _resolve_ffmpeg():
+    """Point matplotlib at a bundled ffmpeg when the system has none.
+
+    Locally ffmpeg is on PATH and imageio_ffmpeg is never imported. Serverless runtimes
+    ship no ffmpeg binary at all, so the pip-installed static build is the only option.
+    """
+    global _FFMPEG_CHECKED
+    if _FFMPEG_CHECKED:
+        return
+    _FFMPEG_CHECKED = True
+    if shutil.which("ffmpeg"):
+        return
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        return  # let FFMpegWriter raise its own, clearer, error
+    matplotlib.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
+
+
 def _export(fig, anim, path, ctx, progress):
+    _resolve_ffmpeg()
     writer = FFMpegWriter(
         fps=ctx.fps, codec="libx264", bitrate=-1,
         extra_args=["-pix_fmt", "yuv420p", "-crf", ctx.crf, "-preset", ctx.preset,

@@ -574,7 +574,7 @@ async function pollJobs(){
           <div class="job-meta">${meta}</div>
           ${j.status==="rendering" ? `<div class="bar"><i style="width:${pct}%"></i></div>`:""}
         </div>
-        ${j.status==="done" ? `<a class="dl" href="/outputs/${j.file}" download>Download</a>`:`<span></span>`}
+        ${j.status==="done" ? `<a class="dl" href="${j.url || `/outputs/${j.file}`}" download>Download</a>`:`<span></span>`}
       </div>`;
     }).join("");
     const busy = jobs.some(j=>j.status==="rendering"||j.status==="queued");

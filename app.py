@@ -8,24 +8,26 @@ import re
 import threading
 import time
 import uuid
-from collections import OrderedDict
 from queue import Queue
 
 import matplotlib.pyplot as plt
 from flask import Flask, jsonify, request, send_from_directory
 
+import config
 import data as datasrc
+import jobs as jobstore
 import renderers
+import storage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(HERE, "outputs")
-os.makedirs(OUT_DIR, exist_ok=True)
+OUT_DIR = config.OUT_DIR
 
 app = Flask(__name__, static_folder=None, template_folder="templates")
 
-JOBS = OrderedDict()
 QUEUE = Queue()
 RENDER_LOCK = threading.Lock()  # matplotlib state is global; one draw at a time
+
+datasrc.set_demo(config.DEMO)
 
 
 # ---------------------------------------------------------------------------
@@ -82,27 +84,27 @@ def slug(cfg):
 def worker():
     while True:
         job_id = QUEUE.get()
-        job = JOBS.get(job_id)
+        job = jobstore.get(job_id)
         if not job or job["status"] == "cancelled":
             QUEUE.task_done()
             continue
-        job["status"] = "rendering"
-        job["started"] = time.time()
+        started = time.time()
+        jobstore.update(job_id, status="rendering", started=started)
         try:
-            path = os.path.join(OUT_DIR, job["file"])
+            path = storage.render_target(job["file"])
 
             def progress(i, n):
-                job["progress"] = i
-                job["total"] = n
+                jobstore.update(job_id, progress=i, total=n)
 
             with RENDER_LOCK:
                 renderers.render(job["cfg"], path, progress=progress)
-            job["status"] = "done"
-            job["seconds"] = round(time.time() - job["started"], 1)
-            job["size_mb"] = round(os.path.getsize(path) / 1e6, 2)
+            # Size has to be read before publish; a remote backend removes the temp file.
+            size_mb = round(os.path.getsize(path) / 1e6, 2)
+            url = storage.publish(path, job["file"])
+            jobstore.update(job_id, status="done", url=url, size_mb=size_mb,
+                            seconds=round(time.time() - started, 1))
         except Exception as exc:  # noqa: BLE001
-            job["status"] = "failed"
-            job["error"] = str(exc)
+            jobstore.update(job_id, status="failed", error=str(exc))
         finally:
             QUEUE.task_done()
 
@@ -160,7 +162,7 @@ def start_render():
 
     job_id = uuid.uuid4().hex[:10]
     fps = renderers.ENCODE[cfg["quality"]]["fps"]
-    JOBS[job_id] = {
+    jobstore.create({
         "id": job_id,
         "cfg": cfg,
         "file": slug(cfg),
@@ -170,8 +172,9 @@ def start_render():
         "progress": 0,
         "total": int((cfg["duration"] + cfg["hold"]) * fps),
         "created": time.time(),
+        "url": None,
         "error": None,
-    }
+    })
     QUEUE.put(job_id)
     return jsonify({"id": job_id})
 
@@ -179,16 +182,16 @@ def start_render():
 @app.get("/api/jobs")
 def list_jobs():
     out = []
-    for j in list(JOBS.values())[-25:][::-1]:
+    for j in jobstore.recent():
         out.append({k: v for k, v in j.items() if k != "cfg"})
     return jsonify(out)
 
 
 @app.post("/api/jobs/<job_id>/cancel")
 def cancel(job_id):
-    job = JOBS.get(job_id)
+    job = jobstore.get(job_id)
     if job and job["status"] == "queued":
-        job["status"] = "cancelled"
+        jobstore.update(job_id, status="cancelled")
         return jsonify({"ok": True})
     return jsonify({"ok": False}), 400
 
@@ -211,7 +214,7 @@ def main():
     p.add_argument("--demo", action="store_true",
                    help="Use generated data instead of Yahoo (for offline testing)")
     a = p.parse_args()
-    datasrc.set_demo(a.demo)
+    datasrc.set_demo(a.demo or config.DEMO)
     print(f"\n  Rolltape running at http://{a.host}:{a.port}"
           f"{'  [demo data]' if a.demo else ''}\n")
     app.run(host=a.host, port=a.port, threaded=True, debug=False)

@@ -1,0 +1,4 @@
+# Serverless-only extras. CLAUDE.md pins the core dependency list deliberately, so this
+# stays separate — a local run installs requirements.txt and uses system ffmpeg.
+-r requirements.txt
+imageio-ffmpeg>=0.4.9

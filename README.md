@@ -63,12 +63,51 @@ time.
 app.py          Flask server, render queue, job tracking
 renderers.py    All six chart types, themes, easing, export
 data.py         Yahoo fetch with disk cache, plus the demo generator
+config.py       Env-var configuration, all defaulting to the local setup
+storage.py      Where finished MP4s go — local disk or object storage
+jobs.py         The render job registry
 templates/      The interface
 outputs/        Rendered MP4s land here
 ```
 
 Price data is cached in `.cache/` so repeated renders of the same range don't re-download.
 **Clear price cache** in the interface wipes it when you want fresh numbers.
+
+## Deploying
+
+Rolltape is a local tool and runs best that way — rendering is CPU-bound, so your own
+machine is usually faster than a small cloud box, and it costs nothing. **Everything below
+is optional; running locally needs none of it.**
+
+The important thing to understand before hosting it: rendering happens entirely on the
+server. The browser only displays a PNG preview and polls for progress. So wherever you
+deploy it, that machine's CPU does ~70 seconds of work per render, billed to you.
+
+The code is deployment-ready. These env vars all default to the local behaviour:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ROLLTAPE_OUT_DIR` | `./outputs` | Where MP4s are written |
+| `ROLLTAPE_CACHE_DIR` | `./.cache` | Where the price cache lives |
+| `ROLLTAPE_DEMO` | off | Same as `--demo`, for hosts with no CLI |
+| `ROLLTAPE_STORAGE` | `local` | `local` or `blob` (Vercel Blob) |
+| `ROLLTAPE_JOBS` | `memory` | Job registry backend |
+
+For Vercel specifically: `vercel.json` and `api/index.py` are in place, and
+`requirements-vercel.txt` adds a bundled ffmpeg binary since serverless runtimes ship
+none. Set `ROLLTAPE_STORAGE=blob` and `BLOB_READ_WRITE_TOKEN`, because a serverless
+filesystem is read-only apart from `/tmp` and doesn't persist.
+
+**Two things are still open before a deploy is production-safe:**
+
+1. **The job registry is process memory.** `ROLLTAPE_JOBS=memory` is the only backend
+   implemented. Serverless instances don't share memory, so a `/api/jobs` poll can land
+   on an instance that never saw the job. At single-user traffic this mostly works and
+   fails silently when it doesn't — a shared KV backend behind the seam in `jobs.py`
+   fixes it properly.
+2. **The data source.** yfinance scrapes Yahoo, and redistributing that data to paying
+   users isn't permitted. A licensed feed has to replace it before anything ships
+   commercially — see CLAUDE.md.
 
 ## Notes
 
