@@ -24,13 +24,16 @@ ffmpeg must be on PATH. Everything else is pip.
 app.py          Flask routes, single-threaded render queue, job state
 renderers.py    Six chart types + themes + easing + ffmpeg export
 data.py         Yahoo fetch (yfinance) with CSV disk cache, plus demo generator
+presets.py      Named brand kits, saved to one JSON file
 templates/      One HTML file, inline CSS and JS, no build step
 outputs/        Rendered MP4s
 ```
 
 There is deliberately no frontend build step and no database. Job state is an in-memory
-`OrderedDict` that resets on restart. Don't add a build pipeline or an ORM without a
-concrete reason.
+`OrderedDict` that resets on restart, which is fine — a job outlives its render by
+minutes. Brand kits are the exception and the only state meant to survive: `presets.py`
+keeps them in a single JSON document, written atomically, read fresh on every call. That
+is still not a database, and a build pipeline or an ORM still needs a concrete reason.
 
 ## How a render works
 
@@ -80,6 +83,14 @@ stay there. It has the same specificity as the base rules, so moving it earlier 
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
 anything smaller.
 
+**Brand kits.** A kit is theme, footer and a default title template. The client applies a
+kit to its own form state and sends the resolved values, so the server never needs to know
+which kit is active — `presets.py` is just where they are kept. The one exception is the
+title template: `format_title()` fills it in `clean_config()`, so the preview and the
+render agree and an API caller gets it too. Its tokens are deliberately limited to what
+the config knows (`{ticker}`, `{tickers}`, `{chart}`) — the date range and return live in
+each chart's subtitle and aren't known until the data is fetched.
+
 **Threading.** matplotlib's pyplot state is global. `RENDER_LOCK` serialises previews and
 renders. Don't parallelise renders in-process — use separate processes if throughput ever
 matters.
@@ -101,13 +112,14 @@ matters.
 
 Near term, in rough priority order:
 
-1. Brand kit: save theme, footer, and default title format as a named preset.
-2. Batch render — one config, many tickers, queued.
-3. Frame-drawing speed — the only lever that actually shortens a render. See the first
+1. Batch render — one config, many tickers, queued. The queue, worker, progress polling
+   and cancel already handle N jobs, so this is mostly a loop over `jobstore.create`.
+2. Frame-drawing speed — the only lever that actually shortens a render. See the first
    known rough edge for where the time really goes.
 
-Done: the Stooq fallback, and the encoder preset (`final` moved from `slow` to `medium`,
-with an Auto/Faster/Slower override in the UI). Intraday is deliberately not planned.
+Done: the Stooq fallback; the encoder preset (`final` moved from `slow` to `medium`, with
+an Auto/Faster/Slower override in the UI); and brand kits. Intraday is deliberately not
+planned.
 
 Further out, this is being explored as a product. That means watermarking on a free tier,
 render credits, and eventually an API endpoint that accepts a config and returns an MP4.

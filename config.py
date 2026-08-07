@@ -25,6 +25,8 @@ def _flag(env):
 
 OUT_DIR = _path("ROLLTAPE_OUT_DIR", "outputs")
 CACHE_DIR = _path("ROLLTAPE_CACHE_DIR", ".cache")
+# Brand kits are the one bit of state meant to outlive a restart. See presets.py.
+PRESETS_PATH = _path("ROLLTAPE_PRESETS", "presets.json")
 
 # Backend selection. A local run never needs anything but these two.
 STORAGE = (os.environ.get("ROLLTAPE_STORAGE") or "local").strip().lower()

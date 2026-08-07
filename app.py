@@ -16,6 +16,7 @@ from flask import Flask, jsonify, request, send_from_directory
 import config
 import data as datasrc
 import jobs as jobstore
+import presets
 import renderers
 import storage
 
@@ -33,6 +34,26 @@ datasrc.set_demo(config.DEMO)
 # ---------------------------------------------------------------------------
 # Config normalising
 # ---------------------------------------------------------------------------
+def format_title(fmt, chart, tickers):
+    """Fill a brand kit's default title.
+
+    Only tokens knowable from the config go in here — the date range and return live in
+    each chart's subtitle and aren't available until the data is fetched. Unknown tokens
+    are left as written rather than raising: a typo in a saved kit should look wrong on
+    the preview, not fail the render.
+    """
+    out = str(fmt or "").strip()
+    if not out:
+        return ""
+    for token, value in (
+        ("{ticker}", tickers[0] if tickers else ""),
+        ("{tickers}", ", ".join(tickers)),
+        ("{chart}", renderers.CHARTS.get(chart, {}).get("label", "")),
+    ):
+        out = out.replace(token, value)
+    return out.strip()
+
+
 def clean_config(raw):
     chart = raw.get("chart", "line")
     spec = renderers.CHARTS.get(chart)
@@ -56,6 +77,12 @@ def clean_config(raw):
     if preset != "auto" and preset not in renderers.PRESETS:
         raise ValueError(f"Unknown encoder preset: {preset}")
 
+    # A typed title always wins over the brand kit's template, and a template that fills
+    # in to nothing falls through to whatever default the chart itself uses.
+    title = (raw.get("title") or "").strip()
+    if not title:
+        title = format_title(raw.get("title_format"), chart, tickers)
+
     cfg = {
         "chart": chart,
         "tickers": tickers,
@@ -68,7 +95,7 @@ def clean_config(raw):
         "aspect": raw.get("aspect", "16:9"),
         "quality": quality,
         "preset": preset,
-        "title": (raw.get("title") or "").strip() or None,
+        "title": title or None,
         "subtitle": (raw.get("subtitle") or "").strip() or None,
         "footer": (raw.get("footer") or "").strip() or None,
         "normalize": bool(raw.get("normalize", True)),
@@ -211,6 +238,31 @@ def cancel(job_id):
 @app.get("/outputs/<path:name>")
 def outputs(name):
     return send_from_directory(OUT_DIR, name)
+
+
+@app.get("/api/presets")
+def list_presets():
+    return jsonify(presets.all_kits())
+
+
+@app.post("/api/presets")
+def save_preset():
+    body = request.get_json(force=True) or {}
+    kit = {field: body.get(field) for field in presets.FIELDS}
+    if kit["theme"] and kit["theme"] not in renderers.THEMES:
+        return jsonify({"error": f"Unknown theme: {kit['theme']}"}), 400
+    try:
+        name, cleaned = presets.save(body.get("name"), kit)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"name": name, "kit": cleaned})
+
+
+@app.delete("/api/presets/<name>")
+def delete_preset(name):
+    if not presets.delete(name):
+        return jsonify({"error": f"No brand kit named {name}."}), 404
+    return jsonify({"ok": True})
 
 
 @app.post("/api/cache/clear")
