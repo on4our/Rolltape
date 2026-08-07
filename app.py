@@ -39,6 +39,26 @@ datasrc.set_demo(config.DEMO)
 # ---------------------------------------------------------------------------
 # Config normalising
 # ---------------------------------------------------------------------------
+def ma_periods(raw):
+    """Moving-average windows, in trading days.
+
+    Accepts a list or a comma-separated string, because the UI field is free text. Junk is
+    dropped rather than raising — a typo in an optional overlay shouldn't fail the render.
+    Capped at three so the key stays readable and the run-up fetch stays bounded.
+    """
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    out = []
+    for v in raw or []:
+        try:
+            n = int(float(str(v).strip()))
+        except (TypeError, ValueError):
+            continue
+        if 2 <= n <= 400 and n not in out:
+            out.append(n)
+    return sorted(out)[:3]
+
+
 def clean_config(raw):
     chart = raw.get("chart", "line")
     spec = renderers.CHARTS.get(chart)
@@ -75,6 +95,8 @@ def clean_config(raw):
         "unit": raw.get("unit", ""),
         "decimals": int(raw.get("decimals", 1) or 1),
         "transparent": bool(raw.get("transparent", False)),
+        "log_scale": bool(raw.get("log_scale", False)),
+        "ma": ma_periods(raw.get("ma")),
     }
     return cfg
 

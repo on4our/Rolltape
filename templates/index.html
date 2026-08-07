@@ -245,6 +245,22 @@ button,input,select,textarea{font:inherit;color:inherit}
         </div>
       </div>
 
+      <div class="field" data-for="line compare candles timeline">
+        <label>Price axis</label>
+        <div class="seg" id="logSeg">
+          <button data-v="0" aria-pressed="true">Linear</button>
+          <button data-v="1" aria-pressed="false">Log</button>
+        </div>
+        <div class="hint">Log keeps equal percentage moves the same height</div>
+      </div>
+
+      <div class="field" data-for="line candles timeline">
+        <label for="ma">Moving averages</label>
+        <input class="ctrl" id="ma" placeholder="50, 200" autocomplete="off"
+               spellcheck="false">
+        <div class="hint">Trading days, up to three. Leave blank for none.</div>
+      </div>
+
       <div class="field" data-for="candles">
         <label for="maxCandles">Maximum candles</label>
         <input class="ctrl" id="maxCandles" type="number" min="20" max="250" value="90">
@@ -377,7 +393,7 @@ const esc = s => String(s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight",
-  aspect:"16:9", quality:"final", transparent:0, meta:null, maxTickers:1
+  aspect:"16:9", quality:"final", transparent:0, log:0, meta:null, maxTickers:1
 };
 
 /* ---------- boot ---------- */
@@ -424,6 +440,7 @@ seg("#easingSeg","easing");
 seg("#aspectSeg","aspect");
 seg("#qualitySeg","quality");
 seg("#bgSeg","transparent",Number);
+seg("#logSeg","log",Number);
 
 /* ---------- chart-specific fields ---------- */
 function applyChart(){
@@ -495,7 +512,9 @@ function config(){
     rows: manual ? collect($("#rows"), "label", "value").map(r=>({label:r.label, value:+r.value})) : [],
     annotations: state.chart==="timeline" ? collect($("#notes"), "date", "label") : [],
     unit: $("#unit").value, decimals: +$("#decimals").value,
-    transparent: !!state.transparent
+    transparent: !!state.transparent,
+    log_scale: !!state.log,
+    ma: $("#ma").value
   };
 }
 

@@ -80,6 +80,18 @@ hardcode a colour inside a renderer. Adding a theme requires no other change.
 channel, so they go out as ProRes 4444 in a `.mov`. `renderers.output_extension()` is the
 single source of truth for which; `app.py` asks it rather than deciding separately.
 
+**Log axes.** `_log_ok()` gates on the data as well as the setting — a range reaching zero
+can't be drawn on a log axis, and falling back to linear beats failing the render. Two
+things break silently if you forget them: y-limits need multiplicative padding (`_ylim`
+handles both), and any offset expressed as a fraction of axis height has to become a ratio
+(`_offsetter` returns the right function for the scale — the timeline's callouts use it).
+
+**Moving averages.** `_fetch_with_ma()` pulls history from before the chart's start so the
+averages are already warm on the first bar drawn. It returns averages over the *full*
+fetched index; the caller aligns them to whatever bars it draws, with `ffill=True` where
+bars have been resampled. Compute them before any rollup, so "50-day" means fifty days
+even when each candle is a week.
+
 **Motion.** `ease()` maps normalised time to progress; `_plan()` maps frame index to a
 position along a densely-interpolated series. Series are upsampled to ~2x the frame count
 before animating so the line head moves smoothly rather than hopping between daily closes.
@@ -100,21 +112,38 @@ matters.
 - `preset=slow` on the `max` quality tier is genuinely slow — roughly 70s for a 7.5s
   1080p60 clip — and needs enough memory that small container hosts may OOM-kill ffmpeg.
   `final` uses `medium` for this reason. Worth exposing the preset in the UI.
-- yfinance breaks periodically when Yahoo changes their endpoints. A Stooq fallback in
-  `data.py` would make this robust; not yet written.
 - Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
+- A transparent render is ProRes 4444, which is enormous next to h264 — hundreds of MB for
+  a 1080p60 clip. That's inherent to an edit-ready intermediate, but it makes the alpha
+  path a poor fit for the Vercel Blob upload on a metered plan.
+- Charts with moving averages cache separately from the same chart without them, because
+  the run-up fetch changes the start date and so the cache key. Harmless, just surprising
+  if you're watching `.cache/`.
+- Moving averages are only on the line, candlestick and timeline charts. Comparison and
+  race draw several tickers already, and averages on top would be unreadable.
 
 ## Roadmap
 
 Near term, in rough priority order:
 
-1. Stooq fallback in `data.py` so renders don't fail when yfinance breaks.
+1. Reload a past render's config from the queue. Jobs already carry their `cfg`; the UI
+   just can't reach it, so "same chart, but AMD" means retyping everything. Persist the
+   form to `localStorage` at the same time — a reload currently resets to NVDA.
 2. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
 3. Encoder preset exposed in the UI (`final` now defaults to `medium`).
-4. Brand kit: save theme, footer, and default title format as a named preset.
-5. Batch render — one config, many tickers, queued.
+4. Brand kit: save theme, footer, and default title format as a named preset. A logo
+   watermark belongs here too — the footer is text-only today.
+5. Batch render — one config, many tickers, queued. Needs cancel-in-flight first: cancel
+   only works while a job is still queued, which a batch makes painful. Raising from the
+   `progress()` callback aborts an encode cleanly.
+6. Auto-annotations on the timeline chart — earnings dates and splits from the data
+   source, rather than typing every callout by hand.
+7. Benchmark overlay: draw SPY muted behind any single-ticker chart.
+8. Adjusted vs raw closes as an explicit choice. `auto_adjust=True` is hardcoded in
+   `_yahoo`, and Yahoo and Stooq adjust differently enough to change the total return
+   being narrated — see the note in the README.
 
 Further out, this is being explored as a product. That means watermarking on a free tier,
 render credits, and eventually an API endpoint that accepts a config and returns an MP4.
