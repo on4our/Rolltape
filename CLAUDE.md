@@ -137,14 +137,23 @@ Roughly in the order it would need building:
 Measure the cost early. A concat pass lands on top of encode times that are already the
 slowest thing here at `max`, and animated limits force a full redraw per frame.
 
+Commercially this is meant to be its own plan rather than part of the base tier — around
+$40/month, pencilled in rather than decided. The cost note above is the argument for that
+split: cinematic renders will be the most expensive ones the product runs, so the tier has
+to price compute and not just access. It can't ship before the licensed feed below either
+way.
+
 ### Further out
 
 This is being explored as a product. That means watermarking on a free tier,
-render credits, and eventually an API endpoint that accepts a config and returns an MP4.
+render credits, the cinematography plan above, and eventually an API endpoint that accepts
+a config and returns an MP4.
 **Before any of that ships, the data source must be replaced with a licensed feed** —
 yfinance scrapes Yahoo and redistributing that data to paying users is not permitted.
 Tiingo, Twelve Data, EOD Historical and Polygon all license end-of-day US equities in the
-$30-100/month range.
+$30-100/month range. That is a fixed cost rather than a per-user one, so roughly one
+cinematography subscriber covers the feed and everything past that is compute and margin —
+but it has to be covered before the first paying user, not after.
 
 ## Style
 
