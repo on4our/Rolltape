@@ -83,6 +83,19 @@ concrete numbers, so `cfg["fps"]` and `cfg["resolution"]` are always set and not
 downstream re-derives them from the tier. `SIZES` is keyed by the short side (720, 1080,
 1440), and the aspect decides which side that is.
 
+**Intervals.** `INTERVALS` in `data.py` owns everything that varies by bar grain: the bar
+width, the history Yahoo will serve, how many bars a year holds, and whether Stooq can
+answer. Nothing should hardcode 252 or 5-minutes — read it from there. `fetch()` takes an
+`interval` and it is part of the cache key, so daily and intraday frames can't collide.
+
+**Time axis.** `_time_axis()` returns a `TimeAxis`: x positions plus the format that
+labels them. Daily bars use a real date axis; intraday uses integer bar positions,
+because 17.5 closed hours a day would otherwise eat most of the chart width and turn an
+earnings gap into a flat shelf. Anything mapping between a timestamp and an x value goes
+through `TimeAxis.stamp()` / `.position()` rather than `mdates.num2date` directly — those
+are wrong on the positional axis. Tick label format comes from the series span, so a
+short daily range no longer repeats one month across the axis.
+
 **Motion.** `ease()` maps normalised time to progress; `_plan()` maps frame index to a
 position along a densely-interpolated series. Series are upsampled to ~2x the frame count
 before animating so the line head moves smoothly rather than hopping between daily closes.
@@ -103,9 +116,9 @@ matters.
 - `preset=slow` on the `max` quality tier is genuinely slow — roughly 70s for a 7.5s
   1080p60 clip — and needs enough memory that small container hosts may OOM-kill ffmpeg.
   `final` uses `medium` for this reason. Worth exposing the preset in the UI.
-- Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
-  Note that Stooq's CSV endpoint is daily-grain, so intraday would have no fallback — it
-  is the one feature that breaks outright when Yahoo does.
+- Intraday has no fallback. Stooq's CSV endpoint is daily-grain, so 5m/15m/1h are
+  Yahoo-or-nothing and go down whenever Yahoo does. Intraday also can't run on the
+  serverless build at all, which ships without yfinance.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
 - Tests cover `data.py` only. `clean_config()` holds all validation and has none.
@@ -118,12 +131,12 @@ matters.
 
 Near term, in rough priority order:
 
-1. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
-2. Encoder preset exposed in the UI (`final` now defaults to `medium`).
-3. Brand kit: save theme, footer, and default title format as a named preset.
-4. Batch render — one config, many tickers, queued.
+1. Encoder preset exposed in the UI (`final` now defaults to `medium`).
+2. Brand kit: save theme, footer, and default title format as a named preset.
+3. Batch render — one config, many tickers, queued.
 
 Done: Stooq fallback in `data.py`, so a render survives Yahoo changing its endpoints.
+Intraday intervals (5m, 15m, 1h) alongside daily.
 
 Further out, this is being explored as a product. That means watermarking on a free tier,
 render credits, and eventually an API endpoint that accepts a config and returns an MP4.

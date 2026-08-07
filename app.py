@@ -13,6 +13,7 @@ import uuid
 from queue import Queue
 
 import matplotlib.pyplot as plt
+import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
 
 import config
@@ -63,6 +64,29 @@ def clean_config(raw):
     if chart in ("compare", "race") and len(tickers) < 2:
         raise ValueError("This chart needs at least two tickers.")
 
+    interval = raw.get("interval") or datasrc.DEFAULT_INTERVAL
+    if interval not in datasrc.INTERVALS:
+        allowed = ", ".join(datasrc.INTERVALS)
+        raise ValueError(f"Interval must be one of: {allowed}.")
+
+    start = raw.get("start") or "2024-01-01"
+    max_days = datasrc.INTERVALS[interval]["max_days"]
+    if max_days is not None:
+        # Yahoo refuses an intraday request that reaches past its cap rather than
+        # returning the part it has, so catch it here where the message can name the
+        # date to move to.
+        earliest = pd.Timestamp.today().normalize() - pd.Timedelta(days=max_days)
+        try:
+            asked = pd.Timestamp(start)
+        except ValueError:
+            raise ValueError(f"Start date is not a date: {start!r}.")
+        if asked < earliest:
+            label = datasrc.INTERVALS[interval]["label"]
+            raise ValueError(
+                f"{label} bars only go back {max_days} days. "
+                f"Start on {earliest.date()} or later, or switch to daily."
+            )
+
     # The quality tier sets crf and preset, and seeds frame rate and resolution. Either of
     # those two can be overridden on its own — the slate in the UI edits them directly —
     # so resolve them to concrete numbers here and let the renderers stop caring which
@@ -76,8 +100,9 @@ def clean_config(raw):
     cfg = {
         "chart": chart,
         "tickers": tickers,
-        "start": raw.get("start") or "2024-01-01",
+        "start": start,
         "end": raw.get("end") or None,
+        "interval": interval,
         "duration": max(float(raw.get("duration", 6)), 0.5),
         "hold": max(float(raw.get("hold", 1.5)), 0.0),
         "easing": raw.get("easing", "out"),
@@ -188,6 +213,8 @@ def meta():
                   for a, rs in renderers.SIZES.items()},
         "resolutions": list(renderers.RESOLUTIONS),
         "fps_choices": list(renderers.FPS_CHOICES),
+        "intervals": [{"id": k, "label": v["label"], "max_days": v["max_days"]}
+                      for k, v in datasrc.INTERVALS.items()],
         "tiers": {k: {"fps": v["fps"], "res": v["res"]}
                   for k, v in renderers.ENCODE.items()},
         "demo": datasrc.is_demo(),

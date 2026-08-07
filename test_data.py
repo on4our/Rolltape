@@ -138,6 +138,145 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(data.sources_used(), {"demo"})
 
 
+class IntervalTests(unittest.TestCase):
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        patcher = mock.patch.object(data, "CACHE_DIR", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        data.set_demo(False)
+        data.reset_sources()
+        self.addCleanup(data.reset_sources)
+
+    def test_interval_is_part_of_the_cache_key(self):
+        # Without this the same ticker and dates at 5m would be served daily bars.
+        paths = {iv: data._cache_path("AAPL", "2026-07-01", "2026-08-01", "yahoo", iv)
+                 for iv in data.INTERVALS}
+        self.assertEqual(len(set(paths.values())), len(paths))
+
+    def test_stooq_declines_intraday_instead_of_failing_to_parse(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("should not be contacted")):
+            with self.assertRaises(ValueError) as caught:
+                data._stooq("AAPL", "2026-07-01", None, "5m")
+        self.assertIn("daily", str(caught.exception))
+
+    def test_intraday_has_no_fallback_and_the_error_says_so(self):
+        with mock.patch.object(data, "_yahoo", side_effect=RuntimeError("endpoint moved")):
+            with self.assertRaises(ValueError) as caught:
+                data.fetch("AAPL", "2026-07-01", None, "5m")
+        message = str(caught.exception)
+        self.assertIn("endpoint moved", message)
+        self.assertIn("daily", message)
+
+    def test_yahoo_is_asked_for_the_requested_interval(self):
+        import pandas as pd
+        frame = pd.read_csv(io.StringIO(STOOQ_CSV), parse_dates=["Date"], index_col="Date")
+        with mock.patch.object(data, "_yahoo", return_value=frame) as yahoo:
+            data.fetch("AAPL", "2026-07-01", None, "15m")
+        self.assertEqual(yahoo.call_args[0][3], "15m")
+
+    def test_unknown_interval_is_refused(self):
+        with self.assertRaises(ValueError):
+            data.fetch("AAPL", "2026-07-01", None, "3s")
+
+
+class SyntheticIntradayTests(unittest.TestCase):
+    def test_sessions_hold_the_expected_number_of_bars(self):
+        for interval, per_session in (("5m", 78), ("15m", 26), ("1h", 7)):
+            idx = data._session_index("2026-08-03", "2026-08-05", interval)
+            self.assertEqual(len(idx), per_session * 3, interval)
+
+    def test_bars_stay_inside_regular_market_hours(self):
+        idx = data._session_index("2026-08-03", "2026-08-03", "5m")
+        self.assertEqual(idx[0].strftime("%H:%M"), "09:30")
+        self.assertEqual(idx[-1].strftime("%H:%M"), "15:55")
+
+    def test_overnight_gap_is_real_so_the_axis_fix_gets_exercised(self):
+        import pandas as pd
+        idx = data._session_index("2026-08-03", "2026-08-04", "5m")
+        overnight = idx[78] - idx[77]
+        self.assertGreater(overnight, pd.Timedelta(hours=12))
+
+    def test_demo_intraday_needs_no_network(self):
+        data.set_demo(True)
+        self.addCleanup(data.set_demo, False)
+        with mock.patch.object(data, "_yahoo", side_effect=AssertionError("fetched")), \
+             mock.patch("urllib.request.urlopen", side_effect=AssertionError("fetched")):
+            df = data.fetch("AAPL", "2026-08-03", "2026-08-05", "5m")
+        self.assertEqual(len(df), 78 * 3)
+        self.assertEqual(list(df.columns), data.COLUMNS)
+
+    def test_intraday_bars_move_less_than_daily_ones(self):
+        # A five-minute bar that swings like a daily one would make demo previews
+        # useless for judging intraday motion.
+        import numpy as np
+        daily = data._synthetic("AAPL", "2026-05-01", "2026-08-05", "1d")
+        fine = data._synthetic("AAPL", "2026-05-01", "2026-08-05", "5m")
+        self.assertLess(np.diff(np.log(fine["Close"])).std(),
+                        np.diff(np.log(daily["Close"])).std())
+
+
+class TimeAxisTests(unittest.TestCase):
+    def test_intraday_collapses_the_overnight_gap(self):
+        import numpy as np
+        idx = data._session_index("2026-08-03", "2026-08-05", "5m")
+        axis = renderers._time_axis(idx, "5m")
+        self.assertTrue(axis.positional)
+        # Evenly spaced positions are what stop 17 closed hours eating the chart width.
+        self.assertTrue(np.all(np.diff(axis.x) == 1))
+
+    def test_daily_stays_on_a_real_date_axis(self):
+        import pandas as pd
+        idx = pd.bdate_range("2024-01-01", "2025-06-01")
+        axis = renderers._time_axis(idx, "1d")
+        self.assertFalse(axis.positional)
+        self.assertEqual(axis.fmt, "%b %Y")
+
+    def test_label_format_follows_the_span(self):
+        import pandas as pd
+        cases = [
+            (pd.bdate_range("2024-01-01", "2025-06-01"), "%b %Y"),
+            (pd.bdate_range("2024-01-01", "2024-03-01"), "%d %b"),
+            (data._session_index("2026-08-03", "2026-08-05", "5m"), "%d %b %H:%M"),
+            (data._session_index("2026-08-03", "2026-08-03", "5m"), "%H:%M"),
+        ]
+        for index, expected in cases:
+            self.assertEqual(renderers._time_format(index), expected)
+
+    def test_a_callout_date_snaps_to_the_nearest_bar(self):
+        idx = data._session_index("2026-08-03", "2026-08-05", "5m")
+        axis = renderers._time_axis(idx, "5m")
+        self.assertEqual(axis.position("2026-08-04"), 78.0)  # first bar of day two
+        self.assertEqual(axis.stamp(78.0).strftime("%d %H:%M"), "04 09:30")
+
+    def test_a_callout_outside_the_series_is_dropped(self):
+        idx = data._session_index("2026-08-03", "2026-08-05", "5m")
+        axis = renderers._time_axis(idx, "5m")
+        self.assertIsNone(axis.position("2026-01-01"))
+        self.assertIsNone(axis.position("2027-01-01"))
+
+
+class VolatilityScalingTests(unittest.TestCase):
+    def setUp(self):
+        data.set_demo(True)
+        self.addCleanup(data.set_demo, False)
+
+    def test_annualised_volatility_agrees_across_intervals(self):
+        # The metric annualises by bars per year. Held at 252 it would report a 5m
+        # series at roughly a ninth of its real volatility.
+        cfg = dict(chart="bars", tickers=["AAPL"], start="2026-06-10", end="2026-08-06",
+                   metric="volatility", rows=[], unit="", decimals=1)
+        by_interval = {}
+        for interval in ("1d", "1h", "15m", "5m"):
+            (_, value), = renderers._bar_rows(dict(cfg, interval=interval))[0]
+            by_interval[interval] = value
+        daily = by_interval["1d"]
+        for interval, value in by_interval.items():
+            self.assertLess(abs(value - daily), daily * 0.5, interval)
+
+
 class FooterTests(unittest.TestCase):
     def setUp(self):
         data.reset_sources()

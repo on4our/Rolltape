@@ -35,6 +35,26 @@ Bar comparison can pull total return, max drawdown, annualised volatility or lat
 close — or switch it to **My own numbers** and type revenue, margins, whatever you're
 narrating.
 
+## Bar interval
+
+**Bars** picks the grain: Daily, Hourly, 15 min or 5 min. Daily is the default and the
+only one with unlimited history.
+
+Intraday is for same-day coverage — a Fed decision, an earnings gap, the morning a stock
+broke out. Yahoo caps how far back it will serve: 60 days for 5 and 15 minute bars, 730
+for hourly. Switching to an intraday interval pulls the start date forward to the earliest
+date that works, so the control can't put you in a state that fails on render.
+
+Charts drawn from intraday bars sit on bar positions rather than a calendar. Markets are
+shut for 17 and a half hours of every day, and on a real time axis those hours would take
+up most of the width — an overnight earnings gap would read as a long flat shelf instead
+of the jump it was. Sessions therefore butt up against each other, and the axis labels
+carry the clock time.
+
+**Intraday comes from Yahoo only.** Stooq serves daily bars and nothing finer, so the
+fallback that covers a Yahoo outage doesn't cover this. If Yahoo is down, intraday is down
+— switch to daily.
+
 ## Output settings
 
 - **Frame** — 16:9 for the main video, 9:16 for Shorts, 1:1 for square posts.
@@ -95,7 +115,8 @@ the same window can show a different total return depending on which one answere
 footer before you narrate a number.
 
 Stooq is a reliability fallback for personal use. It does not change the licensing position
-for a paid tier — see CLAUDE.md.
+for a paid tier — see CLAUDE.md. It is also daily-only, so it cannot stand in for Yahoo on
+an intraday render.
 
 Run the tests with `python -m unittest`. They mock both sources, so they need no network.
 

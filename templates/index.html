@@ -241,6 +241,12 @@ button,input,select,textarea{font:inherit;color:inherit}
           <input class="ctrl" id="end" type="date"></div>
       </div>
 
+      <div class="field">
+        <label>Bars</label>
+        <div class="seg" id="intervalSeg"></div>
+        <div class="hint" id="intervalHint">Daily closes</div>
+      </div>
+
       <div class="field" data-for="compare race">
         <label>Scale</label>
         <div class="seg" id="normalizeSeg">
@@ -372,7 +378,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const state = {
-  chart:"line", normalize:1, easing:"out", theme:"midnight",
+  chart:"line", normalize:1, easing:"out", theme:"midnight", interval:"1d",
   aspect:"16:9", quality:"final", fps:60, resolution:1080, meta:null, maxTickers:1
 };
 
@@ -386,6 +392,8 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
       <div class="mode-name">${c.label}</div>
       <div class="mode-desc">${c.desc}</div>
     </button>`).join("");
+  $("#intervalSeg").innerHTML = m.intervals.map(i=>`
+    <button data-v="${i.id}" aria-pressed="${i.id===state.interval}">${i.label}</button>`).join("");
   $("#themes").innerHTML = m.themes.map(t=>`
     <button class="swatch" data-id="${t.id}" aria-pressed="${t.id===state.theme}">
       <span class="swatch-dots">${t.swatch.map(c=>`<i style="background:${c}"></i>`).join("")}</span>
@@ -421,6 +429,28 @@ seg("#normalizeSeg","normalize",Number);
 seg("#easingSeg","easing");
 seg("#aspectSeg","aspect");
 seg("#qualitySeg","quality", v=>v, applyTier);
+seg("#intervalSeg","interval", v=>v, applyInterval);
+
+// Intraday history is capped, and Yahoo rejects a request that reaches past the cap
+// rather than trimming it. Pulling the start date forward on the switch means picking
+// "5 min" just works instead of bouncing back an error the user has to decode.
+function applyInterval(){
+  const spec = (state.meta.intervals || []).find(i=>i.id===state.interval);
+  const hint = $("#intervalHint");
+  if (!spec || !spec.max_days){
+    $("#start").removeAttribute("min");  // daily has no floor to hold the picker to
+    hint.textContent = "Daily closes";
+    return;
+  }
+  const earliest = new Date(Date.now() - spec.max_days*86400000).toISOString().slice(0,10);
+  const start = $("#start");
+  let moved = false;
+  if (!start.value || start.value < earliest){ start.value = earliest; moved = true; }
+  start.min = earliest;
+  hint.textContent = `${spec.label} bars go back ${spec.max_days} days`
+    + (moved ? ` — start moved to ${earliest}` : "")
+    + ". Yahoo only; Stooq has no intraday.";
+}
 
 /* ---------- editable slate ---------- */
 // A tier seeds frame rate and resolution; the slate then overrides either one. Picking a
@@ -500,6 +530,7 @@ function config(){
     chart: state.chart,
     tickers: raw.slice(0, state.maxTickers),
     start: $("#start").value, end: $("#end").value || null,
+    interval: state.interval,
     duration: +$("#duration").value, hold: +$("#hold").value,
     easing: state.easing, theme: state.theme,
     aspect: state.aspect, quality: state.quality,
