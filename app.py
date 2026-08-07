@@ -113,6 +113,7 @@ def resolve_window(raw):
     return {"range": CUSTOM_RANGE, "start": start, "end": end,
             "interval": raw.get("interval") or datasrc.DEFAULT_INTERVAL, "sessions": None}
 
+
 def _one_of(value, options, default, label):
     """Pick one of a fixed set of names, falling back when the field is absent."""
     value = (str(value).strip().lower() if value not in (None, "") else default)
@@ -139,6 +140,26 @@ def format_title(fmt, chart, tickers):
     ):
         out = out.replace(token, value)
     return out.strip()
+
+
+def ma_periods(raw):
+    """Moving-average windows, in trading days.
+
+    Accepts a list or a comma-separated string, because the UI field is free text. Junk is
+    dropped rather than raising — a typo in an optional overlay shouldn't fail the render.
+    Capped at three so the key stays readable and the run-up fetch stays bounded.
+    """
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    out = []
+    for v in raw or []:
+        try:
+            n = int(float(str(v).strip()))
+        except (TypeError, ValueError):
+            continue
+        if 2 <= n <= 400 and n not in out:
+            out.append(n)
+    return sorted(out)[:3]
 
 
 def clean_config(raw):
@@ -229,6 +250,8 @@ def clean_config(raw):
         "unit": raw.get("unit", ""),
         "decimals": int(raw.get("decimals", 1) or 1),
         "transparent": bool(raw.get("transparent", False)),
+        "log_scale": bool(raw.get("log_scale", False)),
+        "ma": ma_periods(raw.get("ma")),
     }
     return cfg
 

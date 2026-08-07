@@ -17,6 +17,7 @@ matplotlib.use("Agg")
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from matplotlib.animation import FFMpegWriter, FuncAnimation
 from matplotlib.collections import LineCollection, PolyCollection
 
@@ -359,7 +360,7 @@ class Camera:
     """
 
     def __init__(self, cfg, ctx, *, x, lo, hi, head, n_frames, hold_frames,
-                 extent=None, rest_y=None):
+                 extent=None, rest_y=None, log=False):
         self.move = cfg.get("camera", "locked")
         self.moving = self.move != "locked" and self.move in CAMERAS
         tight = TRAVEL.get(cfg.get("camera_travel", "standard"), TRAVEL["standard"])
@@ -380,6 +381,15 @@ class Camera:
         mode = cfg.get("camera_y", "track") if self.moving else "hold"
         self.y0, self.y1, _ = _plan_y(self._x, lo, hi, self._head, self.x0, self.x1,
                                       rest_y, mode, ctx.fps, weight=self._weight)
+        # A log axis cannot draw a bottom at or below zero, and the vertical is planned
+        # with linear padding — on a low-priced series that padding crosses zero. Clamping
+        # the planned floor keeps the move intact and only bites where it has to; the
+        # padding rule itself stays linear, which is what a locked camera reproduces.
+        if log:
+            base = float(np.min(lo))
+            floor = base * 0.9 if base > 0 else float(np.min(self.y1)) * 0.5
+            self.y0 = np.maximum(self.y0, max(floor, 1e-9))
+            self.y1 = np.maximum(self.y1, self.y0 * 1.001)
         self._mode_y = mode
 
     def track(self, lo, hi, rest, floor=None):
@@ -492,7 +502,7 @@ def _axis_fmt(index=None):
     return "%Y"
 
 
-def _style_axes(ax, ctx, y_fmt=None, x_dates=True, index=None):
+def _style_axes(ax, ctx, y_fmt=None, x_dates=True, index=None, log=False):
     t = ctx.theme
     ax.set_facecolor(ctx.bg)
     ax.grid(True, color=t["grid"], linewidth=0.8 * ctx.s, alpha=0.9)
@@ -501,6 +511,12 @@ def _style_axes(ax, ctx, y_fmt=None, x_dates=True, index=None):
         ax.spines[side].set_visible(False)
     ax.spines["bottom"].set_color(t["axis"])
     ax.tick_params(colors=t["muted"], labelsize=13 * ctx.s, length=0)
+    if log:
+        # Set the scale before touching the tick labels — changing it afterwards would
+        # rebuild them and lose the font.
+        ax.set_yscale("log")
+        ax.yaxis.set_major_locator(_PriceLogLocator())
+        ax.yaxis.set_minor_locator(mticker.NullLocator())
     for lbl in ax.get_xticklabels() + ax.get_yticklabels():
         lbl.set_fontfamily(MONO_STACK)
     if x_dates:
@@ -637,6 +653,185 @@ def _glow(ax, color, ctx, zorder=2):
             for w, a in ((11, 0.05), (7, 0.09), (4.5, 0.15))]
 
 
+# ---------------------------------------------------------------------------
+# Y axis: linear or log
+# ---------------------------------------------------------------------------
+class _PriceLogLocator(mticker.Locator):
+    """Readable ticks for a log price axis.
+
+    Matplotlib's log locator ladders within each decade, which suits a price chart badly
+    once the range doesn't line up with one. Over 56 to 192 it puts ticks at 60/70/80/90
+    and then 100 — and nothing at all between 100 and 192, because the next rungs are 200
+    and up. Half the axis ends up unlabelled.
+
+    So pick from the range actually in view. Inside one decade, round steps cover the whole
+    axis evenly and log and linear are visually close anyway. Beyond it, the decade ladder
+    is the readable choice, thinned as the span grows.
+
+    This is a locator rather than a decision made up front because the limits aren't known
+    until after the axes are styled.
+    """
+
+    def __init__(self):
+        self._linear = mticker.MaxNLocator(nbins=7, steps=[1, 2, 2.5, 5, 10])
+        self._log = mticker.LogLocator(base=10.0)
+
+    def set_axis(self, axis):
+        super().set_axis(axis)
+        self._linear.set_axis(axis)
+        self._log.set_axis(axis)
+
+    def tick_values(self, vmin, vmax):
+        if vmin <= 0 or vmax <= vmin:
+            return self._log.tick_values(vmin, vmax)
+        decades = np.log10(vmax / vmin)
+        if decades < 1.0:
+            return self._linear.tick_values(vmin, vmax)
+        self._log.set_params(subs=(1.0,) if decades > 2.5 else (1.0, 2.0, 5.0))
+        return self._log.tick_values(vmin, vmax)
+
+    def __call__(self):
+        return self.tick_values(*self.axis.get_view_interval())
+
+
+def _log_ok(cfg, lo):
+    """Whether to draw a log y-axis.
+
+    Only when the data allows it — a range reaching zero or below can't be drawn on a log
+    axis, and quietly staying linear beats failing the render over an axis preference.
+    """
+    return bool(cfg.get("log_scale")) and lo > 0
+
+
+def _scale_note(log):
+    """A log axis flattens a big move, and a viewer watching the clip has no other way to
+    tell. The default subtitle says so; a subtitle the user typed is left alone."""
+    return "   ·   log scale" if log else ""
+
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Moving averages
+# ---------------------------------------------------------------------------
+def _fetch_with_ma(tk, cfg, periods):
+    """Fetch a ticker plus any moving averages, warmed up before the chart starts.
+
+    An average has no value until it has its whole window of closes. Fetched naively a
+    200-day line would only begin 200 bars into the chart — two thirds of the way across a
+    one-year range, which looks broken next to any charting platform. Pulling extra history
+    and trimming it afterwards costs one more cache entry and nothing else.
+
+    Returns (visible_df, {period: Series over the full fetched index}); the caller lines
+    the averages up with whatever bars it ends up drawing.
+    """
+    win = datasrc.window(cfg)
+    if not periods:
+        return datasrc.fetch(tk, **win), {}
+
+    interval = win.get("interval") or datasrc.DEFAULT_INTERVAL
+    sessions = win.get("sessions")
+    # Bars to sessions to calendar days, with slack for weekends and holidays. Reading the
+    # run-up off the interval is what keeps it sane on intraday: 200 five-minute bars is
+    # about three sessions of lead, not the best part of a year.
+    per_session = max(datasrc.periods_per_year(interval) / 252.0, 1.0)
+    lead_days = int(max(periods) / per_session * 1.5) + 14
+    limit = datasrc.max_lookback_days(interval)
+    if limit:  # asking past what the source keeps returns silence, not an error
+        lead_days = min(lead_days, limit - 1)
+    lead = pd.Timestamp(win["start"]) - pd.Timedelta(days=lead_days)
+
+    # Fetched without `sessions`, because the trim is what makes the chart one session and
+    # the average needs the sessions before it to have a value at the left edge. Trimming
+    # here rather than fetching twice keeps this to the one request it always was.
+    full = datasrc.fetch(tk, lead.strftime("%Y-%m-%d"), win.get("end"), interval)
+    visible = full.loc[full.index >= pd.Timestamp(win["start"])]
+    if sessions and not visible.empty:
+        days = visible.index.normalize().unique()
+        visible = visible.loc[visible.index.normalize() >= days[-int(sessions):][0]]
+    if len(visible) < 2:  # everything available predates the requested start
+        visible = full
+    return visible, {p: full["Close"].rolling(p).mean() for p in periods}
+
+
+def _align_ma(mas, index, ffill=False):
+    """Line the warmed averages up with the bars actually drawn.
+
+    Candles resample to weekly or monthly for long ranges, and those period-end labels
+    aren't trading days — they need the last daily value at or before each bar.
+    """
+    method = "ffill" if ffill else None
+    return {p: s.reindex(index, method=method).to_numpy(float) for p, s in mas.items()}
+
+
+def _dense_ma(x, ma, xd):
+    """Upsample an average onto the dense timeline, keeping its leading gap.
+
+    The bars before the window fills have no value, and np.interp would smear those NaNs
+    across the neighbouring interval, so interpolate only from the first real value on.
+    """
+    ok = ~np.isnan(ma)
+    if not ok.any():
+        return None
+    out = np.full(len(xd), np.nan)
+    live = xd >= x[int(ok.argmax())]
+    out[live] = np.interp(xd[live], x[ok], ma[ok])
+    return out
+
+
+def _extend_range(lo, hi, arrays):
+    """Widen a y-range to cover the averages too.
+
+    One warmed from before the chart starts can easily sit outside the visible price
+    range — a stock that fell hard just before the window has its 200-day well above it.
+    """
+    for arr in arrays:
+        if arr is not None and np.isfinite(arr).any():
+            lo = min(lo, float(np.nanmin(arr)))
+            hi = max(hi, float(np.nanmax(arr)))
+    return lo, hi
+
+
+def _ma_lines(ax, ctx, series, zorder=3, avoid=()):
+    """One subordinate line per average, coloured from the theme's series palette.
+
+    `series` is a list of (period, values); returns (artist, values) pairs ready to
+    animate, dropping any average with no data in range.
+
+    `avoid` is any colour already carrying meaning on this chart — the price line, the
+    candle bodies. Every theme's series palette overlaps its own up/down colours, so
+    without this the 200-day comes out the same green as the thing it's drawn against.
+    """
+    avoid = {avoid} if isinstance(avoid, str) else set(avoid)
+    palette = [c for c in ctx.theme["series"] if c not in avoid] or ctx.theme["series"]
+    out = []
+    for i, (period, vals) in enumerate(series):
+        if vals is None or not np.isfinite(vals).any():
+            continue
+        (ln,) = ax.plot([], [], color=palette[i % len(palette)], lw=1.5 * ctx.s,
+                        alpha=0.85, solid_capstyle="round", zorder=zorder,
+                        label=f"{period}-day MA")
+        out.append((ln, vals))
+    return out
+
+
+def _ma_key(ax, ctx, pairs, rising):
+    """Frameless key for the averages, parked in whichever corner the price line leaves
+    empty — a rising line clears the top left, a falling one clears the bottom left."""
+    if not pairs:
+        return
+    leg = ax.legend(handles=[ln for ln, _ in pairs],
+                    loc="upper left" if rising else "lower left",
+                    frameon=False, fontsize=13 * ctx.s, handlelength=1.7,
+                    labelspacing=0.35, borderaxespad=1.0)
+    for txt in leg.get_texts():
+        txt.set_color(ctx.theme["muted"])
+        txt.set_fontfamily(MONO_STACK)
+    leg.set_zorder(6)
+
+
 _FFMPEG_CHECKED = False
 
 
@@ -693,7 +888,8 @@ def _export(fig, anim, path, ctx, progress):
 def render_line(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
     intraday = _intraday(cfg)
-    df = datasrc.fetch(tk, **datasrc.window(cfg))
+    periods = cfg.get("ma") or []
+    df, ma_series = _fetch_with_ma(tk, cfg, periods)
     x = _x_values(df.index, intraday)
     y = df["Close"].to_numpy(float)
 
@@ -701,6 +897,11 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     xd, yd = _densify(x, y, dense_n)
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    cfg["easing"], dense_n)
+
+    mas = _align_ma(ma_series, df.index)
+    ma_vals = [(p, _dense_ma(x, mas[p], xd)) for p in periods]
+    lo, hi = _extend_range(y.min(), y.max(), [v for _, v in ma_vals])
+    log = _log_ok(cfg, lo)
 
     t = ctx.theme
     up = y[-1] >= y[0]
@@ -710,19 +911,22 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     fig = _new_fig(ctx)
     _titles(fig, ctx, cfg.get("title") or tk,
             cfg.get("subtitle")
-            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%",
+            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%{_scale_note(log)}",
             cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday)
+    _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday,
+                log=log)
 
     pad = (y.max() - y.min()) * 0.12 or y.max() * 0.05
     cam = Camera(cfg, ctx, x=xd, lo=yd, hi=yd, head=head_track(xd, cut, hold),
                  n_frames=n_frames, hold_frames=hold,
-                 rest_y=(y.min() - pad, y.max() + pad))
+                 rest_y=(y.min() - pad, y.max() + pad), log=log)
     cam.apply(ax, 0)
     if intraday:
         _position_ticks(ax, ctx, df.index, ax.get_xlim())
 
+    ma_pairs = _ma_lines(ax, ctx, ma_vals, avoid=color)
+    _ma_key(ax, ctx, ma_pairs, rising=up)
     glow = _glow(ax, color, ctx)
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
                       solid_joinstyle="round", zorder=4)
@@ -740,6 +944,8 @@ def render_line(cfg, ctx, out, progress=None, still=None):
         line.set_data(xs, ys)
         for g in glow:
             g.set_data(xs, ys)
+        for ln, vals in ma_pairs:
+            ln.set_data(xs, vals[:k])
         head.set_data([xs[-1]], [ys[-1]])
         if fill[0] is not None:
             fill[0].remove()
@@ -785,24 +991,27 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    cfg["easing"], dense_n)
 
+    allv = np.concatenate(list(series.values()))
+    log = _log_ok(cfg, float(allv.min()))
+
     t = ctx.theme
     palette = t["series"]
     fig = _new_fig(ctx)
     sub = ("Indexed to 100" if normalize else "Closing price") + \
-          f"   ·   {_range_label(closes.index, intraday)}"
+          f"   ·   {_range_label(closes.index, intraday)}{_scale_note(log)}"
     _titles(fig, ctx, cfg.get("title") or " vs ".join(vals.columns),
             cfg.get("subtitle") or sub, cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
 
     allv = np.concatenate(list(series.values()))
-    _style_axes(ax, ctx, x_dates=not intraday,
+    _style_axes(ax, ctx, x_dates=not intraday, log=log,
                 y_fmt=(_num_axis if normalize else _money_axis)(allv.min(), allv.max()))
 
     stack = np.vstack([series[c] for c in vals.columns])
     pad = (stack.max() - stack.min()) * 0.12
     cam = Camera(cfg, ctx, x=xd, lo=stack.min(axis=0), hi=stack.max(axis=0),
                  head=head_track(xd, cut, hold), n_frames=n_frames, hold_frames=hold,
-                 rest_y=(stack.min() - pad, stack.max() + pad))
+                 rest_y=(stack.min() - pad, stack.max() + pad), log=log)
     cam.apply(ax, 0)
     if intraday:
         _position_ticks(ax, ctx, closes.index, ax.get_xlim())
@@ -856,7 +1065,8 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
 def render_candles(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
     intraday = _intraday(cfg)
-    df = datasrc.fetch(tk, **datasrc.window(cfg))
+    periods = cfg.get("ma") or []
+    df, ma_series = _fetch_with_ma(tk, cfg, periods)
     max_c = int(cfg.get("max_candles", 90))
     if len(df) > max_c:
         if intraday:
@@ -879,12 +1089,19 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    cfg["easing"], n + 1)
 
+    # The averages were computed on daily closes above, before any rollup — so a "50-day"
+    # line still means fifty days on a chart whose candles are weeks.
+    mas = _align_ma(ma_series, df.index, ffill=True)
+    ma_vals = [(p, mas[p]) for p in periods]
+    lo, hi = _extend_range(float(l.min()), float(h.max()), [v for _, v in ma_vals])
+    log = _log_ok(cfg, lo)
+
     t = ctx.theme
     fig = _new_fig(ctx)
     pct = (c[-1] / o[0] - 1) * 100
     _titles(fig, ctx, cfg.get("title") or tk,
             cfg.get("subtitle")
-            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%",
+            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%{_scale_note(log)}",
             cfg.get("footer"))
 
     rect = _plot_area(ctx, True)
@@ -892,7 +1109,9 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     ax = fig.add_axes([rect[0], rect[1] + vol_h + rect[3] * 0.06,
                        rect[2], rect[3] - vol_h - rect[3] * 0.06])
     axv = fig.add_axes([rect[0], rect[1], rect[2], vol_h], sharex=ax)
-    _style_axes(ax, ctx, y_fmt=_money_axis(l.min(), h.max()), x_dates=False)
+    _style_axes(ax, ctx, y_fmt=_money_axis(l.min(), h.max()), x_dates=False, log=log)
+    # The volume strip stays linear whatever the price axis does — it's a magnitude
+    # comparison between adjacent bars, not a growth curve.
     _style_axes(axv, ctx, y_fmt=lambda v, _: f"{v/1e6:,.0f}M", x_dates=False)
     ax.tick_params(labelbottom=False)
     axv.grid(False)
@@ -904,7 +1123,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     cam = Camera(cfg, ctx, x=idx.astype(float), lo=l, hi=h,
                  head=head_track(idx, np.clip(cut - 1, 0, n - 1), hold),
                  n_frames=n_frames, hold_frames=hold, extent=(-1, n),
-                 rest_y=(l.min() - pad, h.max() + pad))
+                 rest_y=(l.min() - pad, h.max() + pad), log=log)
     # Volume rides the same windows. Left on the full range it would flatten to nothing
     # the moment the camera moved in on a quiet stretch.
     vol_bot, vol_top, vol_peak = cam.track(np.zeros(n), vol,
@@ -953,6 +1172,10 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
                       bbox=dict(boxstyle="round,pad=0.4", facecolor=t["bg"],
                                 edgecolor="none", alpha=0.85))
 
+    # Above the candle bodies, not below — an average is meant to be read against them.
+    ma_pairs = _ma_lines(ax, ctx, ma_vals, zorder=5, avoid=(t["up"], t["down"]))
+    _ma_key(ax, ctx, ma_pairs, rising=c[-1] >= o[0])
+
     bull, bear = t["up"], t["down"]
     colors = [bull if c[i] >= o[i] else bear for i in range(n)]
     w = 0.34
@@ -964,6 +1187,8 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
         if cam.moving:
             retick(i)
         k = cut[min(i, n_frames - 1)]
+        for ln, vals in ma_pairs:
+            ln.set_data(idx[:k], vals[:k])
         wick_seg, body_v, vol_v, cols, vcols = [], [], [], [], []
         for j in range(k):
             wick_seg.append([(j, l[j]), (j, h[j])])
@@ -1103,7 +1328,8 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
 def render_timeline(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
     intraday = _intraday(cfg)
-    df = datasrc.fetch(tk, **datasrc.window(cfg))
+    periods = cfg.get("ma") or []
+    df, ma_series = _fetch_with_ma(tk, cfg, periods)
     x = _x_values(df.index, intraday)
     y = df["Close"].to_numpy(float)
 
@@ -1128,25 +1354,45 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    cfg["easing"], dense_n)
 
+    mas = _align_ma(ma_series, df.index)
+    ma_vals = [(p, _dense_ma(x, mas[p], xd)) for p in periods]
+    lo, hi = _extend_range(y.min(), y.max(), [v for _, v in ma_vals])
+    log = _log_ok(cfg, lo)
+
     t = ctx.theme
-    color = t["up"] if y[-1] >= y[0] else t["down"]
+    rising = y[-1] >= y[0]
+    color = t["up"] if rising else t["down"]
     fig = _new_fig(ctx)
     pct = (y[-1] / y[0] - 1) * 100
     _titles(fig, ctx, cfg.get("title") or tk,
             cfg.get("subtitle")
-            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%",
+            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%{_scale_note(log)}",
             cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday)
+    _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday,
+                log=log)
 
     pad = (y.max() - y.min()) * 0.18
     cam = Camera(cfg, ctx, x=xd, lo=yd, hi=yd, head=head_track(xd, cut, hold),
                  n_frames=n_frames, hold_frames=hold,
-                 rest_y=(y.min() - pad * 0.6, y.max() + pad))
+                 rest_y=(y.min() - pad * 0.6, y.max() + pad), log=log)
     cam.apply(ax, 0)
     if intraday:
         _position_ticks(ax, ctx, df.index, ax.get_xlim())
 
+    def lift_to(base, frac, i):
+        """Move `base` up by `frac` of frame `i`'s height.
+
+        A log axis makes a fixed offset in price a different visual distance depending on
+        where on the scale you are, so the same fraction has to become a ratio instead.
+        Read per frame because the camera changes the height underneath it.
+        """
+        if log:
+            return base * (cam.y1[i] / cam.y0[i]) ** frac
+        return base + cam.height(i) * frac
+
+    ma_pairs = _ma_lines(ax, ctx, ma_vals, avoid=color)
+    _ma_key(ax, ctx, ma_pairs, rising=rising)
     glow = _glow(ax, color, ctx)
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
                       zorder=4)
@@ -1178,6 +1424,8 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
         line.set_data(xs, ys)
         for g in glow:
             g.set_data(xs, ys)
+        for ln, vals in ma_pairs:
+            ln.set_data(xs, vals[:k])
         head.set_data([xs[-1]], [ys[-1]])
         if fill[0] is not None:
             fill[0].remove()
@@ -1186,17 +1434,17 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
         # Callout heights are a share of the frame rather than of the price range, so a
         # camera that changes what a dollar is worth in pixels doesn't leave the labels
         # stranded halfway up the chart or shoved off the top of it.
-        lift = cam.height(i)
         for m in marks:
             if i < m["trigger"]:
                 continue
             a = float(ease("out", min((i - m["trigger"]) / fade_frames, 1.0)))
-            ly = m["y"] + lift * (0.14 + 0.13 * m["row"])
+            frac = 0.14 + 0.13 * m["row"]
+            ly = lift_to(m["y"], frac, i)
             m["vl"].set_data([m["x"], m["x"]], [m["y"], ly])
             m["vl"].set_alpha(a * 0.9)
             m["dot"].set_alpha(a)
             m["txt"].set_alpha(a)
-            m["txt"].set_position((m["x"], ly - lift * 0.03 * (1 - a)))
+            m["txt"].set_position((m["x"], lift_to(m["y"], frac - 0.03 * (1 - a), i)))
         if cam.moving:
             # A date axis re-formats; a positional one re-labels. Same job either way —
             # the camera changed the visible span underneath the ticks.

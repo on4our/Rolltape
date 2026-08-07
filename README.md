@@ -72,6 +72,24 @@ there is no fallback — if Yahoo is down, an intraday render fails rather than 
 handing you daily bars with a 5-minute label. It also needs yfinance installed; without it
 the intraday options are hidden rather than offered and broken.
 
+## Price axis and moving averages
+
+**Price axis** switches the line, comparison, candlestick and timeline charts between
+linear and log. On a log axis equal percentage moves are equal heights, which is what you
+want for anything spanning more than a year or two — a linear axis makes the recent end of
+a long chart look far more dramatic than it was. When the default subtitle is in use it
+says `log scale`, so nobody watching has to guess.
+
+**Moving averages** takes up to three windows in trading days — `50, 200` is the usual
+pair. They draw underneath the price line, animate along with it, and get a small key in
+whichever corner the price leaves empty.
+
+The averages are warmed up properly: Rolltape fetches extra history from before your start
+date so a 200-day line is already at full value on the first bar drawn, rather than
+appearing two thirds of the way across. On a candlestick chart that has rolled up to
+weekly or monthly bars, a "50-day" average is still fifty *days* — it's computed on daily
+closes before the rollup, not fifty candles.
+
 ## Output settings
 
 - **Frame** — 16:9 for the main video, 9:16 for Shorts, 1:1 for square posts.

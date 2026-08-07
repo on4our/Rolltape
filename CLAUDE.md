@@ -116,6 +116,18 @@ single source of truth for which; `app.py` asks it rather than deciding separate
 and `preset` are x264 settings and are ignored on that path — ProRes is quality-driven by
 `-qscale:v`, so the tier still picks the frame size but stops controlling the bitrate.
 
+**Log axes.** `_log_ok()` gates on the data as well as the setting — a range reaching zero
+can't be drawn on a log axis, and falling back to linear beats failing the render. Two
+things break silently if you forget them: y-limits need multiplicative padding (`_ylim`
+handles both), and any offset expressed as a fraction of axis height has to become a ratio
+(`_offsetter` returns the right function for the scale — the timeline's callouts use it).
+
+**Moving averages.** `_fetch_with_ma()` pulls history from before the chart's start so the
+averages are already warm on the first bar drawn. It returns averages over the *full*
+fetched index; the caller aligns them to whatever bars it draws, with `ffill=True` where
+bars have been resampled. Compute them before any rollup, so "50-day" means fifty days
+even when each candle is a week.
+
 **Motion.** `ease()` maps normalised time to progress; `_plan()` maps frame index to a
 position along a densely-interpolated series. Series are upsampled to ~2x the frame count
 before animating so the line head moves smoothly rather than hopping between daily closes.
@@ -207,11 +219,15 @@ draining the queue is still what bounds CPU, not the lock.
   is the one frame you cannot preview or save as a thumbnail. Widening the mapping would
   move the frame every existing scrub position points at, so it wants doing deliberately
   rather than as a side effect.
+- Charts with moving averages cache separately from the same chart without them, because
+  the run-up fetch changes the start date and so the cache key. Harmless, just surprising
+  if you're watching `.cache/`.
+- Moving averages are only on the line, candlestick and timeline charts. Comparison and
+  race draw several tickers already, and averages on top would be unreadable.
 
 ## Roadmap
 
-Near term, in rough priority order. The Stooq fallback that used to head this list has
-shipped; so has moving renders out of process.
+Near term, in rough priority order.
 
 1. Make `clean_config()` match its own contract: validate easing and metric, and bound
    `duration`.
@@ -219,44 +235,43 @@ shipped; so has moving renders out of process.
    that was missing; the queue already handles the rest.
 3. Frame-drawing speed — the only lever that actually shortens a render. See the first
    known rough edge for where the time really goes.
+4. Reload a past render's config from the queue. Jobs already carry their `cfg`; the UI
+   just can't reach it, so "same chart, but AMD" means retyping everything.
+5. Auto-annotations on the timeline chart — earnings dates and splits from the data
+   source, rather than typing every callout by hand.
+6. Benchmark overlay: draw SPY muted behind any single-ticker chart.
+7. Adjusted vs raw closes as an explicit choice. `auto_adjust=True` is hardcoded in
+   `_yahoo`, and Yahoo and Stooq adjust differently enough to change the total return
+   being narrated — see the note in the README.
 
 Done since this list was last rewritten: the Stooq fallback, renders out of process,
-intraday intervals, date-range presets, camera moves, the encoder preset (`final` moved
-from `slow` to `medium`, with an Auto/Faster/Slower override in the UI) and brand kits.
+intraday intervals, date-range presets, camera moves, log price axes with moving
+averages, the encoder preset (`final` moved from `slow` to `medium`, with an
+Auto/Faster/Slower override in the UI) and brand kits.
 
-Done: Stooq fallback in `data.py`, so a render survives Yahoo changing its endpoints.
+### Cinematography — transitions
 
-### Cinematography — camera moves and transitions
+Camera moves have shipped: `Camera` in `renderers.py`, four named moves, planned rather
+than accumulated so `still=` stays honest. See the **Camera** convention above. What this
+section still describes is the half that hasn't been built — cutting or cross-fading from
+the line chart into the compare chart.
 
-Not started, noted so the design isn't painted into a corner before it happens. The idea:
-push in on the last few months as the line head advances, drift the frame while a candle
-prints, cut or cross-fade from the line chart into the compare chart. A locked-off frame
-is a big part of why these read as charts rather than as footage.
-
-Roughly in the order it would need building:
-
-- **A camera is a function of normalised time.** Every renderer sets `set_xlim` /
-  `set_ylim` once before the animation and never touches them again. A camera is those
-  two calls moved inside `draw(i)`, driven by keyframes evaluated through `ease()`. It
-  has to stay a pure function of `i / n_frames` — anything that accumulates per frame
-  makes `still=` show a different image than the render produces, and that preview
-  contract is the constraint the whole feature has to respect.
-- **Zoom and pan are cheap, rotation is not.** Animated limits give push-in, pull-out
-  and drift for free. Rotating the chart plane means either `mplot3d` — which discards
-  the axis styling in `_style_axes` and looks nothing like the current output — or an
-  affine transform applied to the finished frame. Prefer the latter, in the ffmpeg pass
-  rather than in matplotlib.
+- **Rotation stays off the table.** Animated limits gave push-in, pull-back and follow for
+  free. Rotating the chart plane means either `mplot3d` — which discards the axis styling
+  in `_style_axes` and looks nothing like the current output — or an affine transform
+  applied to the finished frame. Prefer the latter, in the ffmpeg pass rather than in
+  matplotlib.
 - **Transitions imply more than one clip.** Today a render is one chart type, one
   `FuncAnimation`, one `_export()`. Cross-fading line into candles means rendering
   segments separately and joining them with an ffmpeg filter graph, so `render()` grows
   a shot list and the per-frame progress reported to `/api/jobs` has to span segments
   instead of counting frames of a single animation.
-- **Ship presets, not a keyframe editor.** Three or four named moves — slow push, reveal
-  and settle, whip to compare — consistent with the rest of the tool. If it needs a
-  timeline UI, it's the wrong feature.
+- **Ship presets, not a keyframe editor.** The camera followed this rule and should stay
+  that way: named moves, consistent with the rest of the tool. If it needs a timeline UI,
+  it's the wrong feature.
 
 Measure the cost early. A concat pass lands on top of encode times that are already the
-slowest thing here at `max`, and animated limits force a full redraw per frame.
+slowest thing here at `max`, and the camera already forces a full redraw per frame.
 
 Commercially this is meant to be its own plan rather than part of the base tier — around
 $40/month, pencilled in rather than decided. The cost note above is the argument for that

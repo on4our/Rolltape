@@ -206,5 +206,189 @@ class DateLabelTests(unittest.TestCase):
         self.assertEqual(renderers._axis_fmt(None), "%b %Y")
 
 
+# Charts with a price y-axis. Bars and races are categorical — a log scale there would
+# be meaningless, and negative metrics would make it undrawable.
+PRICE_CHARTS = ("line", "compare", "candles", "timeline")
+
+
+class LogScaleTests(DemoDataCase):
+    def figure(self, chart, **kw):
+        cfg = self.cfg(chart, **kw)
+        ctx = renderers.make_ctx("midnight", "16:9", "draft")
+        return renderers.CHARTS[chart]["fn"](cfg, ctx, None, still=0.9)
+
+    def test_price_charts_draw_a_usable_log_axis(self):
+        for chart in PRICE_CHARTS:
+            with self.subTest(chart=chart):
+                ax = self.figure(chart, log_scale=True).axes[0]
+                lo, hi = ax.get_ylim()
+                self.assertEqual(ax.get_yscale(), "log")
+                # A log axis cannot draw a non-positive limit at all.
+                self.assertGreater(lo, 0)
+                labelled = [t for t in ax.get_yticks() if lo <= t <= hi]
+                self.assertGreaterEqual(len(labelled), 3,
+                                        f"only {len(labelled)} ticks on the whole axis")
+
+    def test_the_axis_stays_linear_by_default(self):
+        self.assertEqual(self.figure("line").axes[0].get_yscale(), "linear")
+
+    def test_the_default_subtitle_says_when_the_scale_is_log(self):
+        # A log axis flattens a big move and the viewer has no other way to tell.
+        self.assertIn("log", renderers._scale_note(True))
+        self.assertEqual(renderers._scale_note(False), "")
+
+    def test_log_is_declined_when_the_data_cannot_take_it(self):
+        # Falling back to linear beats failing a render over an axis preference.
+        self.assertTrue(renderers._log_ok({"log_scale": True}, 12.0))
+        self.assertFalse(renderers._log_ok({"log_scale": True}, 0.0))
+        self.assertFalse(renderers._log_ok({"log_scale": True}, -3.0))
+        self.assertFalse(renderers._log_ok({}, 12.0))
+
+    def test_a_log_camera_never_plans_a_non_positive_floor(self):
+        # The camera owns every price-axis limit, and it pads linearly — on a low-priced
+        # series that padding crosses zero, which a log axis cannot draw at all. Every
+        # move has to come out positive, on every frame, including the hold.
+        ctx = renderers.make_ctx("midnight", "16:9", "draft")
+        x = np.arange(200, dtype=float)
+        y = np.linspace(0.4, 1.2, 200)
+        cut = np.linspace(0, 199, 120).astype(int)
+        for move in renderers.CAMERAS:
+            with self.subTest(move=move):
+                cam = renderers.Camera(
+                    {"camera": move}, ctx, x=x, lo=y, hi=y,
+                    head=renderers.head_track(x, cut, 30),
+                    n_frames=120, hold_frames=30,
+                    rest_y=(-0.4, 1.6), log=True)   # a pad wide enough to cross zero
+                self.assertGreater(cam.y0.min(), 0)
+                self.assertTrue((cam.y1 > cam.y0).all())
+
+    def test_log_ticks_cover_the_axis_at_every_span(self):
+        # The failure this guards against: a sub-decade range getting ticks at 60-90 and
+        # then 100, with the whole 100-192 stretch unlabelled.
+        loc = renderers._PriceLogLocator()
+        for lo, hi in ((56.5, 192.0), (292.0, 409.0), (20.0, 400.0), (1.0, 1000.0)):
+            with self.subTest(span=(lo, hi)):
+                inside = [t for t in loc.tick_values(lo, hi) if lo <= t <= hi]
+                self.assertGreaterEqual(len(inside), 3,
+                                        f"{lo}-{hi} got {len(inside)} ticks")
+
+
+class MovingAverageTests(DemoDataCase):
+    def figure(self, chart, **kw):
+        cfg = self.cfg(chart, **kw)
+        ctx = renderers.make_ctx("midnight", "16:9", "draft")
+        return renderers.CHARTS[chart]["fn"](cfg, ctx, None, still=0.9)
+
+    def ma_artists(self, ax):
+        return [ln for ln in ax.get_lines()
+                if (ln.get_label() or "").endswith("-day MA")]
+
+    def test_averages_are_drawn_and_keyed(self):
+        for chart in ("line", "candles", "timeline"):
+            with self.subTest(chart=chart):
+                ax = self.figure(chart, ma="50, 200").axes[0]
+                lines = self.ma_artists(ax)
+                self.assertEqual(len(lines), 2)
+                for ln in lines:
+                    self.assertGreater(len(ln.get_xdata()), 0, "line never got data")
+                self.assertIsNotNone(ax.get_legend(), "no key drawn")
+
+    def test_no_averages_means_no_key(self):
+        ax = self.figure("line").axes[0]
+        self.assertEqual(self.ma_artists(ax), [])
+        self.assertIsNone(ax.get_legend())
+
+    def test_an_average_is_warm_on_the_very_first_bar(self):
+        # Without the run-up fetch a 200-day line would only begin 200 bars in — two
+        # thirds of the way across a one-year chart.
+        cfg = self.cfg("line", ma="200")
+        df, series = renderers._fetch_with_ma("NVDA", cfg, [200])
+        first = renderers._align_ma(series, df.index)[200][0]
+        self.assertTrue(np.isfinite(first), "the average is still cold where drawing starts")
+
+    def test_the_run_up_is_only_fetched_when_an_average_needs_it(self):
+        asked = []
+        real = data.fetch
+
+        def spy(tk, start, end=None, interval=data.DEFAULT_INTERVAL, sessions=None):
+            asked.append(start)
+            return real(tk, start, end, interval, sessions)
+
+        data.fetch = spy
+        self.addCleanup(setattr, data, "fetch", real)
+        renderers._fetch_with_ma("NVDA", self.cfg("line", ma="200"), [200])
+        renderers._fetch_with_ma("NVDA", self.cfg("line"), [])
+        with_ma, without = asked
+        self.assertLess(with_ma, without)
+        self.assertEqual(without, "2024-01-01")
+
+    def test_candle_averages_stay_daily_through_a_rollup(self):
+        # A "50-day" line on a chart whose candles are weeks must still mean fifty days.
+        cfg = self.cfg("candles", start="2022-01-01", end="2025-01-01", ma="50")
+        daily, series = renderers._fetch_with_ma("NVDA", cfg, [50])
+        weekly = daily.resample("W").agg({"Close": "last"}).dropna()
+        aligned = renderers._align_ma(series, weekly.index, ffill=True)[50]
+
+        # Each bar carries the daily average as of that week...
+        at = weekly.index[10]
+        self.assertAlmostEqual(aligned[10], series[50].loc[:at].iloc[-1], places=6)
+        # ...and not a 50-week average, which is what computing after the rollup gives.
+        fifty_weeks = weekly["Close"].rolling(50).mean().iloc[-1]
+        self.assertFalse(np.isclose(aligned[-1], fifty_weeks))
+
+    def test_averages_never_reuse_the_price_colour(self):
+        # Every theme's series palette overlaps its own up/down colours.
+        import matplotlib.pyplot as plt
+        for name, theme in renderers.THEMES.items():
+            with self.subTest(theme=name):
+                fig, ax = plt.subplots()
+                self.addCleanup(plt.close, fig)
+                ctx = renderers.make_ctx(name, "16:9", "draft")
+                vals = np.arange(10.0)
+                pairs = renderers._ma_lines(ax, ctx, [(50, vals), (200, vals)],
+                                            avoid=(theme["up"], theme["down"]))
+                used = {ln.get_color() for ln, _ in pairs}
+                self.assertEqual(len(used), 2, "two averages came out the same colour")
+                self.assertNotIn(theme["up"], used)
+                self.assertNotIn(theme["down"], used)
+
+    def test_a_cold_average_is_dropped_rather_than_drawn_empty(self):
+        # An average with no value anywhere in range returns nothing, and _ma_lines
+        # skips it — better than a legend entry pointing at an invisible line.
+        x = np.arange(5.0)
+        self.assertIsNone(renderers._dense_ma(x, np.full(5, np.nan), np.arange(5.0)))
+
+    def test_the_leading_gap_survives_upsampling(self):
+        # np.interp would smear the NaNs across the neighbouring interval.
+        x = np.arange(5.0)
+        ma = np.array([np.nan, np.nan, 3.0, 4.0, 5.0])
+        dense = renderers._dense_ma(x, ma, np.linspace(0, 4, 21))
+        self.assertTrue(np.isnan(dense[0]))
+        self.assertTrue(np.isfinite(dense[-1]))
+        self.assertFalse(np.isnan(dense[np.isfinite(dense)]).any())
+
+
+class MaPeriodTests(unittest.TestCase):
+    def test_windows_are_parsed_from_free_text(self):
+        # The UI field is free text, so junk is dropped rather than failing the render.
+        cases = {
+            "50, 200": [50, 200],
+            "50,50,20": [20, 50],      # deduplicated and sorted
+            "9 21 50 100 200": [9, 21, 50],  # capped at three
+            "50.0": [50],
+            "1": [],                   # too short to mean anything
+            "999": [],                 # beyond any sane window
+            "abc": [],
+            "": [],
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(appmod.ma_periods(raw), want)
+
+    def test_a_list_works_as_well_as_a_string(self):
+        self.assertEqual(appmod.ma_periods([50, 200]), [50, 200])
+        self.assertEqual(appmod.ma_periods(None), [])
+
+
 if __name__ == "__main__":
     unittest.main()
