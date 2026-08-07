@@ -92,6 +92,16 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(data.sources_used(), {"yahoo"})
         self.assertIsNone(data.attribution())
 
+    def test_stooq_carries_the_render_when_yfinance_is_absent(self):
+        # The serverless build ships without yfinance to save ~45MB, so this path is
+        # load-bearing there, not just a nicety.
+        with mock.patch.dict("sys.modules", {"yfinance": None}), \
+             mock.patch("urllib.request.urlopen", _urlopen_returning(STOOQ_CSV)):
+            df = data.fetch("AAPL", "2024-01-01")
+
+        self.assertEqual(len(df), 5)
+        self.assertEqual(data.sources_used(), {"stooq"})
+
     def test_both_sources_failing_names_both_causes(self):
         with mock.patch.object(data, "_yahoo", side_effect=RuntimeError("endpoint moved")), \
              mock.patch("urllib.request.urlopen", side_effect=OSError("unreachable")):
