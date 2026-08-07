@@ -22,9 +22,23 @@ find "$SP" -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true
 # Type stubs are for type checkers, not the interpreter.
 find "$SP" -name '*.pyi' -delete 2>/dev/null || true
 
-# Debug symbols in the compiled extensions: ~23MB. strip may be absent from the build
-# image, in which case we simply keep the symbols.
-find "$SP" -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
+# Fonts for the PostScript and PDF backends. This renders through Agg into ffmpeg and
+# never loads either. The STIX fonts are NOT touched: matplotlib parses paired $ as
+# mathtext, and titles in a stock chart tool routinely contain dollar amounts.
+rm -rf "$SP/matplotlib/mpl-data/fonts/afm" "$SP/matplotlib/mpl-data/fonts/pdfcorefonts"
+
+# Installed-package metadata. Nothing here reads a version at runtime.
+find "$SP" -maxdepth 1 -name '*.dist-info' -exec rm -rf {} + 2>/dev/null || true
+
+# Debug symbols in the compiled extensions, worth ~23MB. Vercel's build image has no
+# strip, so this is a bonus when it lands rather than something to rely on — the cuts
+# above are what have to fit the budget.
+if command -v strip >/dev/null 2>&1; then
+    find "$SP" -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
+    echo "trim-bundle: stripped debug symbols"
+else
+    echo "trim-bundle: no strip in this image, keeping debug symbols"
+fi
 
 find "$SP" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
