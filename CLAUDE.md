@@ -124,12 +124,55 @@ Near term, in rough priority order:
 4. Brand kit: save theme, footer, and default title format as a named preset.
 5. Batch render — one config, many tickers, queued.
 
-Further out, this is being explored as a product. That means watermarking on a free tier,
-render credits, and eventually an API endpoint that accepts a config and returns an MP4.
+### Cinematography — camera moves and transitions
+
+Not started, noted so the design isn't painted into a corner before it happens. The idea:
+push in on the last few months as the line head advances, drift the frame while a candle
+prints, cut or cross-fade from the line chart into the compare chart. A locked-off frame
+is a big part of why these read as charts rather than as footage.
+
+Roughly in the order it would need building:
+
+- **A camera is a function of normalised time.** Every renderer sets `set_xlim` /
+  `set_ylim` once before the animation and never touches them again. A camera is those
+  two calls moved inside `draw(i)`, driven by keyframes evaluated through `ease()`. It
+  has to stay a pure function of `i / n_frames` — anything that accumulates per frame
+  makes `still=` show a different image than the render produces, and that preview
+  contract is the constraint the whole feature has to respect.
+- **Zoom and pan are cheap, rotation is not.** Animated limits give push-in, pull-out
+  and drift for free. Rotating the chart plane means either `mplot3d` — which discards
+  the axis styling in `_style_axes` and looks nothing like the current output — or an
+  affine transform applied to the finished frame. Prefer the latter, in the ffmpeg pass
+  rather than in matplotlib.
+- **Transitions imply more than one clip.** Today a render is one chart type, one
+  `FuncAnimation`, one `_export()`. Cross-fading line into candles means rendering
+  segments separately and joining them with an ffmpeg filter graph, so `render()` grows
+  a shot list and the per-frame progress reported to `/api/jobs` has to span segments
+  instead of counting frames of a single animation.
+- **Ship presets, not a keyframe editor.** Three or four named moves — slow push, reveal
+  and settle, whip to compare — consistent with the rest of the tool. If it needs a
+  timeline UI, it's the wrong feature.
+
+Measure the cost early. A concat pass lands on top of encode times that are already the
+slowest thing here at `max`, and animated limits force a full redraw per frame.
+
+Commercially this is meant to be its own plan rather than part of the base tier — around
+$40/month, pencilled in rather than decided. The cost note above is the argument for that
+split: cinematic renders will be the most expensive ones the product runs, so the tier has
+to price compute and not just access. It can't ship before the licensed feed below either
+way.
+
+### Further out
+
+This is being explored as a product. That means watermarking on a free tier,
+render credits, the cinematography plan above, and eventually an API endpoint that accepts
+a config and returns an MP4.
 **Before any of that ships, the data source must be replaced with a licensed feed** —
 yfinance scrapes Yahoo and redistributing that data to paying users is not permitted.
 Tiingo, Twelve Data, EOD Historical and Polygon all license end-of-day US equities in the
-$30-100/month range.
+$30-100/month range. That is a fixed cost rather than a per-user one, so roughly one
+cinematography subscriber covers the feed and everything past that is compute and margin —
+but it has to be covered before the first paying user, not after.
 
 ## Style
 
