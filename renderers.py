@@ -208,7 +208,57 @@ def _plot_area(ctx, has_title):
     return [0.07, 0.11, 0.79, 0.70 if has_title else 0.78]
 
 
-def _style_axes(ax, ctx, y_fmt=None, x_dates=True):
+def _span_days(index):
+    """How much time is on screen, or None when there isn't enough to tell."""
+    if index is None or len(index) < 2:
+        return None
+    return (index[-1] - index[0]).total_seconds() / 86400.0
+
+
+def _axis_fmt(index=None):
+    """Tick label format that suits the window.
+
+    Date labels have to follow the span or they say nothing: a week of bars under "%b %Y"
+    repeats one month across the axis, a single session repeats it at every tick, and a
+    decade under "%d %b" is unreadable clutter. Defaults to the month-and-year form the
+    charts used before there was anything but multi-year windows.
+    """
+    days = _span_days(index)
+    if days is None:
+        return "%b %Y"
+    if days <= 2:
+        return "%H:%M"
+    if days <= 90:
+        return "%d %b"
+    if days <= 1500:
+        return "%b %Y"
+    return "%Y"
+
+
+def _stamp_fmt(index):
+    """Full timestamp for a readout — the axis format plus whatever it leaves out."""
+    return "%d %b %Y  %H:%M" if _axis_fmt(index) == "%H:%M" else "%d %b %Y"
+
+
+def _range_label(index):
+    """The window as a subtitle, at the precision it deserves.
+
+    "Aug 2026 – Aug 2026" is what a month-and-year range does to any window shorter than a
+    couple of months, so short ones name the day and a single session names the hours.
+    """
+    a, b = index[0], index[-1]
+    days = _span_days(index) or 0.0
+    # Naming one date and two clock times only tells the truth within a single session; an
+    # overnight window that happens to be short still has to name both days.
+    if days <= 1.5 and a.date() == b.date():
+        return f"{a:%d %b %Y}   ·   {a:%H:%M} – {b:%H:%M}"
+    if days <= 120:
+        left = f"{a:%d %b}" if a.year == b.year else f"{a:%d %b %Y}"
+        return f"{left} – {b:%d %b %Y}"
+    return f"{a:%b %Y} – {b:%b %Y}"
+
+
+def _style_axes(ax, ctx, y_fmt=None, x_dates=True, index=None):
     t = ctx.theme
     ax.set_facecolor(ctx.bg)
     ax.grid(True, color=t["grid"], linewidth=0.8 * ctx.s, alpha=0.9)
@@ -222,7 +272,7 @@ def _style_axes(ax, ctx, y_fmt=None, x_dates=True):
     if x_dates:
         ax.xaxis.set_major_locator(
             mdates.AutoDateLocator(minticks=3, maxticks=5 if ctx.tall else 8))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter(_axis_fmt(index)))
     if y_fmt:
         ax.yaxis.set_major_formatter(y_fmt)
 
@@ -293,7 +343,7 @@ def _export(fig, anim, path, ctx, progress):
 # ---------------------------------------------------------------------------
 def render_line(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"))
+    df = datasrc.fetch(tk, **datasrc.window(cfg))
     x = mdates.date2num(df.index.to_pydatetime())
     y = df["Close"].to_numpy(float)
 
@@ -309,10 +359,10 @@ def render_line(cfg, ctx, out, progress=None, still=None):
 
     fig = _new_fig(ctx)
     _titles(fig, ctx, cfg.get("title") or tk,
-            cfg.get("subtitle") or f"{df.index[0]:%b %Y} – {df.index[-1]:%b %Y}   ·   {pct:+.1f}%",
+            cfg.get("subtitle") or f"{_range_label(df.index)}   ·   {pct:+.1f}%",
             cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=_money)
+    _style_axes(ax, ctx, y_fmt=_money, index=df.index)
 
     pad = (y.max() - y.min()) * 0.12 or y.max() * 0.05
     ax.set_xlim(x[0], x[-1])
@@ -356,7 +406,7 @@ def render_line(cfg, ctx, out, progress=None, still=None):
 # 2. Multi-ticker comparison
 # ---------------------------------------------------------------------------
 def render_compare(cfg, ctx, out, progress=None, still=None):
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"))
+    frames = datasrc.fetch_many(cfg["tickers"], **datasrc.window(cfg))
     closes = pd.DataFrame({k: v["Close"] for k, v in frames.items()}).dropna()
     if closes.empty:
         raise ValueError("Tickers have no overlapping trading days.")
@@ -375,11 +425,12 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
     palette = t["series"]
     fig = _new_fig(ctx)
     sub = ("Indexed to 100" if normalize else "Closing price") + \
-          f"   ·   {closes.index[0]:%b %Y} – {closes.index[-1]:%b %Y}"
+          f"   ·   {_range_label(closes.index)}"
     _titles(fig, ctx, cfg.get("title") or " vs ".join(vals.columns),
             cfg.get("subtitle") or sub, cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=(lambda v, _: f"{v:,.0f}") if normalize else _money)
+    _style_axes(ax, ctx, y_fmt=(lambda v, _: f"{v:,.0f}") if normalize else _money,
+                index=closes.index)
 
     allv = np.concatenate(list(series.values()))
     pad = (allv.max() - allv.min()) * 0.12
@@ -425,12 +476,16 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 def render_candles(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"))
+    df = datasrc.fetch(tk, **datasrc.window(cfg))
     max_c = int(cfg.get("max_candles", 90))
     if len(df) > max_c:
-        rule = "W" if len(df) / 5 <= max_c else "ME"
-        df = df.resample(rule).agg({"Open": "first", "High": "max", "Low": "min",
-                                    "Close": "last", "Volume": "sum"}).dropna()
+        # Rolling daily bars up to weekly or monthly keeps a long window readable. Intraday
+        # bars have no such ladder — a weekly rule would fold a whole session into one
+        # candle — so those just keep the most recent bars.
+        if (_span_days(df.index) or 0) > 2:
+            rule = "W" if len(df) / 5 <= max_c else "ME"
+            df = df.resample(rule).agg({"Open": "first", "High": "max", "Low": "min",
+                                        "Close": "last", "Volume": "sum"}).dropna()
         if len(df) > max_c:
             df = df.iloc[-max_c:]
 
@@ -446,7 +501,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     fig = _new_fig(ctx)
     pct = (c[-1] / o[0] - 1) * 100
     _titles(fig, ctx, cfg.get("title") or tk,
-            cfg.get("subtitle") or f"{df.index[0]:%b %Y} – {df.index[-1]:%b %Y}   ·   {pct:+.1f}%",
+            cfg.get("subtitle") or f"{_range_label(df.index)}   ·   {pct:+.1f}%",
             cfg.get("footer"))
 
     rect = _plot_area(ctx, True)
@@ -465,9 +520,12 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     axv.set_ylim(0, vol.max() * 1.15)
     axv.set_yticks([vol.max()])
 
+    # Candles sit at integer positions rather than dates, so the tick labels are written
+    # out by hand — but they still have to follow the window like every other axis.
     step = max(n // 6, 1)
+    x_fmt = _axis_fmt(df.index)
     axv.set_xticks(idx[::step])
-    axv.set_xticklabels([f"{d:%b %y}" for d in df.index[::step]])
+    axv.set_xticklabels([f"{d:{x_fmt}}" for d in df.index[::step]])
     for lbl in axv.get_xticklabels():
         lbl.set_fontfamily(MONO_STACK)
 
@@ -488,6 +546,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
 
     bull, bear = t["up"], t["down"]
     colors = [bull if c[i] >= o[i] else bear for i in range(n)]
+    stamp = _stamp_fmt(df.index)
     w = 0.34
 
     def draw(i):
@@ -509,7 +568,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
         vbars.set_verts(vol_v)
         vbars.set_color(vcols)
         vbars.set_alpha(0.45)
-        readout.set_text(f"{_money(c[k-1])}   {df.index[k-1]:%d %b %Y}")
+        readout.set_text(f"{_money(c[k-1])}   {df.index[k-1]:{stamp}}")
         return ()
 
     if still is not None:
@@ -522,6 +581,17 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 # 4. Growing bar comparison
 # ---------------------------------------------------------------------------
+def _periods_per_year(index):
+    """Annualisation factor for a return series, read off the bar spacing.
+
+    252 trading days a year, however many bars each of those days is cut into — so daily
+    bars give 252 and a session of 5-minute bars gives 252 times the bars in a session.
+    Hardcoding 252 would understate an intraday volatility by an order of magnitude.
+    """
+    days = index.normalize().nunique() or 1
+    return 252.0 * (len(index) / days)
+
+
 def _bar_rows(cfg):
     """Either manual label/value rows, or a metric computed per ticker."""
     rows = cfg.get("rows") or []
@@ -532,7 +602,7 @@ def _bar_rows(cfg):
             return clean, cfg.get("unit", ""), int(cfg.get("decimals", 1))
 
     metric = cfg.get("metric", "return")
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"))
+    frames = datasrc.fetch_many(cfg["tickers"], **datasrc.window(cfg))
     out = []
     for tk, df in frames.items():
         cl = df["Close"].to_numpy(float)
@@ -543,7 +613,7 @@ def _bar_rows(cfg):
             out.append((tk, ((cl / peak - 1) * 100).min()))
         elif metric == "volatility":
             r = np.diff(np.log(cl))
-            out.append((tk, r.std() * np.sqrt(252) * 100))
+            out.append((tk, r.std() * np.sqrt(_periods_per_year(df.index)) * 100))
         else:
             out.append((tk, cl[-1]))
     unit = "$" if metric == "price" else "%"
@@ -629,7 +699,7 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 def render_timeline(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"))
+    df = datasrc.fetch(tk, **datasrc.window(cfg))
     x = mdates.date2num(df.index.to_pydatetime())
     y = df["Close"].to_numpy(float)
 
@@ -655,10 +725,10 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     fig = _new_fig(ctx)
     pct = (y[-1] / y[0] - 1) * 100
     _titles(fig, ctx, cfg.get("title") or tk,
-            cfg.get("subtitle") or f"{df.index[0]:%b %Y} – {df.index[-1]:%b %Y}   ·   {pct:+.1f}%",
+            cfg.get("subtitle") or f"{_range_label(df.index)}   ·   {pct:+.1f}%",
             cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=_money)
+    _style_axes(ax, ctx, y_fmt=_money, index=df.index)
 
     pad = (y.max() - y.min()) * 0.18
     ax.set_xlim(x[0], x[-1])
@@ -723,7 +793,7 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
 # 6. Bar chart race
 # ---------------------------------------------------------------------------
 def render_race(cfg, ctx, out, progress=None, still=None):
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"))
+    frames = datasrc.fetch_many(cfg["tickers"], **datasrc.window(cfg))
     closes = pd.DataFrame({k: v["Close"] for k, v in frames.items()}).dropna()
     if closes.shape[1] < 2:
         raise ValueError("A race needs at least two tickers.")
@@ -773,6 +843,7 @@ def render_race(cfg, ctx, out, progress=None, still=None):
     pos = np.arange(n, dtype=float)[::-1]  # smoothed row positions
     smooth = 1.0 - float(np.exp(-11.0 / ctx.fps))
     xmax = mat.max() * 1.18
+    clock_fmt = _axis_fmt(closes.index)  # the clock is the only thing dating this chart
 
     def draw(i):
         nonlocal pos
@@ -789,7 +860,7 @@ def render_race(cfg, ctx, out, progress=None, still=None):
             name_txt[c].set_position((-xmax * 0.012, pos[j]))
             val_txt[c].set_position((cur[j] + xmax * 0.012, pos[j]))
             val_txt[c].set_text(f"{cur[j]:,.0f}" if normalize else _money(cur[j]))
-        clock.set_text(f"{mdates.num2date(xd[k]):%b %Y}")
+        clock.set_text(f"{mdates.num2date(xd[k]):{clock_fmt}}")
         return ()
 
     if still is not None:

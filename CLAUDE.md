@@ -82,6 +82,20 @@ concrete numbers, so `cfg["fps"]` and `cfg["resolution"]` are always set and not
 downstream re-derives them from the tier. `SIZES` is keyed by the short side (720, 1080,
 1440), and the aspect decides which side that is.
 
+**Date ranges.** Same shape: `RANGES` in `data.py` declares the presets, `clean_config()`
+resolves the chosen one into concrete `start`/`end`/`interval`/`sessions`, and the
+renderers never learn that presets exist. `range: "custom"` (or no `range` at all, which is
+what an older API caller sends) uses the posted dates instead. Presets deliberately leave
+`end` as None — Yahoo treats an explicit end as exclusive, so pinning it to today drops
+today's bar. Renderers ask for their window with `datasrc.window(cfg)` rather than reading
+`cfg["start"]` directly, so another knob doesn't mean editing six call sites. Adding a
+preset is one entry in `RANGES`; the UI builds its buttons from `/api/meta`.
+
+**Date labels follow the span.** `_axis_fmt()` picks the tick format from how much time is
+on screen and `_range_label()` does the same for subtitles. A window shorter than a couple
+of months under the old fixed `%b %Y` printed the same month at every tick, so any renderer
+drawing a date axis passes its index in.
+
 **Alpha.** Transparent renders swap codec *and* container — h264 in an MP4 has no alpha
 channel, so they go out as ProRes 4444 in a `.mov`. `renderers.output_extension()` is the
 single source of truth for which; `app.py` asks it rather than deciding separately. `crf`
@@ -110,7 +124,11 @@ matters.
   `final` uses `medium` for this reason. Worth exposing the preset in the UI.
 - yfinance breaks periodically when Yahoo changes their endpoints. A Stooq fallback in
   `data.py` would make this robust; not yet written.
-- Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
+- **Intraday has no fallback.** Stooq publishes daily bars only, so the Intraday preset
+  stands on Yahoo alone and fails with a message saying so rather than quietly handing back
+  a different shape of data. Yahoo also caps 5-minute history at ~60 days, which the preset
+  stays well inside. Intraday bars skip the shared cache's day granularity and key by the
+  minute instead, so a long preview session leaves a small trail of cache files.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
 
@@ -119,10 +137,12 @@ matters.
 Near term, in rough priority order:
 
 1. Stooq fallback in `data.py` so renders don't fail when yfinance breaks.
-2. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
-3. Encoder preset exposed in the UI (`final` now defaults to `medium`).
-4. Brand kit: save theme, footer, and default title format as a named preset.
-5. Batch render — one config, many tickers, queued.
+2. Encoder preset exposed in the UI (`final` now defaults to `medium`).
+3. Brand kit: save theme, footer, and default title format as a named preset.
+4. Batch render — one config, many tickers, queued.
+5. Intraday beyond the latest session — an interval picker and a multi-day intraday window,
+   which needs the overnight gap dealt with before a line chart across two sessions reads
+   correctly.
 
 Further out, this is being explored as a product. That means watermarking on a free tier,
 render credits, and eventually an API endpoint that accepts a config and returns an MP4.

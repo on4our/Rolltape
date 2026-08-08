@@ -35,6 +35,24 @@ Bar comparison can pull total return, max drawdown, annualised volatility or lat
 close — or switch it to **My own numbers** and type revenue, margins, whatever you're
 narrating.
 
+## Date range
+
+One row of buttons: **1D, 1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y, 10Y, MAX**. Pick one and the
+line under it spells out the window you just chose, so there's no guessing what "3M" ended
+up meaning. Everything except 1D runs up to the latest close.
+
+**1D** is the most recent trading session drawn from 5-minute bars — Friday's session if
+you're working on a Sunday, so it's the one to reach for on a Fed day or an earnings gap.
+That's the one range Yahoo has to answer for: Stooq publishes daily bars only, so if Yahoo
+is down an intraday render fails and says why rather than silently giving you daily bars.
+
+**Custom** is the last button and opens the two date fields, which is where the old start
+and end pickers live. Leave the end date empty to run up to the latest bar. The dates you
+type stay put while you try presets, so you can flick back to Custom without retyping them.
+
+Labels follow the range on their own — a session gets a clock along the bottom, a week gets
+days, a decade gets years — so nothing needs adjusting after switching.
+
 ## Output settings
 
 - **Frame** — 16:9 for the main video, 9:16 for Shorts, 1:1 for square posts.
@@ -96,7 +114,9 @@ outputs/        Rendered MP4s land here
 ```
 
 Price data is cached in `.cache/` so repeated renders of the same range don't re-download.
-**Clear price cache** in the interface wipes it when you want fresh numbers.
+A range with no end date is cached per day, so YTD picks up today's close rather than
+serving whatever it first pulled; intraday goes per minute, because its last bar is still
+moving. **Clear price cache** in the interface wipes it when you want fresh numbers.
 
 ## Where the numbers come from
 
@@ -104,6 +124,9 @@ Yahoo first, via yfinance. Yahoo breaks periodically when they change their endp
 when that happens Rolltape falls back to [Stooq](https://stooq.com) — free daily bars, no
 account, a completely independent source. A failed render is worse than one drawn from
 second choice. If both fail you get one error naming both causes.
+
+The exception is the **1D** range. Stooq has daily bars and nothing finer, so there is no
+second source for intraday — those renders either come from Yahoo or fail.
 
 **The footer tells you which source answered.** Yahoo says nothing, since that's the
 assumed source. A chart built from the fallback reads `Data: Stooq`, and one built from
