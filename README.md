@@ -13,9 +13,9 @@ python app.py
 
 Then open http://127.0.0.1:5000.
 
-ffmpeg has to be on your PATH — it does the encoding.
-macOS: `brew install ffmpeg`. Windows: `winget install ffmpeg`, or grab a build from
-gyan.dev and add the `bin` folder to PATH.
+ffmpeg does the encoding, and `pip install` brings its own copy — there is nothing extra
+to set up. If you already have ffmpeg on your PATH it gets used instead, which is the
+leaner option: the bundled build adds about 77MB to the install.
 
 To poke at the interface without hitting Yahoo, run `python app.py --demo`. That swaps
 in generated price data so every control still works offline.
