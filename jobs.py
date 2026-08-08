@@ -1,19 +1,18 @@
 """The render job registry.
 
-One process with one worker thread can just hold jobs in a dict. A serverless host
-can't: the instance that accepts /api/render may not be the one that answers the
-/api/jobs poll, so the registry has to move somewhere shared. This module is the seam
-where that swap happens.
+One process with one worker thread can just hold jobs in a dict, and that is the shape the
+app is deployed in — hence `--workers 1` in the Dockerfile. Run a second worker process
+and you get a second registry: renders start, finish, and never appear in the UI that
+asked for them.
 
-A KV-backed implementation must throttle `update` — the progress callback fires once per
-frame (~120 times for a short draft), which is fine against a dict and far too chatty
-against a network store.
+If jobs ever need to outlive the process or be shared across several, this module is the
+seam to swap. A networked implementation would have to throttle `update` — the progress
+callback fires once per frame, a few hundred times a render, which is nothing against a
+dict and far too chatty against a network store.
 """
 
 import threading
 from collections import OrderedDict
-
-import config
 
 _LOCK = threading.Lock()
 _JOBS = OrderedDict()
@@ -48,10 +47,3 @@ def update(job_id, **fields):
 def recent(limit=KEEP):
     with _LOCK:
         return list(_JOBS.values())[-limit:][::-1]
-
-
-if config.JOBS != "memory":
-    raise RuntimeError(
-        f"Unknown ROLLTAPE_JOBS={config.JOBS!r}. Only 'memory' is implemented — a shared "
-        "backend is still required before jobs survive across serverless instances."
-    )

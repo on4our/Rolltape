@@ -85,8 +85,8 @@ MONO_STACK = ["JetBrains Mono", "SF Mono", "Menlo", "Consolas", "DejaVu Sans Mon
 
 # h264 has no alpha channel, so a transparent render changes codec and container both.
 # ProRes 4444 is the intermediate every NLE ingests without a transcode, and prores_ks is
-# a native FFmpeg encoder — present even in the static build the serverless bundle ships,
-# where libvpx usually isn't.
+# a native FFmpeg encoder rather than an external library — so it is there in a minimal
+# static build, where libvpx and friends often aren't.
 ALPHA_CODEC = "prores_ks"
 
 
@@ -244,10 +244,11 @@ _FFMPEG_CHECKED = False
 
 
 def _resolve_ffmpeg():
-    """Point matplotlib at a bundled ffmpeg when the system has none.
+    """Point matplotlib at a pip-installed ffmpeg when the system has none.
 
-    Locally ffmpeg is on PATH and imageio_ffmpeg is never imported. Serverless runtimes
-    ship no ffmpeg binary at all, so the pip-installed static build is the only option.
+    The supported setup is ffmpeg on PATH, and then imageio_ffmpeg is never imported. This
+    is for the machine where installing it system-wide isn't an option — `pip install
+    imageio-ffmpeg` puts a static build in site-packages and renders start working.
     """
     global _FFMPEG_CHECKED
     if _FFMPEG_CHECKED:

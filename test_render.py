@@ -87,11 +87,6 @@ class ContainerTests(DemoDataCase):
         self.assertTrue(appmod.slug(self.cfg(transparent=False)).endswith(".mp4"))
         self.assertTrue(appmod.slug(self.cfg(transparent=True)).endswith(".mov"))
 
-    def test_blob_upload_declares_the_right_type(self):
-        import storage
-        self.assertEqual(storage._blob_mime("a.mp4"), "video/mp4")
-        self.assertEqual(storage._blob_mime("a.mov"), "video/quicktime")
-
 
 class StillExportTests(DemoDataCase):
     def test_a_still_is_the_real_frame_size(self):

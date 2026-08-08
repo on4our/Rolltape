@@ -93,8 +93,8 @@ class FallbackTests(unittest.TestCase):
         self.assertIsNone(data.attribution())
 
     def test_stooq_carries_the_render_when_yfinance_is_absent(self):
-        # The serverless build ships without yfinance to save ~45MB, so this path is
-        # load-bearing there, not just a nicety.
+        # Not just an import guard: yfinance is the dependency most likely to be missing
+        # or broken on a given machine, and a render should survive that.
         with mock.patch.dict("sys.modules", {"yfinance": None}), \
              mock.patch("urllib.request.urlopen", _urlopen_returning(STOOQ_CSV)):
             df = data.fetch("AAPL", "2024-01-01")
