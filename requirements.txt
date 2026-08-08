@@ -3,3 +3,8 @@ matplotlib>=3.8
 numpy>=1.26
 pandas>=2.0
 yfinance>=0.2.40
+
+# A static ffmpeg build, so a fresh clone can encode video with no separate install. The
+# renderer prefers an ffmpeg already on PATH and only falls back to this one, so anyone
+# who has ffmpeg pays the 77MB in download size and nothing else.
+imageio-ffmpeg>=0.4.9

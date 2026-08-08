@@ -15,8 +15,13 @@ WORKDIR /app
 
 # gunicorn is a deployment concern, not an application one, so it stays out of
 # requirements.txt — CLAUDE.md pins that list deliberately.
+#
+# imageio-ffmpeg arrives via requirements.txt as the fallback for machines with no ffmpeg.
+# This image apt-gets the real thing above, so dropping it in the same layer saves 77MB
+# the renderer would never reach for.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+RUN pip install --no-cache-dir -r requirements.txt gunicorn \
+    && pip uninstall -y imageio-ffmpeg
 
 COPY . .
 

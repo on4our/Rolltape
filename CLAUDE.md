@@ -16,7 +16,8 @@ python app.py --demo             # generated data, no network needed
 python app.py --host 0.0.0.0     # reachable from phone on the same wifi
 ```
 
-ffmpeg must be on PATH. Everything else is pip.
+Everything is pip, ffmpeg included — `imageio-ffmpeg` ships a static build as the
+fallback. An ffmpeg already on PATH still wins when there is one.
 
 ## Architecture
 

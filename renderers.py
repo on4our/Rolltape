@@ -244,11 +244,12 @@ _FFMPEG_CHECKED = False
 
 
 def _resolve_ffmpeg():
-    """Point matplotlib at a pip-installed ffmpeg when the system has none.
+    """Point matplotlib at the pip-installed ffmpeg when the system has none.
 
-    The supported setup is ffmpeg on PATH, and then imageio_ffmpeg is never imported. This
-    is for the machine where installing it system-wide isn't an option — `pip install
-    imageio-ffmpeg` puts a static build in site-packages and renders start working.
+    A system ffmpeg wins wherever one exists — it is leaner than carrying a second copy,
+    and the Docker image apt-gets it for that reason. requirements.txt ships
+    imageio-ffmpeg so a fresh clone encodes without a separate install, and then on a
+    machine that already has ffmpeg on PATH it is never imported.
     """
     global _FFMPEG_CHECKED
     if _FFMPEG_CHECKED:
