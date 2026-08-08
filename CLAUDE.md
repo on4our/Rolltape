@@ -22,7 +22,7 @@ ffmpeg must be on PATH. Everything else is pip.
 
 ```
 app.py          Flask routes, single-threaded render queue, job state
-renderers.py    Six chart types + themes + easing + ffmpeg export
+renderers.py    Six chart types + themes + easing + camera + ffmpeg export
 data.py         Yahoo fetch (yfinance) with CSV disk cache, plus demo generator
 templates/      One HTML file, inline CSS and JS, no build step
 outputs/        Rendered MP4s
@@ -94,6 +94,22 @@ before animating so the line head moves smoothly rather than hopping between dai
 Any time-based motion should be frame-rate independent — see the race renderer's
 `1 - exp(-11/fps)` smoothing rather than a fixed per-frame constant.
 
+**Camera.** `Camera` animates the axis limits that each chart used to nail down once. It
+is *planned*, not accumulated: every window is worked out before the first frame is drawn
+and then read back by index. That is not a performance choice — `still=` asks for frame 200
+without drawing the 199 before it, so a camera that nudged its limits each frame would hand
+the still export a different frame than the video. Anything you add must keep that
+property; if you need smoothing, smooth the planned array (`_smooth` is zero-phase, so the
+frame anticipates rather than lags) rather than the live limits.
+
+Two rules hold across every move. The reveal head is never out of shot — losing it reads as
+a bug, not a camera. And the vertical follows the horizontal by the frame's own travel, so a
+camera zooms rather than stretching one axis; that is also what makes a pull back's final
+frame identical to a locked one. `locked` is the default and reproduces the pre-camera
+framing exactly, which is why adding this changed no existing output — `extent` and
+`rest_y` are how a renderer tells the camera what its own resting frame was. Charts built
+from ranked rows (`bars`, `race`) have no plane to move over and never construct one.
+
 **Mobile CSS.** The narrow-screen media query sits at the *end* of the stylesheet and must
 stay there. It has the same specificity as the base rules, so moving it earlier silently
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
@@ -113,6 +129,12 @@ matters.
 - Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
+- `still=` maps 0..1 across the reveal, not across reveal + hold, so the preview scrub
+  tops out at the first hold frame. That was invisible while every hold frame was
+  identical; with `follow` the settle happens *during* the hold, so its final wide frame
+  is the one frame you cannot preview or save as a thumbnail. Widening the mapping would
+  move the frame every existing scrub position points at, so it wants doing deliberately
+  rather than as a side effect.
 
 ## Roadmap
 

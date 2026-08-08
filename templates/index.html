@@ -311,6 +311,30 @@ button,input,select,textarea{font:inherit;color:inherit}
       </div>
     </div>
 
+    <!-- Bars and the race have no plane to move a camera over — the rows are the
+         composition — so the whole group drops out for them. -->
+    <div class="group" data-for="line compare candles timeline">
+      <div class="eyebrow" style="padding:0 0 10px">Camera</div>
+      <div class="field">
+        <label for="camera">Move</label>
+        <select class="ctrl" id="camera"></select>
+        <div class="hint" id="cameraHint"></div>
+      </div>
+      <div class="field" id="travelField">
+        <label>Travel</label>
+        <div class="seg" id="travelSeg"></div>
+      </div>
+      <div class="field" id="cameraYField">
+        <label>Vertical</label>
+        <div class="seg" id="cameraYSeg">
+          <button data-v="track" aria-pressed="true">Track</button>
+          <button data-v="hold" aria-pressed="false">Hold scale</button>
+        </div>
+        <div class="hint">Tracking fills the frame as it moves. Holding keeps one price
+          scale, so every move stays the size it really was.</div>
+      </div>
+    </div>
+
     <div class="group">
       <div class="eyebrow" style="padding:0 0 10px">Output</div>
       <div class="field">
@@ -392,6 +416,7 @@ const esc = s => String(s).replace(/[&<>"']/g,
 const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight",
   aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0,
+  camera:"locked", travel:"standard", cameraY:"track",
   meta:null, maxTickers:1
 };
 
@@ -405,6 +430,12 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
       <div class="mode-name">${c.label}</div>
       <div class="mode-desc">${c.desc}</div>
     </button>`).join("");
+  $("#camera").innerHTML = m.cameras.map(c=>
+    `<option value="${c.id}">${c.label}</option>`).join("");
+  $("#travelSeg").innerHTML = m.travels.map(v=>
+    `<button data-v="${v}" aria-pressed="${v===state.travel}">${
+      v[0].toUpperCase()+v.slice(1)}</button>`).join("");
+  applyCamera();
   $("#themes").innerHTML = m.themes.map(t=>`
     <button class="swatch" data-id="${t.id}" aria-pressed="${t.id===state.theme}">
       <span class="swatch-dots">${t.swatch.map(c=>`<i style="background:${c}"></i>`).join("")}</span>
@@ -441,6 +472,23 @@ seg("#easingSeg","easing");
 seg("#aspectSeg","aspect");
 seg("#qualitySeg","quality", v=>v, applyTier);
 seg("#bgSeg","transparent",Number);
+seg("#travelSeg","travel");
+seg("#cameraYSeg","cameraY");
+
+/* ---------- camera ---------- */
+// Travel and vertical only mean something once the frame is actually moving, so a locked
+// camera hides them rather than leaving two controls on screen that do nothing.
+function applyCamera(){
+  const c = state.meta.cameras.find(c=>c.id===state.camera);
+  $("#cameraHint").textContent = c ? c.desc : "";
+  const locked = state.camera === "locked";
+  $("#travelField").hidden = locked;
+  $("#cameraYField").hidden = locked;
+}
+$("#camera").addEventListener("change", ()=>{
+  state.camera = $("#camera").value;
+  applyCamera(); schedule();
+});
 
 /* ---------- editable slate ---------- */
 // A tier seeds frame rate and resolution; the slate then overrides either one. Picking a
@@ -522,6 +570,7 @@ function config(){
     start: $("#start").value, end: $("#end").value || null,
     duration: +$("#duration").value, hold: +$("#hold").value,
     easing: state.easing, theme: state.theme,
+    camera: state.camera, camera_travel: state.travel, camera_y: state.cameraY,
     aspect: state.aspect, quality: state.quality,
     fps: state.fps, resolution: state.resolution,
     title: $("#title").value, subtitle: $("#subtitle").value, footer: $("#footer").value,

@@ -53,6 +53,14 @@ def _choice(value, options, default, label):
     return value
 
 
+def _one_of(value, options, default, label):
+    """Pick one of a fixed set of names, falling back when the field is absent."""
+    value = (str(value).strip().lower() if value not in (None, "") else default)
+    if value not in options:
+        raise ValueError(f"{label} must be one of: {', '.join(options)}.")
+    return value
+
+
 def clean_config(raw):
     chart = raw.get("chart", "line")
     spec = renderers.CHARTS.get(chart)
@@ -77,6 +85,15 @@ def clean_config(raw):
     resolution = _choice(raw.get("resolution"), renderers.RESOLUTIONS, enc["res"],
                          "Resolution")
 
+    # The camera defaults to locked, which is the framing every chart used before there
+    # was a camera at all — so an existing config renders exactly as it always has, and
+    # the move is something you go and ask for.
+    camera = _one_of(raw.get("camera"), renderers.CAMERAS, "locked", "Camera move")
+    travel = _one_of(raw.get("camera_travel"), renderers.TRAVELS, "standard",
+                     "Camera travel")
+    camera_y = _one_of(raw.get("camera_y"), renderers.CAMERA_Y, "track",
+                       "Camera vertical")
+
     cfg = {
         "chart": chart,
         "tickers": tickers,
@@ -85,6 +102,9 @@ def clean_config(raw):
         "duration": max(float(raw.get("duration", 6)), 0.5),
         "hold": max(float(raw.get("hold", 1.5)), 0.0),
         "easing": raw.get("easing", "out"),
+        "camera": camera,
+        "camera_travel": travel,
+        "camera_y": camera_y,
         "theme": raw.get("theme", "midnight"),
         "aspect": raw.get("aspect", "16:9"),
         "quality": quality,
@@ -192,6 +212,9 @@ def meta():
         "themes": [{"id": k, "label": v["label"], "bg": v["bg"],
                     "swatch": [v["up"], v["down"], *v["series"][:3]]}
                    for k, v in renderers.THEMES.items()],
+        "cameras": [{"id": k, "label": v["label"], "desc": v["desc"]}
+                    for k, v in renderers.CAMERAS.items()],
+        "travels": list(renderers.TRAVELS),
         "sizes": {a: {str(r): list(s) for r, s in rs.items()}
                   for a, rs in renderers.SIZES.items()},
         "resolutions": list(renderers.RESOLUTIONS),

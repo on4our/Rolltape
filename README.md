@@ -82,11 +82,35 @@ right choice most of the time. **Both ends** eases in and out, which suits slow
 atmospheric shots. **Linear** is for bar races, where constant speed reads as elapsed
 time.
 
+## Camera
+
+Left alone, a chart draws into a fixed frame: the whole date range is on screen from the
+first frame to the last. That is why the opening second of a reveal is mostly empty space
+and the closing second is too wide to read a number off. **Move** animates the frame
+instead.
+
+- **Locked off** — the fixed frame, and the default. Nothing moves.
+- **Pull back** — opens tight on the first few days and widens as the line arrives,
+  reaching the full range before the reveal ends. The fix for an empty opening frame.
+- **Follow** — a window travelling with the line, like a terminal replay. On the hold it
+  settles back to the whole chart, so the clip still ends on the full picture.
+- **Push in** — opens on the full range and dollies in, landing tight on the closing move
+  exactly as the reveal ends.
+
+**Travel** is how close it gets — Subtle, Standard or Bold. **Vertical** decides whether
+the price scale moves with the frame. *Track* fills the frame as the camera moves and is
+the more dramatic of the two. *Hold scale* keeps one price scale for the whole clip, so a
+2% wobble stays visibly smaller than a 40% run — worth choosing when you are narrating the
+size of a move rather than its shape.
+
+Bar comparison and the bar race have no camera. The rows are the composition, and there is
+no plane to move over, so the controls disappear for those two.
+
 ## Files
 
 ```
 app.py          Flask server, render queue, job tracking
-renderers.py    All six chart types, themes, easing, export
+renderers.py    All six chart types, themes, easing, camera moves, export
 data.py         Yahoo fetch with disk cache, plus the demo generator
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go — local disk or object storage

@@ -163,6 +163,252 @@ def _densify(x, y, n):
 
 
 # ---------------------------------------------------------------------------
+# Camera
+# ---------------------------------------------------------------------------
+# Left alone, every chart below draws into one fixed pair of axis limits: the whole range
+# is in frame from the first frame to the last. That is the honest framing, and it is also
+# why the opening second of a reveal is mostly empty and the closing second is too wide to
+# read a number off. A camera move animates those limits instead.
+#
+# Two rules shape the implementation. The whole move is planned before the first frame is
+# drawn, because `still=` has to answer for frame 200 without drawing the 199 before it —
+# a camera that nudged its limits frame to frame, the way the race rows settle, would hand
+# the still export a different frame than the video. And the head of the reveal is never
+# allowed out of shot, whichever move is running: losing it reads as a bug, not a camera.
+CAMERAS = {
+    "locked": {"label": "Locked off",
+               "desc": "The whole range in frame from the first frame to the last."},
+    "pullback": {"label": "Pull back",
+                 "desc": "Opens tight on the first days and widens as the line arrives."},
+    "follow": {"label": "Follow",
+               "desc": "A window travelling with the line, settling back to the whole "
+                       "chart on the hold."},
+    "push": {"label": "Push in",
+             "desc": "Starts wide and dollies in, landing tight as the reveal ends."},
+}
+
+# How far each move travels, as the share of the full range its tightest frame shows. The
+# moves get there differently, but they all answer the same question: how close in does it
+# actually get?
+TRAVEL = {
+    "subtle": {"pullback": 0.45, "follow": 0.60, "push": 0.62},
+    "standard": {"pullback": 0.28, "follow": 0.42, "push": 0.46},
+    "bold": {"pullback": 0.15, "follow": 0.27, "push": 0.32},
+}
+TRAVELS = ("subtle", "standard", "bold")
+CAMERA_Y = ("track", "hold")
+
+_LEAD = 0.20         # share of a follow window kept ahead of the head
+_PUSH_START = 0.25   # fraction of the reveal that passes before a push starts moving
+_MIN_Y_VIEW = 0.18   # floor on a tracked y window, as a share of the resting one
+_Y_PAD = 0.12        # headroom above and below the data in a tracked window
+_SMOOTH_TAU = 0.25   # seconds a tracked y window takes to answer a change in the extremes
+
+
+def head_track(pos, cut, hold_frames):
+    """Where the reveal head sits at each frame, held still through the hold."""
+    head = np.asarray(pos, float)[cut]
+    if hold_frames:
+        head = np.concatenate([head, np.full(hold_frames, head[-1])])
+    return head
+
+
+def _smooth(sig, fps):
+    """Zero-phase smoothing over a planned signal — forward, then back over the result.
+
+    A single forward pass would always arrive late, and late here means a new high sitting
+    outside the frame for a few frames while the camera catches up. Running it in both
+    directions cancels the lag, so the frame starts opening slightly *before* the bar that
+    needs the room — which is what a camera operator who has read the script does.
+    """
+    out = np.asarray(sig, float).copy()
+    if len(out) < 2:
+        return out
+    a = 1.0 - float(np.exp(-1.0 / (_SMOOTH_TAU * fps)))
+    for i in range(1, len(out)):
+        out[i] = out[i - 1] + (out[i] - out[i - 1]) * a
+    for i in range(len(out) - 2, -1, -1):
+        out[i] = out[i + 1] + (out[i] - out[i + 1]) * a
+    return out
+
+
+def _settle_ramp(hold_frames, fps):
+    """0 to 1 over the front of the hold, so a move can land before the clip ends."""
+    if hold_frames <= 0:
+        return np.zeros(0)
+    length = max(min(hold_frames * 0.65, 1.1 * fps), 1.0)
+    return ease("inout", np.clip(np.arange(hold_frames) / length, 0.0, 1.0))
+
+
+def _plan_x(move, tight, x_lo, x_hi, head, n_frames, hold_frames, fps):
+    """One horizontal window per frame, in data units."""
+    frames = n_frames + hold_frames
+    span = x_hi - x_lo
+    x0 = np.full(frames, float(x_lo))
+    x1 = np.full(frames, float(x_hi))
+    if move == "locked" or span <= 0:
+        return x0, x1
+
+    if move == "pullback":
+        # The frame holds the drawn line with the head just inside the right edge, so the
+        # opening is a close-up that widens as the data arrives. It reaches the full range
+        # a little before the reveal ends and stays there: the last beat is the frame
+        # people screenshot, and it has to show everything.
+        win = np.clip((head - x_lo) / 0.85, tight * span, span)
+        return x0, np.minimum(x0 + win, x_hi)
+
+    if move == "follow":
+        # Early on there is not enough drawn to fill the travelling window, so the frame
+        # opens tight on what there is and grows into it. Starting at full width instead
+        # would park the head at the left of a mostly empty frame for the first second,
+        # which is the thing a moving camera is here to stop doing.
+        win = np.clip((head - x_lo) / 0.85, tight * span * 0.35, tight * span)
+        x1 = np.maximum(head + win * _LEAD, x_lo + win)
+        x0 = x1 - win
+        # Then hand the whole chart back. A replay that ends on a close-up never shows the
+        # shape of the thing it just replayed. Mixed this way round rather than as
+        # `a + (b - a) * k` so that k of exactly 1 lands on exactly the resting frame.
+        if hold_frames:
+            k = _settle_ramp(hold_frames, fps)
+            x0[n_frames:] = x0[n_frames - 1] * (1 - k) + x_lo * k
+            x1[n_frames:] = x1[n_frames - 1] * (1 - k) + x_hi * k
+        return x0, x1
+
+    # push: a slow dolly toward the closing action. It runs on the clock rather than on the
+    # reveal's easing, so the move stays smooth whichever easing the reveal uses, and it
+    # lands exactly as the reveal ends — a camera still creeping when the clip cuts looks
+    # like a mistake rather than a decision. That clock is elapsed reveal, the same one the
+    # head runs on: one frame in n rather than the one frame in n-1 `linspace` would give,
+    # which costs four parts in a hundred thousand of the move at the moment it lands and
+    # buys a dolly that is the same speed at 30fps and at 60.
+    p = np.arange(n_frames) / float(max(n_frames, 1))
+    z = ease("inout", np.clip((p - _PUSH_START) / (1.0 - _PUSH_START), 0.0, 1.0))
+    if hold_frames:
+        z = np.concatenate([z, np.full(hold_frames, z[-1])])
+    x1 = np.full(frames, x_hi + span * 0.02)
+    x0 = x1 - span * (1.0 - z * (1.0 - tight))
+    return np.minimum(x0, head - span * 0.02), x1
+
+
+def _plan_y(x, lo, hi, head, x0, x1, rest, mode, fps, weight=None, floor=None):
+    """One vertical window per frame, framing what the horizontal window has drawn.
+
+    Returns the two limits plus the raw visible peak, which is the only number the volume
+    strip's single tick can sensibly sit on once the strip is being tracked.
+    """
+    frames = len(x0)
+    peak = float(np.max(hi))
+    if mode != "track":
+        return (np.full(frames, float(rest[0])), np.full(frames, float(rest[1])),
+                np.full(frames, peak))
+
+    rest_span = float(rest[1] - rest[0])
+    raw_lo = np.empty(frames)
+    raw_hi = np.empty(frames)
+    for i in range(frames):
+        # Only what has been drawn is on screen, so the frame is built from that and not
+        # from data the reveal has not reached — otherwise the camera opens up early to
+        # make room for a spike the viewer cannot see yet, and the reveal loses its punch.
+        a = int(np.searchsorted(x, x0[i], "left"))
+        b = int(np.searchsorted(x, min(x1[i], head[i]), "right"))
+        a = min(a, len(x) - 1)
+        b = max(b, a + 1)
+        raw_lo[i] = lo[a:b].min()
+        raw_hi[i] = hi[a:b].max()
+
+    # A quiet stretch magnified to fill the frame is just noise drawn large, which on a
+    # price chart is a lie about how much happened. The floor on the window stops it.
+    span = np.maximum(raw_hi - raw_lo, rest_span * _MIN_Y_VIEW)
+    mid = (raw_hi + raw_lo) / 2.0
+    top = _smooth(mid + span * (0.5 + _Y_PAD), fps)
+    bot = _smooth(mid - span * (0.5 + _Y_PAD), fps)
+
+    # A camera zooms; it doesn't stretch one axis and leave the other. `weight` is how far
+    # the frame has actually moved in horizontally, and the vertical follows it by the
+    # same amount — so a push that opens on the full width opens on the full height too,
+    # instead of magnifying the first few days into a spike, and a pull back that has
+    # reached the whole range is framed exactly as a locked camera would have framed it.
+    if weight is not None:
+        w = np.clip(weight, 0.0, 1.0)
+        top = float(rest[1]) * (1 - w) + top * w
+        bot = float(rest[0]) * (1 - w) + bot * w
+
+    top = np.maximum(top, raw_hi + span * 0.02)  # smoothing may lag; never clip the data
+    if floor is not None:
+        return np.full(frames, float(floor)), top, raw_hi
+    return np.minimum(bot, raw_lo - span * 0.02), top, raw_hi
+
+
+class Camera:
+    """Where the frame is pointed, planned once for the whole clip and read by index.
+
+    `extent` and `rest_y` are the limits the chart would have used on its own. A locked
+    camera hands exactly those back on every frame, which is what makes it free to leave
+    the default alone — nothing about an existing config renders differently.
+    """
+
+    def __init__(self, cfg, ctx, *, x, lo, hi, head, n_frames, hold_frames,
+                 extent=None, rest_y=None):
+        self.move = cfg.get("camera", "locked")
+        self.moving = self.move != "locked" and self.move in CAMERAS
+        tight = TRAVEL.get(cfg.get("camera_travel", "standard"), TRAVEL["standard"])
+        x_lo, x_hi = extent if extent else (float(x[0]), float(x[-1]))
+        rest_y = rest_y if rest_y else (float(np.min(lo)), float(np.max(hi)))
+
+        self._x = np.asarray(x, float)
+        self._head = np.asarray(head, float)
+        self._fps = ctx.fps
+        self.frames = n_frames + hold_frames
+        self.x0, self.x1 = _plan_x(self.move if self.moving else "locked",
+                                   tight.get(self.move, 1.0), x_lo, x_hi, self._head,
+                                   n_frames, hold_frames, ctx.fps)
+        # How far in the frame has come, which is what the vertical follows.
+        self._weight = 1.0 - (self.x1 - self.x0) / (x_hi - x_lo or 1.0)
+        # A locked camera does not move, and that includes the vertical: the setting only
+        # ever applies to a frame that is already travelling.
+        mode = cfg.get("camera_y", "track") if self.moving else "hold"
+        self.y0, self.y1, _ = _plan_y(self._x, lo, hi, self._head, self.x0, self.x1,
+                                      rest_y, mode, ctx.fps, weight=self._weight)
+        self._mode_y = mode
+
+    def track(self, lo, hi, rest, floor=None):
+        """Plan a second axis against the same windows — the volume strip under candles."""
+        return _plan_y(self._x, np.asarray(lo, float), np.asarray(hi, float), self._head,
+                       self.x0, self.x1, rest, self._mode_y, self._fps,
+                       weight=self._weight, floor=floor)
+
+    def apply(self, ax, i):
+        """Point the axes at frame `i` and return the index actually used."""
+        i = min(max(int(i), 0), self.frames - 1)
+        ax.set_xlim(self.x0[i], self.x1[i])
+        ax.set_ylim(self.y0[i], self.y1[i])
+        return i
+
+    def width(self, i):
+        return float(self.x1[i] - self.x0[i])
+
+    def height(self, i):
+        return float(self.y1[i] - self.y0[i])
+
+    def bottom(self, i):
+        return float(self.y0[i])
+
+    def right(self, i):
+        return float(self.x1[i])
+
+
+def _date_ticks(ax, span_days):
+    """Match the date format to how much time is actually in frame.
+
+    Only a moving camera needs this. A locked frame shows the range the user picked, and
+    they picked the format along with it; a camera changes the visible span underneath
+    them, and "Jan 2024" three ticks running is the result if the format does not follow.
+    """
+    ax.xaxis.set_major_formatter(
+        mdates.DateFormatter("%d %b" if span_days <= 120 else "%b %Y"))
+
+
+# ---------------------------------------------------------------------------
 # Figure scaffolding
 # ---------------------------------------------------------------------------
 def _new_fig(ctx):
@@ -315,9 +561,10 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     _style_axes(ax, ctx, y_fmt=_money)
 
     pad = (y.max() - y.min()) * 0.12 or y.max() * 0.05
-    ax.set_xlim(x[0], x[-1])
-    ax.set_ylim(y.min() - pad, y.max() + pad)
-    floor = ax.get_ylim()[0]
+    cam = Camera(cfg, ctx, x=xd, lo=yd, hi=yd, head=head_track(xd, cut, hold),
+                 n_frames=n_frames, hold_frames=hold,
+                 rest_y=(y.min() - pad, y.max() + pad))
+    cam.apply(ax, 0)
 
     glow = _glow(ax, color, ctx)
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
@@ -328,9 +575,9 @@ def render_line(cfg, ctx, out, progress=None, still=None):
                       fontweight="bold", ha="left", va="center", zorder=6,
                       fontfamily=MONO_STACK)
     fill = [None]
-    span = x[-1] - x[0]
 
     def draw(i):
+        i = cam.apply(ax, i)
         k = cut[min(i, n_frames - 1)]
         xs, ys = xd[:k], yd[:k]
         line.set_data(xs, ys)
@@ -339,10 +586,14 @@ def render_line(cfg, ctx, out, progress=None, still=None):
         head.set_data([xs[-1]], [ys[-1]])
         if fill[0] is not None:
             fill[0].remove()
-        fill[0] = ax.fill_between(xs, floor, ys, color=color, alpha=0.10,
+        # The fill is anchored to the bottom of the frame, not to a fixed price, so a
+        # moving camera slides the chart without dragging a floating slab of colour.
+        fill[0] = ax.fill_between(xs, cam.bottom(i), ys, color=color, alpha=0.10,
                                   linewidth=0, zorder=1)
-        readout.set_position((xs[-1] + span * 0.012, ys[-1]))
+        readout.set_position((xs[-1] + cam.width(i) * 0.012, ys[-1]))
         readout.set_text(_money(ys[-1]))
+        if cam.moving:
+            _date_ticks(ax, cam.width(i))
         return ()
 
     if still is not None:
@@ -381,10 +632,12 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
     ax = fig.add_axes(_plot_area(ctx, True))
     _style_axes(ax, ctx, y_fmt=(lambda v, _: f"{v:,.0f}") if normalize else _money)
 
-    allv = np.concatenate(list(series.values()))
-    pad = (allv.max() - allv.min()) * 0.12
-    ax.set_xlim(x[0], x[-1])
-    ax.set_ylim(allv.min() - pad, allv.max() + pad)
+    stack = np.vstack([series[c] for c in vals.columns])
+    pad = (stack.max() - stack.min()) * 0.12
+    cam = Camera(cfg, ctx, x=xd, lo=stack.min(axis=0), hi=stack.max(axis=0),
+                 head=head_track(xd, cut, hold), n_frames=n_frames, hold_frames=hold,
+                 rest_y=(stack.min() - pad, stack.max() + pad))
+    cam.apply(ax, 0)
     if normalize:
         ax.axhline(100, color=t["axis"], lw=1.2 * ctx.s, ls=(0, (4, 4)), zorder=1)
 
@@ -397,20 +650,24 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
         labels[c] = ax.text(0, 0, "", color=col, fontsize=17 * ctx.s,
                             fontweight="bold", ha="left", va="center", zorder=6,
                             fontfamily=MONO_STACK)
-    span = x[-1] - x[0]
 
     def draw(i):
+        i = cam.apply(ax, i)
         k = cut[min(i, n_frames - 1)]
-        # Nudge labels apart so overlapping series stay readable.
+        # Nudge labels apart so overlapping series stay readable. The gap is measured
+        # against the frame rather than the data, so it stays a constant distance on
+        # screen while a tracking camera changes what a price is worth in pixels.
         ends = sorted(((series[c][k - 1], c) for c in series), reverse=True)
-        min_gap = (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.045
+        min_gap = cam.height(i) * 0.045
         placed = []
         for v, c in ends:
             pos = v if not placed else min(v, placed[-1] - min_gap)
             placed.append(pos)
             lines[c].set_data(xd[:k], series[c][:k])
-            labels[c].set_position((x[-1] + span * 0.015, pos))
+            labels[c].set_position((cam.right(i) + cam.width(i) * 0.015, pos))
             labels[c].set_text(f"{c} {v:,.0f}" if normalize else f"{c} {_money(v)}")
+        if cam.moving:
+            _date_ticks(ax, cam.width(i))
         return ()
 
     if still is not None:
@@ -460,16 +717,37 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     axv.grid(False)
 
     pad = (h.max() - l.min()) * 0.10
-    ax.set_xlim(-1, n)
-    ax.set_ylim(l.min() - pad, h.max() + pad)
-    axv.set_ylim(0, vol.max() * 1.15)
-    axv.set_yticks([vol.max()])
+    # The camera works in candle-index space here rather than in dates, which is the same
+    # space the axes are already in. `extent` is the resting (-1, n) so a locked camera
+    # frames the row exactly as it always did, half a candle clear at either end.
+    cam = Camera(cfg, ctx, x=idx.astype(float), lo=l, hi=h,
+                 head=head_track(idx, np.clip(cut - 1, 0, n - 1), hold),
+                 n_frames=n_frames, hold_frames=hold, extent=(-1, n),
+                 rest_y=(l.min() - pad, h.max() + pad))
+    # Volume rides the same windows. Left on the full range it would flatten to nothing
+    # the moment the camera moved in on a quiet stretch.
+    vol_bot, vol_top, vol_peak = cam.track(np.zeros(n), vol,
+                                           rest=(0.0, vol.max() * 1.15), floor=0.0)
+    cam.apply(ax, 0)
 
     step = max(n // 6, 1)
     axv.set_xticks(idx[::step])
     axv.set_xticklabels([f"{d:%b %y}" for d in df.index[::step]])
     for lbl in axv.get_xticklabels():
         lbl.set_fontfamily(MONO_STACK)
+
+    def retick(i):
+        """Re-label the date axis for whatever candles are actually in frame."""
+        vis = idx[(idx >= cam.x0[i]) & (idx <= cam.x1[i])]
+        if not len(vis):
+            return
+        picks = vis[::max(len(vis) // 6, 1)]
+        days = (df.index[picks[-1]] - df.index[picks[0]]).days
+        fmt = "%d %b" if days <= 120 else "%b %y"
+        axv.set_xticks(picks)
+        axv.set_xticklabels([f"{df.index[j]:{fmt}}" for j in picks])
+        for lbl in axv.get_xticklabels():
+            lbl.set_fontfamily(MONO_STACK)
 
     wicks = LineCollection([], linewidths=1.4 * ctx.s, zorder=3)
     bodies = PolyCollection([], zorder=4, linewidths=0)
@@ -491,6 +769,11 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     w = 0.34
 
     def draw(i):
+        i = cam.apply(ax, i)
+        axv.set_ylim(vol_bot[i], vol_top[i])
+        axv.set_yticks([vol_peak[i]])
+        if cam.moving:
+            retick(i)
         k = cut[min(i, n_frames - 1)]
         wick_seg, body_v, vol_v, cols, vcols = [], [], [], [], []
         for j in range(k):
@@ -661,10 +944,10 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     _style_axes(ax, ctx, y_fmt=_money)
 
     pad = (y.max() - y.min()) * 0.18
-    ax.set_xlim(x[0], x[-1])
-    ax.set_ylim(y.min() - pad * 0.6, y.max() + pad)
-    floor = ax.get_ylim()[0]
-    span_y = ax.get_ylim()[1] - floor
+    cam = Camera(cfg, ctx, x=xd, lo=yd, hi=yd, head=head_track(xd, cut, hold),
+                 n_frames=n_frames, hold_frames=hold,
+                 rest_y=(y.min() - pad * 0.6, y.max() + pad))
+    cam.apply(ax, 0)
 
     glow = _glow(ax, color, ctx)
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
@@ -677,21 +960,21 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     for k, (d, lab) in enumerate(notes):
         yv = float(np.interp(d, x, y))
         row = k % 2  # alternate heights so neighbouring notes don't collide
-        ly = yv + span_y * (0.14 + 0.13 * row)
-        vl = ax.plot([d, d], [yv, ly], color=t["muted"], lw=1.2 * ctx.s,
+        vl = ax.plot([d, d], [yv, yv], color=t["muted"], lw=1.2 * ctx.s,
                      ls=(0, (3, 3)), alpha=0, zorder=3)[0]
         dot = ax.plot([d], [yv], "o", color=t["text"], markersize=6 * ctx.s,
                       alpha=0, zorder=5)[0]
-        txt = ax.text(d, ly, lab, color=t["text"], fontsize=15 * ctx.s,
+        txt = ax.text(d, yv, lab, color=t["text"], fontsize=15 * ctx.s,
                       ha="center", va="bottom", alpha=0, zorder=6)
         # Frame at which the reveal head first crosses this date.
         trigger = int(np.searchsorted(cut, np.searchsorted(xd, d)))
-        marks.append({"x": d, "vl": vl, "dot": dot, "txt": txt, "y0": ly,
+        marks.append({"x": d, "y": yv, "row": row, "vl": vl, "dot": dot, "txt": txt,
                       "trigger": trigger})
 
     fade_frames = max(int(0.28 * ctx.fps), 6)
 
     def draw(i):
+        i = cam.apply(ax, i)
         k = cut[min(i, n_frames - 1)]
         xs, ys = xd[:k], yd[:k]
         line.set_data(xs, ys)
@@ -700,16 +983,24 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
         head.set_data([xs[-1]], [ys[-1]])
         if fill[0] is not None:
             fill[0].remove()
-        fill[0] = ax.fill_between(xs, floor, ys, color=color, alpha=0.10,
+        fill[0] = ax.fill_between(xs, cam.bottom(i), ys, color=color, alpha=0.10,
                                   linewidth=0, zorder=1)
+        # Callout heights are a share of the frame rather than of the price range, so a
+        # camera that changes what a dollar is worth in pixels doesn't leave the labels
+        # stranded halfway up the chart or shoved off the top of it.
+        lift = cam.height(i)
         for m in marks:
             if i < m["trigger"]:
                 continue
             a = float(ease("out", min((i - m["trigger"]) / fade_frames, 1.0)))
+            ly = m["y"] + lift * (0.14 + 0.13 * m["row"])
+            m["vl"].set_data([m["x"], m["x"]], [m["y"], ly])
             m["vl"].set_alpha(a * 0.9)
             m["dot"].set_alpha(a)
             m["txt"].set_alpha(a)
-            m["txt"].set_position((m["x"], m["y0"] - span_y * 0.03 * (1 - a)))
+            m["txt"].set_position((m["x"], ly - lift * 0.03 * (1 - a)))
+        if cam.moving:
+            _date_ticks(ax, cam.width(i))
         return ()
 
     if still is not None:
