@@ -148,7 +148,12 @@ Two guards:
   complexity until someone actually maxes the expensive path — but this is the number to
   watch first if hosted margins look wrong.
 
-Break-even against a $100/month licensed feed is about 11 hobbyists or 6 creators.
+Break-even against a $100/month licensed feed is about 11 hobbyists or 6 creators. That
+counts gross revenue — net of payment processing it's 12 hobbyists, since Stripe's fixed
+30c is 6.2% of a $9 charge. See [Revenue projection](revenue-projection.md) for what
+this pricing produces at scale, and for the two findings that bear on decisions left
+open above: the ProRes sub-cap held in reserve, and the render caps against
+single-worker throughput.
 
 ## Sequencing
 
