@@ -17,6 +17,7 @@ import config
 import data as datasrc
 import jobs as jobstore
 import render_job
+import presets
 import renderers
 import storage
 
@@ -120,6 +121,26 @@ def _one_of(value, options, default, label):
     return value
 
 
+def format_title(fmt, chart, tickers):
+    """Fill a brand kit's default title.
+
+    Only tokens knowable from the config go in here — the date range and return live in
+    each chart's subtitle and aren't available until the data is fetched. Unknown tokens
+    are left as written rather than raising: a typo in a saved kit should look wrong on
+    the preview, not fail the render.
+    """
+    out = str(fmt or "").strip()
+    if not out:
+        return ""
+    for token, value in (
+        ("{ticker}", tickers[0] if tickers else ""),
+        ("{tickers}", ", ".join(tickers)),
+        ("{chart}", renderers.CHARTS.get(chart, {}).get("label", "")),
+    ):
+        out = out.replace(token, value)
+    return out.strip()
+
+
 def clean_config(raw):
     chart = raw.get("chart", "line")
     spec = renderers.CHARTS.get(chart)
@@ -137,12 +158,24 @@ def clean_config(raw):
     # The quality tier sets crf and preset, and seeds frame rate and resolution. Either of
     # those two can be overridden on its own — the slate in the UI edits them directly —
     # so resolve them to concrete numbers here and let the renderers stop caring which
-    # tier they came from.
-    quality = raw.get("quality", "final")
-    enc = renderers.ENCODE.get(quality) or renderers.ENCODE["final"]
+    # tier they came from. Both are indexed directly downstream, so a bad value has to
+    # fail here as a 400 rather than as a KeyError once the job is already queued.
+    quality = raw.get("quality") or "final"
+    if quality not in renderers.ENCODE:
+        raise ValueError(f"Unknown quality: {quality}")
+    enc = renderers.ENCODE[quality]
     fps = _choice(raw.get("fps"), renderers.FPS_CHOICES, enc["fps"], "Frame rate")
     resolution = _choice(raw.get("resolution"), renderers.RESOLUTIONS, enc["res"],
                          "Resolution")
+    preset = str(raw.get("preset") or "auto").strip().lower()
+    if preset != "auto" and preset not in renderers.PRESETS:
+        raise ValueError(f"Unknown encoder preset: {preset}")
+
+    # A typed title always wins over the brand kit's template, and a template that fills
+    # in to nothing falls through to whatever default the chart itself uses.
+    title = (raw.get("title") or "").strip()
+    if not title:
+        title = format_title(raw.get("title_format"), chart, tickers)
 
     # The window decides the interval — a preset carries its own, a custom range is told
     # one — so it has to resolve before the interval can be checked.
@@ -184,7 +217,8 @@ def clean_config(raw):
         "quality": quality,
         "fps": fps,
         "resolution": resolution,
-        "title": (raw.get("title") or "").strip() or None,
+        "preset": preset,
+        "title": title or None,
         "subtitle": (raw.get("subtitle") or "").strip() or None,
         "footer": (raw.get("footer") or "").strip() or None,
         "normalize": bool(raw.get("normalize", True)),
@@ -280,6 +314,10 @@ def meta():
         "intervals": [{"id": k, "label": v["label"], "days": v["days"]}
                       for k, v in datasrc.INTERVALS.items()],
         "intraday": datasrc.intraday_available(),
+        "sizes": {a: {q: list(s) for q, s in qs.items()}
+                  for a, qs in renderers.SIZES.items()},
+        "presets": list(renderers.PRESETS),
+        "auto_preset": {k: v["preset"] for k, v in renderers.ENCODE.items()},
         "demo": datasrc.is_demo(),
     })
 
@@ -365,6 +403,31 @@ def cancel(job_id):
 @app.get("/outputs/<path:name>")
 def outputs(name):
     return send_from_directory(OUT_DIR, name)
+
+
+@app.get("/api/presets")
+def list_presets():
+    return jsonify(presets.all_kits())
+
+
+@app.post("/api/presets")
+def save_preset():
+    body = request.get_json(force=True) or {}
+    kit = {field: body.get(field) for field in presets.FIELDS}
+    if kit["theme"] and kit["theme"] not in renderers.THEMES:
+        return jsonify({"error": f"Unknown theme: {kit['theme']}"}), 400
+    try:
+        name, cleaned = presets.save(body.get("name"), kit)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"name": name, "kit": cleaned})
+
+
+@app.delete("/api/presets/<name>")
+def delete_preset(name):
+    if not presets.delete(name):
+        return jsonify({"error": f"No brand kit named {name}."}), 404
+    return jsonify({"ok": True})
 
 
 @app.post("/api/cache/clear")

@@ -80,6 +80,12 @@ ENCODE = {
     "max": {"fps": 60, "crf": "14", "preset": "slow", "res": 1440},
 }
 
+# x264 presets a config may ask for. Measured on a 7.5s 1080p60 line chart, the whole
+# spread is ~3s of encode (veryfast 3.5s, medium 4.3s, slow 6.5s) and medium and slow come
+# out the same size — chart content is flat enough that x264 runs out of wins early. So
+# `final` sits on medium, and the override exists to trim seconds, not to change the file.
+PRESETS = ("veryfast", "medium", "slow")
+
 FONT_STACK = ["Inter", "Helvetica Neue", "Arial", "Liberation Sans", "DejaVu Sans"]
 MONO_STACK = ["JetBrains Mono", "SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono"]
 
@@ -126,13 +132,18 @@ class Ctx:
         return "none" if self.transparent else self.theme["bg"]
 
 
-def make_ctx(theme_name, aspect, quality, fps=None, res=None, transparent=False) -> Ctx:
+def make_ctx(theme_name, aspect, quality, fps=None, res=None, transparent=False,
+             preset=None) -> Ctx:
     theme = THEMES.get(theme_name, THEMES["midnight"])
     enc = ENCODE.get(quality, ENCODE["final"])
     sizes = SIZES.get(aspect, SIZES["16:9"])
     w, h = sizes.get(res or enc["res"], sizes[enc["res"]])
+    # "auto" and anything unrecognised fall back to the tier's own preset, so the tier
+    # stays in charge unless someone deliberately overrode it.
+    if preset in (None, "auto") or preset not in PRESETS:
+        preset = enc["preset"]
     return Ctx(theme=theme, w=w, h=h, fps=int(fps or enc["fps"]),
-               crf=enc["crf"], preset=enc["preset"], transparent=bool(transparent))
+               crf=enc["crf"], preset=preset, transparent=bool(transparent))
 
 
 # ---------------------------------------------------------------------------
@@ -1309,7 +1320,7 @@ def render(cfg, out_path, progress=None):
     datasrc.reset_sources()
     ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"),
                    cfg.get("quality", "final"), cfg.get("fps"), cfg.get("resolution"),
-                   cfg.get("transparent", False))
+                   cfg.get("transparent", False), cfg.get("preset"))
     return CHARTS[kind]["fn"](cfg, ctx, out_path, progress=progress)
 
 

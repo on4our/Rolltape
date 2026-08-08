@@ -20,6 +20,8 @@ def _flag(env):
 
 OUT_DIR = _path("ROLLTAPE_OUT_DIR", "outputs")
 CACHE_DIR = _path("ROLLTAPE_CACHE_DIR", ".cache")
+# Brand kits are the one bit of state meant to outlive a restart. See presets.py.
+PRESETS_PATH = _path("ROLLTAPE_PRESETS", "presets.json")
 
 # --demo still works and wins over this. The env var is for hosts with no CLI, and it is
 # also how a render subprocess inherits demo mode from the server that spawned it.

@@ -391,6 +391,14 @@ button,input,select,textarea{font:inherit;color:inherit}
         </div>
         <div class="hint" id="bgHint">Theme colour, H.264 MP4</div>
       </div>
+      <div class="field">
+        <label>Encoder</label>
+        <div class="seg" id="presetSeg">
+          <button data-v="auto" aria-pressed="true">Auto</button>
+          <button data-v="veryfast" aria-pressed="false">Faster</button>
+          <button data-v="slow" aria-pressed="false">Slower</button>
+        </div>
+      </div>
     </div>
 
     <div class="group">
@@ -401,6 +409,27 @@ button,input,select,textarea{font:inherit;color:inherit}
         <input class="ctrl" id="subtitle" placeholder="Defaults to range and return"></div>
       <div class="field"><label for="footer">Footer</label>
         <input class="ctrl" id="footer" placeholder="@yourchannel"></div>
+    </div>
+
+    <div class="group">
+      <div class="eyebrow" style="padding:0 0 10px">Brand kit</div>
+      <div class="field">
+        <label for="kit">Saved kits</label>
+        <select class="ctrl" id="kit" data-nopreview><option value="">None</option></select>
+        <div class="hint">Theme, footer and default title, kept between runs</div>
+      </div>
+      <div class="field">
+        <label for="titleFormat">Default title</label>
+        <input class="ctrl" id="titleFormat" placeholder="{ticker}">
+        <div class="hint">Fills in when Title is blank · {ticker} {tickers} {chart}</div>
+      </div>
+      <div class="row2">
+        <input class="ctrl" id="kitName" placeholder="Kit name" data-nopreview>
+        <button class="addbtn" id="saveKit" type="button">Save kit</button>
+      </div>
+      <button class="ghost" id="deleteKit" type="button" style="margin-top:8px" hidden>
+        Delete kit</button>
+      <div class="hint" id="kitErr" style="color:var(--red)" hidden></div>
     </div>
   </aside>
 
@@ -440,9 +469,9 @@ const esc = s => String(s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight", range:"1y",
-  aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0,
+  aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0, preset:"auto",
   camera:"locked", travel:"standard", cameraY:"track",
-  meta:null, maxTickers:1
+  meta:null, maxTickers:1, kits:{}
 };
 const CUSTOM = "custom";
 
@@ -497,6 +526,76 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
     applyRange(); schedule();
   });
   applyChart(); applyRange(); schedule(); pollJobs();
+  fetch("/api/presets").then(r=>r.json()).then(k=>drawKits(k, ""));
+});
+
+/* ---------- brand kit ---------- */
+function kitFields(){
+  return {
+    theme: state.theme,
+    footer: $("#footer").value.trim(),
+    title_format: $("#titleFormat").value.trim()
+  };
+}
+
+function kitError(msg){
+  $("#kitErr").textContent = msg || "";
+  $("#kitErr").hidden = !msg;
+}
+
+// Built with new Option() rather than innerHTML: kit names are user input that gets
+// stored and redrawn, and this way the name can never be read as markup.
+function drawKits(kits, selected){
+  state.kits = kits || {};
+  const sel = $("#kit");
+  sel.replaceChildren(new Option("None", ""));
+  Object.keys(state.kits).sort().forEach(n => sel.add(new Option(n, n)));
+  sel.value = state.kits[selected] ? selected : "";
+  $("#deleteKit").hidden = !sel.value;
+}
+
+function applyKit(name){
+  const kit = state.kits[name];
+  if(!kit) return;
+  if(kit.theme && state.meta.themes.some(t=>t.id===kit.theme)){
+    state.theme = kit.theme;
+    [...$("#themes").children].forEach(x=>
+      x.setAttribute("aria-pressed", x.dataset.id===kit.theme));
+  }
+  $("#footer").value = kit.footer || "";
+  $("#titleFormat").value = kit.title_format || "";
+}
+
+$("#kit").addEventListener("change", ()=>{
+  const name = $("#kit").value;
+  $("#deleteKit").hidden = !name;
+  if(name){ applyKit(name); $("#kitName").value = name; }
+  kitError(""); schedule();
+});
+
+$("#saveKit").addEventListener("click", async ()=>{
+  // Blank name with a kit selected means "update this one" rather than an error.
+  const name = $("#kitName").value.trim() || $("#kit").value;
+  const r = await fetch("/api/presets", {
+    method:"POST", headers:{"content-type":"application/json"},
+    body: JSON.stringify({name, ...kitFields()})
+  });
+  const j = await r.json();
+  if(!r.ok) return kitError(j.error);
+  state.kits[j.name] = j.kit;
+  drawKits(state.kits, j.name);
+  $("#kitName").value = "";
+  kitError("");
+});
+
+$("#deleteKit").addEventListener("click", async ()=>{
+  const name = $("#kit").value;
+  if(!name) return;
+  const r = await fetch(`/api/presets/${encodeURIComponent(name)}`, {method:"DELETE"});
+  if(!r.ok) return kitError((await r.json()).error);
+  delete state.kits[name];
+  drawKits(state.kits, "");
+  kitError("");
 });
 
 /* ---------- date range ---------- */
@@ -549,13 +648,15 @@ function applyInterval(){
 }
 
 /* ---------- segmented controls ---------- */
-function seg(id, key, cast = v=>v, after = null){
+// slateOnly skips the preview re-render for settings the preview can't show — the still
+// frame is never encoded, so the encoder preset would cost a render and change nothing.
+function seg(id, key, cast = v=>v, after = null, slateOnly = false){
   $(id).addEventListener("click", e=>{
     const b = e.target.closest("button"); if(!b) return;
     state[key] = cast(b.dataset.v);
     [...$(id).children].forEach(x=>x.setAttribute("aria-pressed", x===b));
     if (after) after();
-    schedule();
+    slateOnly ? slate() : schedule();
   });
 }
 $("#tickers").addEventListener("input", ()=>{ state.tickersTouched = true; });
@@ -563,6 +664,7 @@ seg("#normalizeSeg","normalize",Number);
 seg("#easingSeg","easing");
 seg("#aspectSeg","aspect");
 seg("#qualitySeg","quality", v=>v, applyTier);
+seg("#presetSeg","preset", v=>v, null, true);
 seg("#bgSeg","transparent",Number);
 seg("#travelSeg","travel");
 seg("#cameraYSeg","cameraY");
@@ -667,9 +769,10 @@ function config(){
     duration: +$("#duration").value, hold: +$("#hold").value,
     easing: state.easing, theme: state.theme,
     camera: state.camera, camera_travel: state.travel, camera_y: state.cameraY,
-    aspect: state.aspect, quality: state.quality,
+    aspect: state.aspect, quality: state.quality, preset: state.preset,
     fps: state.fps, resolution: state.resolution,
     title: $("#title").value, subtitle: $("#subtitle").value, footer: $("#footer").value,
+    title_format: $("#titleFormat").value,
     normalize: !!state.normalize,
     max_candles: +$("#maxCandles").value,
     metric: $("#metric").value,
@@ -697,7 +800,10 @@ function slate(){
   rate.setAttribute("aria-label", `Frame rate ${fps} fps. Activate to change.`);
   rate.title = `click for ${m.fps_choices.join(" / ")} fps`;
   const codec = state.transparent ? "ProRes 4444 MOV" : "H.264 MP4";
-  $("#slateRest").innerHTML = `<b>${frames}</b> frames · ${mm}:${ss} · ${codec}`;
+  // Spell out what Auto resolved to, so the tier's choice isn't something to guess at.
+  const preset = state.preset === "auto" ? m.auto_preset[state.quality] : state.preset;
+  $("#slateRest").innerHTML =
+    `<b>${frames}</b> frames · ${mm}:${ss} · ${codec} · ${preset}`;
   $("#bgHint").textContent = state.transparent
     ? "Alpha channel, ProRes 4444 MOV — large, drops straight into an editor"
     : "Theme colour, H.264 MP4";
@@ -711,7 +817,9 @@ function schedule(){
   clearTimeout(timer);
   timer = setTimeout(preview, 420);
 }
-document.querySelectorAll(".ctrl").forEach(el=>el.addEventListener("input", schedule));
+// data-nopreview opts a field out: naming a brand kit shouldn't cost a preview render.
+document.querySelectorAll(".ctrl:not([data-nopreview])")
+  .forEach(el=>el.addEventListener("input", schedule));
 $("#scrub").addEventListener("input", ()=>{
   $("#scrubLabel").textContent = `${$("#scrub").value}% through`;
   schedule();

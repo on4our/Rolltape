@@ -29,6 +29,7 @@ data.py         Yahoo fetch (yfinance), Stooq fallback, CSV disk cache, demo gen
 config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
+presets.py      Named brand kits, saved to one JSON file
 templates/      One HTML file, inline CSS and JS, no build step
 outputs/        Rendered MP4s
 ```
@@ -38,7 +39,9 @@ Deployment support sits off to the side and nothing local reads it: `Dockerfile`
 There is deliberately no frontend build step and no database. Job state is an in-memory
 `OrderedDict` in `jobs.py` that resets on restart. `config.py`, `storage.py` and
 `jobs.py` exist as seams so the app can boot on a read-only filesystem — they are not an
-abstraction layer to grow. Don't add a build pipeline or an ORM without a concrete reason.
+abstraction layer to grow. Don't add a build pipeline or an ORM without a concrete reason. Brand kits are the one
+exception and the only state meant to survive a restart: `presets.py` keeps them in a
+single JSON document, written atomically and read fresh on every call.
 
 ## How a render works
 
@@ -154,6 +157,14 @@ stay there. It has the same specificity as the base rules, so moving it earlier 
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
 anything smaller.
 
+**Brand kits.** A kit is theme, footer and a default title template. The client applies a
+kit to its own form state and sends the resolved values, so the server never needs to know
+which kit is active — `presets.py` is just where they are kept. The one exception is the
+title template: `format_title()` fills it in `clean_config()`, so the preview and the
+render agree and an API caller gets it too. Its tokens are deliberately limited to what
+the config knows (`{ticker}`, `{tickers}`, `{chart}`) — the date range and return live in
+each chart's subtitle and aren't known until the data is fetched.
+
 **Threading and processes.** matplotlib's pyplot state is global, so `DRAW_LOCK` serialises
 the drawing `app.py` does itself — previews and stills. Renders are not on that lock:
 `render_job.run()` puts each one in its own process, which is what keeps the preview
@@ -164,6 +175,12 @@ draining the queue is still what bounds CPU, not the lock.
 
 ## Known rough edges
 
+- **Render time is matplotlib, not ffmpeg.** A 7.5s 1080p60 clip takes ~90s, and drawing
+  the 450 frames is nearly all of it. The x264 preset spans only ~3s of that (veryfast
+  3.5s, medium 4.3s, slow 6.5s), and medium and slow produce the same file size. Anything
+  that meaningfully speeds up a render has to make `_new_fig`/draw cheaper — blitting,
+  reusing artists between frames, or rendering in parallel processes. Chasing the encoder
+  settings is not worth it; that was measured, not assumed.
 - `clean_config()` validates less than the contract above claims. Theme, aspect, easing,
   metric and both dates pass through unchecked — a typo'd theme silently renders as
   Midnight — and `duration` has no upper bound, so one request can queue tens of thousands
@@ -196,12 +213,16 @@ draining the queue is still what bounds CPU, not the lock.
 Near term, in rough priority order. The Stooq fallback that used to head this list has
 shipped; so has moving renders out of process.
 
-1. Make `clean_config()` match its own contract: validate theme, aspect, easing, metric and
-   the dates, and bound `duration`.
-2. Encoder preset exposed in the UI (`final` now defaults to `medium`).
-3. Brand kit: save theme, footer, and default title format as a named preset.
-4. Batch render — one config, many tickers, queued. The render subprocess is the piece
+1. Make `clean_config()` match its own contract: validate easing and metric, and bound
+   `duration`.
+2. Batch render — one config, many tickers, queued. The render subprocess is the piece
    that was missing; the queue already handles the rest.
+3. Frame-drawing speed — the only lever that actually shortens a render. See the first
+   known rough edge for where the time really goes.
+
+Done since this list was last rewritten: the Stooq fallback, renders out of process,
+intraday intervals, date-range presets, camera moves, the encoder preset (`final` moved
+from `slow` to `medium`, with an Auto/Faster/Slower override in the UI) and brand kits.
 
 Done: Stooq fallback in `data.py`, so a render survives Yahoo changing its endpoints.
 
