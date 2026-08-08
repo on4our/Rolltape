@@ -24,7 +24,7 @@ fallback. An ffmpeg already on PATH still wins when there is one.
 ```
 app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
-renderers.py    Six chart types + themes + easing + ffmpeg export
+renderers.py    Six chart types + themes + easing + camera + ffmpeg export
 data.py         Yahoo fetch (yfinance), Stooq fallback, CSV disk cache, demo generator
 config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
@@ -133,6 +133,22 @@ callouts, the race clock — has to resolve to a bar position too, not to a coor
 it on five-minute returns understates volatility by about 8.8x. Use
 `datasrc.periods_per_year(interval)`.
 
+**Camera.** `Camera` animates the axis limits that each chart used to nail down once. It
+is *planned*, not accumulated: every window is worked out before the first frame is drawn
+and then read back by index. That is not a performance choice — `still=` asks for frame 200
+without drawing the 199 before it, so a camera that nudged its limits each frame would hand
+the still export a different frame than the video. Anything you add must keep that
+property; if you need smoothing, smooth the planned array (`_smooth` is zero-phase, so the
+frame anticipates rather than lags) rather than the live limits.
+
+Two rules hold across every move. The reveal head is never out of shot — losing it reads as
+a bug, not a camera. And the vertical follows the horizontal by the frame's own travel, so a
+camera zooms rather than stretching one axis; that is also what makes a pull back's final
+frame identical to a locked one. `locked` is the default and reproduces the pre-camera
+framing exactly, which is why adding this changed no existing output — `extent` and
+`rest_y` are how a renderer tells the camera what its own resting frame was. Charts built
+from ranked rows (`bars`, `race`) have no plane to move over and never construct one.
+
 **Mobile CSS.** The narrow-screen media query sits at the *end* of the stylesheet and must
 stay there. It has the same specificity as the base rules, so moving it earlier silently
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
@@ -168,6 +184,12 @@ draining the queue is still what bounds CPU, not the lock.
 - `clean_config()` holds all validation and has no tests of its own.
 - Cancelling only works on a queued job. Killing an in-flight render is now a matter of
   signalling the child, but nothing in the UI calls the endpoint that would do it.
+- `still=` maps 0..1 across the reveal, not across reveal + hold, so the preview scrub
+  tops out at the first hold frame. That was invisible while every hold frame was
+  identical; with `follow` the settle happens *during* the hold, so its final wide frame
+  is the one frame you cannot preview or save as a thumbnail. Widening the mapping would
+  move the frame every existing scrub position points at, so it wants doing deliberately
+  rather than as a side effect.
 
 ## Roadmap
 
