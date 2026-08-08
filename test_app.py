@@ -40,14 +40,22 @@ class IntervalValidationTests(unittest.TestCase):
         recent = time.strftime("%Y-%m-%d", time.localtime(time.time() - 3 * 86400))
         self.assertEqual(cfg(interval="5m", start=recent)["start"], recent)
 
-    def test_a_junk_start_falls_back_to_the_window(self):
-        got = cfg(interval="1m", start="not-a-date")["start"]
+    def test_a_junk_start_is_refused_rather_than_guessed_at(self):
+        # The date fields can only send an ISO date; the API can send anything. Saying so
+        # beats clamping an unreadable date to the interval floor and rendering a window
+        # nobody asked for.
+        with self.assertRaises(ValueError) as caught:
+            cfg(interval="1m", start="not-a-date")
+        self.assertIn("Start date", str(caught.exception))
+
+    def test_a_start_older_than_the_interval_reaches_is_pulled_forward(self):
+        got = cfg(interval="1m", start="2020-01-01")["start"]
         floor = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
         self.assertEqual(got, floor)
 
     def test_intraday_is_refused_where_yfinance_is_absent(self):
-        # The serverless build drops yfinance to save ~45MB, which leaves Stooq — daily
-        # only. Better a clear refusal than a render that fails at the end.
+        # Stooq is daily-only, so without yfinance there is nothing to serve an intraday
+        # render. Better a clear refusal than a render that fails at the end.
         with mock.patch.object(data, "intraday_available", return_value=False):
             with self.assertRaises(ValueError) as caught:
                 cfg(interval="5m")

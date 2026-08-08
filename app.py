@@ -8,6 +8,7 @@ import re
 import threading
 import time
 import uuid
+from datetime import date
 from queue import Queue
 
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -77,6 +78,41 @@ def _clamp_start(start, interval):
     return time.strftime("%Y-%m-%d", time.localtime(max(asked, floor)))
 
 
+CUSTOM_RANGE = "custom"
+DEFAULT_START = "2024-01-01"
+
+
+def _date(value, label):
+    """An ISO date, or None. The date inputs only ever send this shape; the API might not."""
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        raise ValueError(f"{label} must look like 2024-01-31.") from None
+
+
+def resolve_window(raw):
+    """Turn the date selector into a concrete fetch window.
+
+    A preset resolves here rather than in the browser, so "year to date" posted to the API
+    still means year to date next January, and so the renderers keep seeing nothing but
+    plain start and end dates. A preset names its own interval; a custom range takes
+    whichever one was posted alongside the dates.
+    """
+    name = raw.get("range") or CUSTOM_RANGE
+    if name != CUSTOM_RANGE:
+        return {"range": name, **datasrc.resolve_range(name)}
+
+    start = _date(raw.get("start"), "Start date") or DEFAULT_START
+    end = _date(raw.get("end"), "End date")
+    if end and end <= start:
+        raise ValueError("The end date has to be after the start date.")
+    return {"range": CUSTOM_RANGE, "start": start, "end": end,
+            "interval": raw.get("interval") or datasrc.DEFAULT_INTERVAL, "sessions": None}
+
+
 def clean_config(raw):
     chart = raw.get("chart", "line")
     spec = renderers.CHARTS.get(chart)
@@ -101,7 +137,10 @@ def clean_config(raw):
     resolution = _choice(raw.get("resolution"), renderers.RESOLUTIONS, enc["res"],
                          "Resolution")
 
-    interval = raw.get("interval") or datasrc.DEFAULT_INTERVAL
+    # The window decides the interval — a preset carries its own, a custom range is told
+    # one — so it has to resolve before the interval can be checked.
+    window = resolve_window(raw)
+    interval = window["interval"]
     if interval not in datasrc.INTERVALS:
         raise ValueError(f"Unknown interval: {interval}")
     if datasrc.is_intraday(interval) and not datasrc.intraday_available():
@@ -112,9 +151,13 @@ def clean_config(raw):
     cfg = {
         "chart": chart,
         "tickers": tickers,
+        "range": window["range"],
+        # Clamped last: a preset can name a start further back than its interval reaches
+        # (10Y at 5m), and Yahoo answers that with silence rather than an error.
+        "start": _clamp_start(window["start"], interval),
+        "end": window["end"],
         "interval": interval,
-        "start": _clamp_start(raw.get("start") or "2024-01-01", interval),
-        "end": raw.get("end") or None,
+        "sessions": window["sessions"],
         "duration": max(float(raw.get("duration", 6)), 0.5),
         "hold": max(float(raw.get("hold", 1.5)), 0.0),
         "easing": raw.get("easing", "out"),
@@ -201,6 +244,12 @@ def meta():
         "themes": [{"id": k, "label": v["label"], "bg": v["bg"],
                     "swatch": [v["up"], v["down"], *v["series"][:3]]}
                    for k, v in renderers.THEMES.items()],
+        # Each preset ships with the window it resolves to right now, so the interface can
+        # spell out the dates without doing the arithmetic a second time and disagreeing
+        # with the server about what "last year" means.
+        "ranges": [{"id": k, "short": v["short"], "label": v["label"],
+                    **datasrc.resolve_range(k)}
+                   for k, v in datasrc.RANGES.items()],
         "sizes": {a: {str(r): list(s) for r, s in rs.items()}
                   for a, rs in renderers.SIZES.items()},
         "resolutions": list(renderers.RESOLUTIONS),

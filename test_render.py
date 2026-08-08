@@ -1,4 +1,4 @@
-"""Tests for the export path — background handling and the still export.
+"""Tests for the export path — background handling, date labelling and the still export.
 
 No network and no ffmpeg: everything here draws stills from demo data, which exercises
 the same figure scaffolding a video render uses without paying for an encode.
@@ -9,6 +9,7 @@ import io
 import unittest
 
 import numpy as np
+import pandas as pd
 
 import app as appmod
 import data
@@ -113,6 +114,96 @@ class StillExportTests(DemoDataCase):
         # The thumbnail path and the video path share one background decision.
         self.assertEqual(alpha_of(self.cfg(transparent=True))[3, 3], 0)
         self.assertEqual(alpha_of(self.cfg(transparent=False))[3, 3], 255)
+
+
+class WindowTests(DemoDataCase):
+    """From a posted config to the dates a fetch actually gets."""
+
+    def test_a_preset_resolves_to_dates_before_it_reaches_a_renderer(self):
+        # Renderers only ever see plain start and end dates; the preset stops here.
+        cfg = self.cfg(range="ytd")
+        self.assertTrue(cfg["start"].endswith("-01-01"))
+        self.assertIsNone(cfg["end"])
+        self.assertEqual(cfg["interval"], "1d")
+
+    def test_a_preset_overrides_dates_left_over_from_custom(self):
+        # The interface keeps posting whatever is in the two date fields so switching back
+        # to Custom doesn't lose them.
+        cfg = self.cfg(range="1y", start="2019-01-01", end="2019-06-01")
+        self.assertNotEqual(cfg["start"], "2019-01-01")
+        self.assertIsNone(cfg["end"])
+
+    def test_custom_keeps_the_dates_it_was_given(self):
+        cfg = self.cfg(range=appmod.CUSTOM_RANGE)
+        self.assertEqual((cfg["start"], cfg["end"]), ("2024-01-01", "2024-06-01"))
+
+    def test_a_config_with_no_range_at_all_still_means_its_dates(self):
+        # The API predates the selector: a caller that knows only start and end keeps working.
+        cfg = appmod.clean_config({"chart": "line", "tickers": ["NVDA"],
+                                   "start": "2024-02-01", "end": "2024-03-01"})
+        self.assertEqual(cfg["range"], appmod.CUSTOM_RANGE)
+        self.assertEqual((cfg["start"], cfg["end"]), ("2024-02-01", "2024-03-01"))
+
+    def test_a_backwards_custom_range_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.cfg(range=appmod.CUSTOM_RANGE, start="2024-06-01", end="2024-01-01")
+
+    def test_a_date_that_isnt_one_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.cfg(range=appmod.CUSTOM_RANGE, start="last tuesday")
+
+    def test_an_unknown_preset_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.cfg(range="1 fortnight")
+
+    def test_the_intraday_preset_asks_for_intraday_bars(self):
+        cfg = self.cfg(range="1d")
+        self.assertEqual(cfg["interval"], "5m")
+        self.assertEqual(cfg["sessions"], 1)
+
+    def test_every_chart_type_draws_an_intraday_window(self):
+        # Intraday is a different shape of index — timestamps rather than dates, one
+        # session rather than a year — and every renderer has to survive it.
+        for chart in CHART_FIXTURES:
+            with self.subTest(chart=chart):
+                self.assertGreater(len(draw(self.cfg(chart, range="1d")).ravel()), 0)
+
+
+class DateLabelTests(unittest.TestCase):
+    """Tick labels and subtitles have to follow the window or they say nothing."""
+
+    def test_a_session_is_labelled_by_the_clock(self):
+        idx = pd.date_range("2024-06-03 09:30", periods=78, freq="5min")
+        self.assertEqual(renderers._axis_fmt(idx), "%H:%M")
+        self.assertEqual(renderers._range_label(idx, True), "03 Jun 2024, 09:30 – 15:55")
+        self.assertEqual(renderers._stamp(idx[0], idx, True), "09:30")
+
+    def test_intraday_across_sessions_names_both_days(self):
+        # One date and two clock times only tells the truth within a single session.
+        idx = pd.date_range("2024-06-03 09:30", periods=200, freq="5min")
+        self.assertEqual(renderers._range_label(idx, True), "03 Jun – 04 Jun 2024")
+        self.assertEqual(renderers._stamp(idx[0], idx, True), "03 Jun 09:30")
+
+    def test_a_week_is_labelled_by_the_day(self):
+        idx = pd.bdate_range("2024-06-03", "2024-06-07")
+        self.assertEqual(renderers._axis_fmt(idx), "%d %b")
+        self.assertEqual(renderers._range_label(idx, False), "03 Jun – 07 Jun 2024")
+
+    def test_a_year_keeps_the_month_and_the_year(self):
+        idx = pd.bdate_range("2023-06-01", "2024-06-14")  # both ends are weekdays
+        self.assertEqual(renderers._axis_fmt(idx), "%b %Y")
+        self.assertEqual(renderers._range_label(idx, False), "Jun 2023 – Jun 2024")
+
+    def test_a_decade_drops_to_years(self):
+        self.assertEqual(renderers._axis_fmt(pd.bdate_range("2014-06-01", "2024-06-01")),
+                         "%Y")
+
+    def test_a_short_window_across_new_year_keeps_both_years(self):
+        idx = pd.bdate_range("2023-12-20", "2024-01-10")
+        self.assertEqual(renderers._range_label(idx, False), "20 Dec 2023 – 10 Jan 2024")
+
+    def test_an_unknown_window_falls_back_to_what_the_charts_always_did(self):
+        self.assertEqual(renderers._axis_fmt(None), "%b %Y")
 
 
 if __name__ == "__main__":

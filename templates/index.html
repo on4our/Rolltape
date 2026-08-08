@@ -100,6 +100,17 @@ button,input,select,textarea{font:inherit;color:inherit}
 .seg button[aria-pressed="true"]{background:var(--panel2);color:var(--amber)}
 .seg button:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
 
+/* The range presets. auto-fit rather than a fixed column count because this same grid is
+   352px wide in the rail and full-bleed once the layout stacks on a phone. */
+.chips{display:grid;grid-template-columns:repeat(auto-fit,minmax(66px,1fr));gap:6px}
+.chip{
+  background:var(--shell);border:1px solid var(--edge);border-radius:2px;cursor:pointer;
+  padding:7px 4px;font-family:var(--mono);font-size:11.5px;color:var(--dim);
+}
+.chip:hover{color:var(--ink);border-color:var(--dim)}
+.chip[aria-pressed="true"]{background:var(--panel2);color:var(--amber);border-color:var(--amber)}
+.chip:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+
 .swatches{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
 .swatch{
   display:flex;align-items:center;gap:8px;background:var(--shell);cursor:pointer;
@@ -210,6 +221,9 @@ button,input,select,textarea{font:inherit;color:inherit}
   .frame img{max-height:46vh}
   /* Safari zooms the page when a focused input is smaller than 16px. */
   .ctrl,.seg button,.swatch-name,.addbtn,.repeat-row .ctrl{font-size:16px}
+  /* Chips are buttons, so they don't trigger that zoom and don't need the full 16px —
+     which is what keeps twelve of them off a fourth row on a phone. */
+  .chip{font-size:14px;padding:10px 4px}
   .actions{gap:8px}
   .render{flex:1;padding:14px 18px}
   .kbd{display:none}
@@ -243,14 +257,19 @@ button,input,select,textarea{font:inherit;color:inherit}
         <input class="ctrl" id="tickers" value="NVDA" autocomplete="off" spellcheck="false">
         <div class="hint" id="tickerHint">One symbol</div>
       </div>
-      <div class="row2">
+      <div class="field">
+        <label>Date range</label>
+        <div class="chips" id="ranges"></div>
+        <div class="hint" id="rangeHint"></div>
+      </div>
+      <div class="row2" id="customRange" hidden>
         <div class="field"><label for="start">Start</label>
           <input class="ctrl" id="start" type="date" value="2024-01-01"></div>
         <div class="field"><label for="end">End</label>
           <input class="ctrl" id="end" type="date"></div>
       </div>
 
-      <div class="field">
+      <div class="field" id="intervalField" hidden>
         <label for="interval">Bar interval</label>
         <select class="ctrl" id="interval"></select>
         <div class="hint" id="intervalHint">One bar per trading day</div>
@@ -396,10 +415,11 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const state = {
-  chart:"line", normalize:1, easing:"out", theme:"midnight",
+  chart:"line", normalize:1, easing:"out", theme:"midnight", range:"1y",
   aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0,
   meta:null, maxTickers:1
 };
+const CUSTOM = "custom";
 
 /* ---------- boot ---------- */
 fetch("/api/meta").then(r=>r.json()).then(m=>{
@@ -416,6 +436,10 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
       <span class="swatch-dots">${t.swatch.map(c=>`<i style="background:${c}"></i>`).join("")}</span>
       <span class="swatch-name">${t.label}</span>
     </button>`).join("");
+  // Presets come from the registry in data.py, so adding one there is the whole change.
+  // Custom is the odd one out: it's the escape hatch to the two date fields, not a window.
+  $("#ranges").innerHTML = m.ranges.map(r=>chip(r.id, r.short, r.label)).join("")
+    + chip(CUSTOM, "Custom", "Pick your own start and end dates");
   $("#modes").addEventListener("click", e=>{
     const b = e.target.closest(".mode"); if(!b) return;
     state.chart = b.dataset.id;
@@ -428,15 +452,57 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
     [...$("#themes").children].forEach(x=>x.setAttribute("aria-pressed", x===b));
     schedule();
   });
-  // Intraday is Yahoo-only, and a deploy without yfinance can't serve it. Offering a
+  // Intraday is Yahoo-only, and an install without yfinance can't serve it. Offering a
   // control that always errors is worse than not offering it.
   $("#interval").innerHTML = m.intervals
     .filter(i=>m.intraday || !i.days)
     .map(i=>`<option value="${i.id}">${esc(i.label)}</option>`).join("");
   $("#interval").onchange = ()=>{ applyInterval(); schedule(); };
   applyInterval();
-  applyChart(); schedule(); pollJobs();
+  $("#ranges").addEventListener("click", e=>{
+    const b = e.target.closest(".chip"); if(!b) return;
+    state.range = b.dataset.id;
+    [...$("#ranges").children].forEach(x=>x.setAttribute("aria-pressed", x===b));
+    applyRange(); schedule();
+  });
+  applyChart(); applyRange(); schedule(); pollJobs();
 });
+
+/* ---------- date range ---------- */
+const chip = (id, short, label) =>
+  `<button class="chip" data-id="${id}" title="${label}" aria-label="${label}"
+           aria-pressed="${id===state.range}">${short}</button>`;
+
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// Parsed by hand rather than through Date, which reads a bare ISO date as UTC and shows
+// the day before to anyone west of Greenwich.
+const day = iso => { const [y,m,d] = iso.split("-"); return `${+d} ${MONTHS[+m-1]} ${y}`; };
+
+// Each preset arrives from /api/meta already resolved, so the hint can't disagree with the
+// window the render will fetch. Left open past midnight the text goes a day stale; the
+// render re-resolves server-side either way.
+function applyRange(){
+  const custom = state.range === CUSTOM;
+  $("#customRange").hidden = !custom;
+  // A preset names its own interval, so the manual control belongs to a custom range only
+  // — leaving it visible would imply a choice the server is about to overrule.
+  $("#intervalField").hidden = !custom;
+  if (custom){
+    $("#rangeHint").textContent = "Leave the end date empty to run up to the latest bar";
+    applyInterval();
+    return;
+  }
+  const r = (state.meta.ranges || []).find(x => x.id === state.range);
+  if (!r) return;
+  const win = r.sessions
+    ? (r.sessions === 1 ? "the most recent session" : `the last ${r.sessions} sessions`)
+    : `${day(r.start)} → ${r.end ? day(r.end) : "today"}`;
+  $("#rangeHint").textContent =
+    `${r.label} · ${win}${r.interval === "1d" ? "" : ` · ${r.interval} bars`}`;
+  $("#candleHint").textContent = r.interval === "1d"
+    ? "Longer ranges roll up to weekly or monthly"
+    : "Keeps the most recent candles at this interval";
+}
 
 /* Yahoo keeps a limited window of intraday history, so say so before the render does. */
 function applyInterval(){
@@ -545,6 +611,9 @@ function config(){
   return {
     chart: state.chart,
     tickers: raw.slice(0, state.maxTickers),
+    // start and end ride along whatever the range is, so switching to Custom and back
+    // doesn't lose the dates already typed. The server ignores them unless range is custom.
+    range: state.range,
     start: $("#start").value, end: $("#end").value || null,
     interval: $("#interval").value || "1d",
     duration: +$("#duration").value, hold: +$("#hold").value,

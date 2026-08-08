@@ -89,6 +89,73 @@ _SOURCES = {}
 
 SOURCE_LABELS = {"stooq": "Data: Stooq", "demo": "Demo data"}
 
+# Regular US trading hours. Only the demo generator needs these — a real feed decides its
+# own session — but they have to be right or an offline intraday preview looks wrong.
+SESSION_OPEN = (9, 30)
+SESSION_CLOSE = (16, 0)
+
+# Quick-pick windows for the date selector, resolved against today. `short` is what fits on
+# a button, `label` is what it means; the UI reads both from /api/meta so adding a preset
+# here is the whole change. `days` counts back from today, and an entry that names an
+# `interval` other than "1d" is asking for intraday bars.
+RANGES = {
+    "1d": {"short": "1D", "label": "Intraday", "days": 5,
+           "interval": "5m", "sessions": 1},
+    "1w": {"short": "1W", "label": "Last week", "days": 7},
+    "1m": {"short": "1M", "label": "Last month", "days": 31},
+    "3m": {"short": "3M", "label": "Last 3 months", "days": 92},
+    "6m": {"short": "6M", "label": "Last 6 months", "days": 183},
+    "ytd": {"short": "YTD", "label": "Year to date", "ytd": True},
+    "1y": {"short": "1Y", "label": "Last year", "days": 365},
+    "3y": {"short": "3Y", "label": "Last 3 years", "days": 1095},
+    "5y": {"short": "5Y", "label": "Last 5 years", "days": 1826},
+    "10y": {"short": "10Y", "label": "Last 10 years", "days": 3653},
+    "max": {"short": "MAX", "label": "Everything the source has", "from": "1970-01-01"},
+}
+
+
+def interval_minutes(interval):
+    """Bar length in minutes, or None for daily bars.
+
+    Derived from INTERVALS rather than parsed off the name: "1h" doesn't end in "m" and a
+    string check quietly called it daily, which is how an hourly request reaches a
+    daily-only source.
+    """
+    step = _spec(interval)["step"]
+    return int(pd.Timedelta(step) / pd.Timedelta("1min")) if step else None
+
+
+def resolve_range(name, today=None):
+    """Turn a preset name into the window a fetch needs.
+
+    `end` stays None on purpose: Yahoo treats an explicit end as exclusive, so pinning it to
+    today would drop today's bar — the one a "year to date" chart is being made for.
+    """
+    spec = RANGES.get(name)
+    if not spec:
+        raise ValueError(f"Unknown date range: {name}")
+    today = (pd.Timestamp(today) if today is not None else pd.Timestamp.today()).normalize()
+
+    if spec.get("ytd"):
+        start = today.replace(month=1, day=1)
+    elif spec.get("from"):
+        start = pd.Timestamp(spec["from"])
+    else:
+        start = today - pd.Timedelta(days=spec["days"])
+
+    return {"start": start.strftime("%Y-%m-%d"), "end": None,
+            "interval": spec.get("interval", "1d"), "sessions": spec.get("sessions")}
+
+
+def window(cfg):
+    """Fetch keywords for the window a config asks for.
+
+    Renderers pass this straight through, so a new setting reaches every chart type without
+    six call sites having to learn about it.
+    """
+    return {"start": cfg["start"], "end": cfg.get("end"),
+            "interval": cfg.get("interval", "1d"), "sessions": cfg.get("sessions")}
+
 
 def set_demo(flag: bool):
     global _DEMO
@@ -208,8 +275,10 @@ def _session_index(start, end, step):
     The overnight holes are the point: demo intraday has to have the same shape as the real
     thing, or it won't exercise the axis handling whose whole job is closing them.
     """
-    parts = [pd.date_range(d + pd.Timedelta("9h30min"), d + pd.Timedelta("15h55min"),
-                           freq=step)
+    open_at = pd.Timedelta(hours=SESSION_OPEN[0], minutes=SESSION_OPEN[1])
+    close_at = pd.Timedelta(hours=SESSION_CLOSE[0], minutes=SESSION_CLOSE[1])
+    # Bars are labelled by the time they open, so the last one starts before the close.
+    parts = [pd.date_range(d + open_at, d + close_at, freq=step, inclusive="left")
              for d in pd.bdate_range(start, end)]
     return parts[0].append(parts[1:]) if parts else pd.DatetimeIndex([])
 
@@ -278,6 +347,9 @@ def _stooq(ticker, start, end, interval=DEFAULT_INTERVAL):
     dividend-and-split adjusted prices, Stooq adjusts differently, so total return for the
     same window can differ between the two. That's why the footer names the source.
     """
+    if is_intraday(interval):
+        raise ValueError("intraday bars are not available from Stooq")
+
     url = f"https://stooq.com/q/d/l/?s={_stooq_symbol(ticker)}&i=d"
     with urllib.request.urlopen(url, timeout=30) as resp:
         raw = resp.read().decode("utf-8", "replace")
@@ -301,8 +373,23 @@ def _stooq(ticker, start, end, interval=DEFAULT_INTERVAL):
     return df
 
 
+def _usable(df, sessions):
+    """Trim to the last `sessions` trading days, then insist there's something to animate.
+
+    "Intraday" means the most recent session, but which day that is depends on weekends and
+    holidays — so the range asks for a few days of bars and keeps the tail rather than
+    guessing a date and coming back empty on a Monday morning.
+    """
+    if sessions:
+        days = df.index.normalize().unique()
+        df = df.loc[df.index.normalize() >= days[-int(sessions):][0]]
+    if len(df) < 2:
+        raise ValueError("fewer than two bars in that range")
+    return df
+
+
 def fetch(ticker: str, start: str, end: str | None = None,
-          interval: str = DEFAULT_INTERVAL) -> pd.DataFrame:
+          interval: str = DEFAULT_INTERVAL, sessions: int | None = None) -> pd.DataFrame:
     """Return a DataFrame indexed by timestamp with Open/High/Low/Close/Volume.
 
     For daily bars: Yahoo first, Stooq second. Yahoo breaks whenever it changes its
@@ -316,7 +403,7 @@ def fetch(ticker: str, start: str, end: str | None = None,
     if _DEMO:
         _SOURCES[ticker] = "demo"
         end = end or pd.Timestamp.today().normalize()
-        return _synthetic(ticker, start, end, interval)
+        return _usable(_synthetic(ticker, start, end, interval), sessions)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     cached, source = _find_cached(ticker, start, end, interval)
@@ -324,20 +411,23 @@ def fetch(ticker: str, start: str, end: str | None = None,
         df = pd.read_csv(cached, index_col=0, parse_dates=True)
         if not df.empty:
             _SOURCES[ticker] = source
-            return df
+            return _usable(df, sessions)
 
     fetchers = {"yahoo": _yahoo, "stooq": _stooq}
     problems = []
     for source in _sources_for(interval):  # preference order, as in _find_cached
         try:
             df = fetchers[source](ticker, start, end, interval)
+            trimmed = _usable(df, sessions)
         except Exception as exc:  # noqa: BLE001
             problems.append(f"{source}: {exc}")
             continue
+        # Cache what the source gave, not what this render kept — the session trim isn't
+        # part of the cache key, so a trimmed frame under that key would be a lie.
         df.to_csv(_cache_path(ticker, start, end, source, interval))
         _drop_superseded(ticker, start, end, interval)
         _SOURCES[ticker] = source
-        return df
+        return trimmed
 
     detail = "; ".join(problems)
     if is_intraday(interval):
@@ -345,12 +435,12 @@ def fetch(ticker: str, start: str, end: str | None = None,
     raise ValueError(f"No data for {ticker} ({detail}).")
 
 
-def fetch_many(tickers, start, end=None, interval=DEFAULT_INTERVAL) -> dict:
+def fetch_many(tickers, start, end=None, interval=DEFAULT_INTERVAL, sessions=None) -> dict:
     out = {}
     errors = []
     for t in tickers:
         try:
-            out[t.strip().upper()] = fetch(t, start, end, interval)
+            out[t.strip().upper()] = fetch(t, start, end, interval, sessions)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{t}: {exc}")
     if not out:

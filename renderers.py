@@ -208,7 +208,34 @@ def _plot_area(ctx, has_title):
     return [0.07, 0.11, 0.79, 0.70 if has_title else 0.78]
 
 
-def _style_axes(ax, ctx, y_fmt=None, x_dates=True):
+def _span_days(index):
+    """How much time is on screen, or None when there isn't enough to tell."""
+    if index is None or len(index) < 2:
+        return None
+    return (index[-1] - index[0]).total_seconds() / 86400.0
+
+
+def _axis_fmt(index=None):
+    """Tick label format that suits the window.
+
+    Date labels have to follow the span or they say nothing: a week of bars under "%b %Y"
+    repeats one month across the axis, a single session repeats it at every tick, and a
+    decade under "%d %b" is unreadable clutter. Defaults to the month-and-year form the
+    charts used before there was anything but multi-year windows.
+    """
+    days = _span_days(index)
+    if days is None:
+        return "%b %Y"
+    if days <= 2:
+        return "%H:%M"
+    if days <= 90:
+        return "%d %b"
+    if days <= 1500:
+        return "%b %Y"
+    return "%Y"
+
+
+def _style_axes(ax, ctx, y_fmt=None, x_dates=True, index=None):
     t = ctx.theme
     ax.set_facecolor(ctx.bg)
     ax.grid(True, color=t["grid"], linewidth=0.8 * ctx.s, alpha=0.9)
@@ -222,7 +249,7 @@ def _style_axes(ax, ctx, y_fmt=None, x_dates=True):
     if x_dates:
         ax.xaxis.set_major_locator(
             mdates.AutoDateLocator(minticks=3, maxticks=5 if ctx.tall else 8))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter(_axis_fmt(index)))
     if y_fmt:
         ax.yaxis.set_major_formatter(y_fmt)
 
@@ -280,13 +307,21 @@ def _position_ticks(ax, ctx, index):
 
 
 def _range_label(index, intraday):
-    """The span shown under the title."""
+    """The span shown under the title, at the precision the window deserves.
+
+    A fixed month-and-year turns any window shorter than a couple of months into
+    "Jun 2024 – Jun 2024", and the date presets make those the common case — so a short
+    window names the day and a single session names the hours.
+    """
     a, b = index[0], index[-1]
-    if not intraday:
-        return f"{a:%b %Y} – {b:%b %Y}"
-    if _one_session(index):
-        return f"{a:%d %b %Y}, {a:%H:%M} – {b:%H:%M}"
-    return f"{a:%d %b} – {b:%d %b %Y}"
+    if intraday:
+        if _one_session(index):
+            return f"{a:%d %b %Y}, {a:%H:%M} – {b:%H:%M}"
+        return f"{a:%d %b} – {b:%d %b %Y}"
+    if (_span_days(index) or 0) <= 120:
+        left = f"{a:%d %b}" if a.year == b.year else f"{a:%d %b %Y}"
+        return f"{left} – {b:%d %b %Y}"
+    return f"{a:%b %Y} – {b:%b %Y}"
 
 
 def _stamp(ts, index, intraday, daily="%d %b %Y"):
@@ -390,7 +425,7 @@ def _export(fig, anim, path, ctx, progress):
 def render_line(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
     intraday = _intraday(cfg)
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"), _interval(cfg))
+    df = datasrc.fetch(tk, **datasrc.window(cfg))
     x = _x_values(df.index, intraday)
     y = df["Close"].to_numpy(float)
 
@@ -457,7 +492,7 @@ def render_line(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 def render_compare(cfg, ctx, out, progress=None, still=None):
     intraday = _intraday(cfg)
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"), _interval(cfg))
+    frames = datasrc.fetch_many(cfg["tickers"], **datasrc.window(cfg))
     closes = pd.DataFrame({k: v["Close"] for k, v in frames.items()}).dropna()
     if closes.empty:
         raise ValueError("Tickers have no overlapping trading days.")
@@ -531,7 +566,7 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
 def render_candles(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
     intraday = _intraday(cfg)
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"), _interval(cfg))
+    df = datasrc.fetch(tk, **datasrc.window(cfg))
     max_c = int(cfg.get("max_candles", 90))
     if len(df) > max_c:
         if intraday:
@@ -648,7 +683,7 @@ def _bar_rows(cfg):
             return clean, cfg.get("unit", ""), int(cfg.get("decimals", 1))
 
     metric = cfg.get("metric", "return")
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"), _interval(cfg))
+    frames = datasrc.fetch_many(cfg["tickers"], **datasrc.window(cfg))
     periods = datasrc.periods_per_year(_interval(cfg))
     out = []
     for tk, df in frames.items():
@@ -747,7 +782,7 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
 def render_timeline(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
     intraday = _intraday(cfg)
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"), _interval(cfg))
+    df = datasrc.fetch(tk, **datasrc.window(cfg))
     x = _x_values(df.index, intraday)
     y = df["Close"].to_numpy(float)
 
@@ -849,7 +884,7 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 def render_race(cfg, ctx, out, progress=None, still=None):
     intraday = _intraday(cfg)
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"), _interval(cfg))
+    frames = datasrc.fetch_many(cfg["tickers"], **datasrc.window(cfg))
     closes = pd.DataFrame({k: v["Close"] for k, v in frames.items()}).dropna()
     if closes.shape[1] < 2:
         raise ValueError("A race needs at least two tickers.")

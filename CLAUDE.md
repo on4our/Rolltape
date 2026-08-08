@@ -93,6 +93,20 @@ concrete numbers, so `cfg["fps"]` and `cfg["resolution"]` are always set and not
 downstream re-derives them from the tier. `SIZES` is keyed by the short side (720, 1080,
 1440), and the aspect decides which side that is.
 
+**Date ranges.** Same shape: `RANGES` in `data.py` declares the presets, `clean_config()`
+resolves the chosen one into concrete `start`/`end`/`interval`/`sessions`, and the
+renderers never learn that presets exist. `range: "custom"` (or no `range` at all, which is
+what an older API caller sends) uses the posted dates instead. Presets deliberately leave
+`end` as None — Yahoo treats an explicit end as exclusive, so pinning it to today drops
+today's bar. Renderers ask for their window with `datasrc.window(cfg)` rather than reading
+`cfg["start"]` directly, so another knob doesn't mean editing six call sites. Adding a
+preset is one entry in `RANGES`; the UI builds its buttons from `/api/meta`.
+
+**Date labels follow the span.** `_axis_fmt()` picks the tick format from how much time is
+on screen and `_range_label()` does the same for subtitles. A window shorter than a couple
+of months under the old fixed `%b %Y` printed the same month at every tick, so any renderer
+drawing a date axis passes its index in.
+
 **Alpha.** Transparent renders swap codec *and* container — h264 in an MP4 has no alpha
 channel, so they go out as ProRes 4444 in a `.mov`. `renderers.output_extension()` is the
 single source of truth for which; `app.py` asks it rather than deciding separately. `crf`
