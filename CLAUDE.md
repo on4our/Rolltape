@@ -22,18 +22,17 @@ ffmpeg must be on PATH. Everything else is pip.
 
 ```
 app.py          Flask routes, single-threaded render queue, config validation
+render_job.py   Both sides of the render subprocess — spawner and child entry point
 renderers.py    Six chart types + themes + easing + ffmpeg export
-data.py         Yahoo fetch, Stooq fallback, CSV disk cache, demo generator
+data.py         Yahoo fetch (yfinance), Stooq fallback, CSV disk cache, demo generator
 config.py       Env-var configuration; every default reproduces the local setup
-storage.py      Where a finished MP4 lands — local disk or object storage
+storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
 templates/      One HTML file, inline CSS and JS, no build step
 outputs/        Rendered MP4s
 ```
 
-Deployment support sits off to the side and nothing local reads it: `Dockerfile`,
-`api/index.py` (WSGI entrypoint), `vercel.json`, `requirements-vercel.txt`,
-`scripts/trim-bundle.sh`.
+Deployment support sits off to the side and nothing local reads it: `Dockerfile`.
 
 There is deliberately no frontend build step and no database. Job state is an in-memory
 `OrderedDict` in `jobs.py` that resets on restart. `config.py`, `storage.py` and
@@ -44,10 +43,13 @@ abstraction layer to grow. Don't add a build pipeline or an ORM without a concre
 
 1. Browser POSTs config JSON to `/api/render`.
 2. `clean_config()` normalises and validates it. **All validation lives here** — the
-   renderers assume a clean config and will raise unhelpfully otherwise.
+   renderers assume a clean config and will raise unhelpfully otherwise. (It is currently
+   thinner than that claim: theme, aspect, easing, metric and the dates go through
+   unchecked, and a bad theme silently renders as Midnight.)
 3. Job goes on a `Queue`; one worker thread drains it.
-4. `renderers.render(cfg, path, progress)` dispatches on `cfg["chart"]` via the `CHARTS`
-   registry.
+4. `render_job.run()` spawns a child process, which calls
+   `renderers.render(cfg, path, progress)` — dispatching on `cfg["chart"]` via the `CHARTS`
+   registry — and streams progress back over stdout as one JSON object per line.
 5. Browser polls `/api/jobs` for per-frame progress.
 
 ## Renderer contract
@@ -107,34 +109,55 @@ stay there. It has the same specificity as the base rules, so moving it earlier 
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
 anything smaller.
 
-**Threading.** matplotlib's pyplot state is global. `RENDER_LOCK` serialises previews and
-renders. Don't parallelise renders in-process — use separate processes if throughput ever
-matters.
+**Threading and processes.** matplotlib's pyplot state is global, so `DRAW_LOCK` serialises
+the drawing `app.py` does itself — previews and stills. Renders are not on that lock:
+`render_job.run()` puts each one in its own process, which is what keeps the preview
+answering during a seventy-second render and what stops an OOM-killed ffmpeg from taking
+the server with it. Keep it that way. If you ever need renders to draw in-process again,
+you are reintroducing the freeze that motivated the split, so don't — and one worker thread
+draining the queue is still what bounds CPU, not the lock.
 
 ## Known rough edges
 
+- **An open-ended date range caches forever.** `_cache_path()` hashes `end` as the literal
+  string `"None"`, so a range with no end date keeps hitting the same cache file — and an
+  empty end date is what the UI ships by default. Render a ticker on Monday, render it
+  again on Friday, and you get Monday's chart with no warning and nothing in the footer.
+  `Clear price cache` is the only way out and nothing tells you to press it. This is the
+  most damaging bug in the repo: it puts stale prices on camera. Fold the last market close
+  into the cache key, or expire the file on mtime.
+- `clean_config()` validates less than the contract above claims. Theme, aspect, easing,
+  metric and both dates pass through unchecked — a typo'd theme silently renders as
+  Midnight — and `duration` has no upper bound, so one request can queue tens of thousands
+  of frames. `color_by_sign` is read by `render_bars` but stripped by `clean_config`, so the
+  option is unreachable.
 - `preset=slow` on the `max` quality tier is genuinely slow — roughly 70s for a 7.5s
-  1080p60 clip — and needs enough memory that small container hosts may OOM-kill ffmpeg.
-  `final` uses `medium` for this reason. Worth exposing the preset in the UI.
+  1080p60 clip — and needs enough memory that a small container host may OOM-kill it. That
+  now costs you the one render rather than the server, and the job reports the memory hint
+  instead of a signal number. `final` uses `medium` for the same reason.
 - Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
   Note that Stooq's CSV endpoint is daily-grain, so intraday would have no fallback — it
   is the one feature that breaks outright when Yahoo does.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
-- Tests cover `data.py` only. `clean_config()` holds all validation and has none.
-- A serverless deploy can't finish a render. `/api/render` returns as soon as the job is
-  queued and the work happens on a daemon thread, but the instance is frozen once the
-  response is sent — so the render may never run, not merely go missing from the
-  registry. A container host is the shape this app was written for; see README.
+- `clean_config()` holds all validation and has no tests of its own.
+- Cancelling only works on a queued job. Killing an in-flight render is now a matter of
+  signalling the child, but nothing in the UI calls the endpoint that would do it.
 
 ## Roadmap
 
-Near term, in rough priority order:
+Near term, in rough priority order. The Stooq fallback that used to head this list has
+shipped; so has moving renders out of process.
 
-1. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
-2. Encoder preset exposed in the UI (`final` now defaults to `medium`).
-3. Brand kit: save theme, footer, and default title format as a named preset.
-4. Batch render — one config, many tickers, queued.
+1. Expire the price cache on open-ended ranges — see the first known rough edge. Nothing
+   else on this list matters as much as the tool not drawing stale prices.
+2. Make `clean_config()` match its own contract: validate theme, aspect, easing, metric and
+   the dates, and bound `duration`.
+3. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
+4. Encoder preset exposed in the UI (`final` now defaults to `medium`).
+5. Brand kit: save theme, footer, and default title format as a named preset.
+6. Batch render — one config, many tickers, queued. The render subprocess is the piece
+   that was missing; the queue already handles the rest.
 
 Done: Stooq fallback in `data.py`, so a render survives Yahoo changing its endpoints.
 

@@ -6,9 +6,3 @@ outputs/
 venv/
 __pycache__/
 *.py[cod]
-# Serverless-only, irrelevant to a container build
-api/
-vercel.json
-.vercelignore
-requirements-vercel.txt
-scripts/trim-bundle.sh

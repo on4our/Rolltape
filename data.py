@@ -15,8 +15,9 @@ _DEMO = False
 
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
-# Which source answered for each ticker in the current render. app.py's RENDER_LOCK
-# serialises previews and renders, so one module-level record is safe without locking.
+# Which source answered for each ticker in the current render. One module-level record is
+# safe without locking: a render has this module to itself in its own process, and the
+# previews left in the server are serialised by app.py's DRAW_LOCK.
 _SOURCES = {}
 
 SOURCE_LABELS = {"stooq": "Data: Stooq", "demo": "Demo data"}

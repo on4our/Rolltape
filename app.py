@@ -5,8 +5,6 @@ import base64
 import io
 import os
 import re
-import signal
-import subprocess
 import threading
 import time
 import uuid
@@ -17,6 +15,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 import config
 import data as datasrc
 import jobs as jobstore
+import render_job
 import renderers
 import storage
 
@@ -26,7 +25,11 @@ OUT_DIR = config.OUT_DIR
 app = Flask(__name__, static_folder=None, template_folder="templates")
 
 QUEUE = Queue()
-RENDER_LOCK = threading.Lock()  # matplotlib state is global; one draw at a time
+
+# Guards the drawing this process does itself — previews and stills — because pyplot state
+# is global. Renders are not on it: they run in their own process (render_job.py), which is
+# what stops a seventy-second render from freezing every preview behind it.
+DRAW_LOCK = threading.Lock()
 
 # The preview is drawn at draft dimensions and then base64'd into a JSON response, so it
 # trades a little sharpness for a smaller payload. The still export renders at the real
@@ -114,33 +117,6 @@ def slug(cfg, ext=None):
     return re.sub(r"[^A-Za-z0-9_.-]", "", name) + ext
 
 
-def describe_error(exc):
-    """Turn a render exception into something a user can act on.
-
-    matplotlib surfaces an ffmpeg death as CalledProcessError, whose str() buries the
-    ffmpeg command line in the message and, for a signal death, says only
-    "died with <Signals.SIGKILL: 9>". On a container host a SIGKILLed ffmpeg is almost
-    always the memory limit, so say that instead of making the user decode signal numbers.
-    """
-    if isinstance(exc, subprocess.CalledProcessError):
-        if exc.returncode < 0:
-            try:
-                name = signal.Signals(-exc.returncode).name
-            except ValueError:
-                name = f"signal {-exc.returncode}"
-            msg = f"ffmpeg was killed by {name}."
-            if -exc.returncode == signal.SIGKILL:
-                msg += (" The host most likely ran out of memory — try the draft "
-                        "quality tier, or give the container more RAM.")
-            return msg
-        err = exc.stderr or b""
-        if isinstance(err, bytes):
-            err = err.decode(errors="replace")
-        tail = err.strip().splitlines()[-1] if err.strip() else ""
-        return f"ffmpeg failed (exit {exc.returncode})" + (f": {tail}" if tail else ".")
-    return str(exc)
-
-
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
@@ -159,15 +135,18 @@ def worker():
             def progress(i, n):
                 jobstore.update(job_id, progress=i, total=n)
 
-            with RENDER_LOCK:
-                renderers.render(job["cfg"], path, progress=progress)
-            # Size has to be read before publish; a remote backend removes the temp file.
+            # Deliberately not under DRAW_LOCK — the render has its own process and its own
+            # pyplot state, so previews carry on being answered while it runs. One worker
+            # thread is still what keeps renders from piling onto the CPU together.
+            render_job.run(job["cfg"], path, progress=progress,
+                           demo=datasrc.is_demo())
+            # Size has to be read before publish; a remote backend may move the file.
             size_mb = round(os.path.getsize(path) / 1e6, 2)
             url = storage.publish(path, job["file"])
             jobstore.update(job_id, status="done", url=url, size_mb=size_mb,
                             seconds=round(time.time() - started, 1))
         except Exception as exc:  # noqa: BLE001
-            jobstore.update(job_id, status="failed", error=describe_error(exc))
+            jobstore.update(job_id, status="failed", error=str(exc))
         finally:
             QUEUE.task_done()
 
@@ -208,7 +187,7 @@ def preview():
         cfg = clean_config(request.get_json(force=True))
         at = float(request.args.get("at", 0.75))
         buf = io.BytesIO()
-        with RENDER_LOCK:
+        with DRAW_LOCK:
             renderers.save_still(cfg, buf, at=at, dpi=PREVIEW_DPI)
         b64 = base64.b64encode(buf.getvalue()).decode()
         return jsonify({"image": f"data:image/png;base64,{b64}"})
@@ -227,7 +206,7 @@ def still():
         cfg = clean_config(request.get_json(force=True))
         at = float(request.args.get("at", 0.75))
         buf = io.BytesIO()
-        with RENDER_LOCK:
+        with DRAW_LOCK:
             renderers.save_still(cfg, buf, at=at, quality=cfg["quality"],
                                  res=cfg["resolution"])
     except Exception as exc:  # noqa: BLE001

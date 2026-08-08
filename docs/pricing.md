@@ -161,14 +161,13 @@ Only the Hobbyist tier is shippable against today's codebase, and only its local
 Everything hosted — on all three tiers — is blocked on two things:
 
 1. **A licensed data feed.** The current sources can't be redistributed to paying users.
-   The serverless build is the sharp end of this: `requirements-vercel.txt` drops yfinance
-   to fit the bundle ceiling, so the hosted path runs Stooq-only, and the README already
-   notes Stooq is a personal-use fallback that changes nothing about the licensing
-   position.
+   Yahoo is scraped and the README already notes Stooq is a personal-use fallback that
+   changes nothing about the licensing position, so neither one survives contact with a
+   paying customer.
 2. **Multi-tenancy.** `jobs.py` raises at import on any backend but memory, and the
-   Dockerfile's `--workers 1` is load-bearing because `RENDER_LOCK` serialises matplotlib.
-   Hosted needs a shared job store behind the `jobs.py` seam and renders in separate
-   processes.
+   Dockerfile's `--workers 1` is load-bearing because job state lives in one process's
+   memory. Hosted needs a shared job store behind the `jobs.py` seam. Renders already run
+   in separate processes.
 
 So the launch is $9/month with the local app, and hosted arrives later as an upgrade
 included in tiers people already hold — not as a new paywall over something that used to

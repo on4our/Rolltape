@@ -1,14 +1,12 @@
 # Rolltape on any container host — Railway, Render, Cloud Run, or a plain VM.
 #
-# This is the deployment the app was actually designed for: one long-lived process with a
-# real filesystem. None of the serverless scaffolding (bundle trimming, /tmp redirects,
-# object storage) is needed here.
+# This is the deployment the app is designed for, and the only one it supports: one
+# long-lived process with a real filesystem.
 FROM python:3.11-slim
 
-# ffmpeg does the encoding. Being able to apt-get it is the entire reason a container host
-# is simpler than serverless for this app. Inter and JetBrains Mono are the first choices
-# in the renderer's font stacks — without them every render falls back to DejaVu, which
-# doesn't match the broadcast look the themes were designed around.
+# ffmpeg does the encoding. Inter and JetBrains Mono are the first choices in the
+# renderer's font stacks — without them every render falls back to DejaVu, which doesn't
+# match the broadcast look the themes were designed around.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg fonts-inter fonts-jetbrains-mono \
     && rm -rf /var/lib/apt/lists/*
@@ -35,8 +33,9 @@ RUN python -c "import matplotlib.font_manager"
 
 EXPOSE 5000
 
-# --workers 1 is load-bearing, not a tuning choice. Job state lives in one process's
-# memory (jobs.py) and RENDER_LOCK serialises matplotlib, whose pyplot state is global.
-# A second worker would give you a second job registry and renders that vanish from the
-# UI — the exact failure serverless produces. Threads handle the progress polling.
+# --workers 1 is load-bearing, not a tuning choice: job state lives in one process's
+# memory (jobs.py), so a second worker gives you a second registry and renders that start,
+# finish, and never appear in the UI that asked for them. Threads handle the progress
+# polling. Renders themselves are already out of this process — see render_job.py — so
+# there is nothing to gain by adding workers anyway.
 CMD gunicorn --workers 1 --threads 8 --timeout 120 --bind 0.0.0.0:${PORT:-5000} app:app
