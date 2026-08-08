@@ -83,6 +83,17 @@ ENCODE = {
 FONT_STACK = ["Inter", "Helvetica Neue", "Arial", "Liberation Sans", "DejaVu Sans"]
 MONO_STACK = ["JetBrains Mono", "SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono"]
 
+# h264 has no alpha channel, so a transparent render changes codec and container both.
+# ProRes 4444 is the intermediate every NLE ingests without a transcode, and prores_ks is
+# a native FFmpeg encoder — present even in the static build the serverless bundle ships,
+# where libvpx usually isn't.
+ALPHA_CODEC = "prores_ks"
+
+
+def output_extension(transparent=False):
+    """Container a render lands in. app.py names the file, so it has to ask."""
+    return ".mov" if transparent else ".mp4"
+
 
 @dataclass
 class Ctx:
@@ -93,6 +104,7 @@ class Ctx:
     crf: str
     preset: str
     dpi: int = 100
+    transparent: bool = False
 
     @property
     def s(self) -> float:
@@ -103,14 +115,24 @@ class Ctx:
     def tall(self) -> bool:
         return self.h > self.w
 
+    @property
+    def bg(self) -> str:
+        """Background fill, or no fill at all when exporting with an alpha channel.
 
-def make_ctx(theme_name, aspect, quality, fps=None, res=None) -> Ctx:
+        Anything that exists only to sit *behind* the chart reads this rather than the
+        theme directly, so a transparent export drops the backdrop and leaves everything
+        the viewer actually looks at untouched.
+        """
+        return "none" if self.transparent else self.theme["bg"]
+
+
+def make_ctx(theme_name, aspect, quality, fps=None, res=None, transparent=False) -> Ctx:
     theme = THEMES.get(theme_name, THEMES["midnight"])
     enc = ENCODE.get(quality, ENCODE["final"])
     sizes = SIZES.get(aspect, SIZES["16:9"])
     w, h = sizes.get(res or enc["res"], sizes[enc["res"]])
     return Ctx(theme=theme, w=w, h=h, fps=int(fps or enc["fps"]),
-               crf=enc["crf"], preset=enc["preset"])
+               crf=enc["crf"], preset=enc["preset"], transparent=bool(transparent))
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +168,7 @@ def _densify(x, y, n):
 def _new_fig(ctx):
     plt.rcParams["font.family"] = FONT_STACK
     fig = plt.figure(figsize=(ctx.w / ctx.dpi, ctx.h / ctx.dpi), dpi=ctx.dpi)
-    fig.patch.set_facecolor(ctx.theme["bg"])
+    fig.patch.set_facecolor(ctx.bg)
     return fig
 
 
@@ -188,7 +210,7 @@ def _plot_area(ctx, has_title):
 
 def _style_axes(ax, ctx, y_fmt=None, x_dates=True):
     t = ctx.theme
-    ax.set_facecolor(t["bg"])
+    ax.set_facecolor(ctx.bg)
     ax.grid(True, color=t["grid"], linewidth=0.8 * ctx.s, alpha=0.9)
     ax.set_axisbelow(True)
     for side in ("top", "right", "left"):
@@ -242,17 +264,25 @@ def _resolve_ffmpeg():
 
 def _export(fig, anim, path, ctx, progress):
     _resolve_ffmpeg()
-    # Containers advertise the host's CPU count, so x264's auto threading can spawn
-    # dozens of threads whose per-thread buffers blow a small memory limit and get
-    # ffmpeg OOM-killed. Four threads keeps memory bounded and encoding is not the
-    # bottleneck here anyway — matplotlib drawing the frames is.
-    writer = FFMpegWriter(
-        fps=ctx.fps, codec="libx264", bitrate=-1,
-        extra_args=["-pix_fmt", "yuv420p", "-crf", ctx.crf, "-preset", ctx.preset,
-                    "-threads", "4", "-movflags", "+faststart"],
-    )
+    # Containers advertise the host's CPU count, so auto threading can spawn dozens of
+    # threads whose per-thread buffers blow a small memory limit and get ffmpeg
+    # OOM-killed. Four threads keeps memory bounded and encoding is not the bottleneck
+    # here anyway — matplotlib drawing the frames is.
+    threads = ["-threads", "4"]
+    if ctx.transparent:
+        # qscale 9 is visually lossless on frames this flat. ProRes 4444 files are large
+        # by design — it's an edit-ready intermediate, not a delivery format.
+        codec = ALPHA_CODEC
+        args = ["-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-qscale:v", "9",
+                *threads]
+    else:
+        codec = "libx264"
+        args = ["-pix_fmt", "yuv420p", "-crf", ctx.crf, "-preset", ctx.preset,
+                *threads, "-movflags", "+faststart"]
+
+    writer = FFMpegWriter(fps=ctx.fps, codec=codec, bitrate=-1, extra_args=args)
     anim.save(path, writer=writer, dpi=ctx.dpi,
-              savefig_kwargs={"facecolor": ctx.theme["bg"]},
+              savefig_kwargs={"facecolor": ctx.bg},
               progress_callback=progress)
     plt.close(fig)
     return path
@@ -293,7 +323,7 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
                       solid_joinstyle="round", zorder=4)
     (head,) = ax.plot([], [], "o", color=color, markersize=9 * ctx.s,
-                      markeredgecolor=t["bg"], markeredgewidth=2 * ctx.s, zorder=5)
+                      markeredgecolor=ctx.bg, markeredgewidth=2 * ctx.s, zorder=5)
     readout = ax.text(0, 0, "", color=t["text"], fontsize=22 * ctx.s,
                       fontweight="bold", ha="left", va="center", zorder=6,
                       fontfamily=MONO_STACK)
@@ -447,6 +477,9 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     ax.add_collection(wicks)
     ax.add_collection(bodies)
     axv.add_collection(vbars)
+    # The plate behind the readout keeps theme["bg"] rather than ctx.bg on purpose: it is
+    # there to make the number legible over the candles, and it has the same job over
+    # whatever footage a transparent export gets composited onto.
     readout = ax.text(0.985, 0.94, "", transform=ax.transAxes, color=t["text"],
                       fontsize=20 * ctx.s, fontweight="bold", ha="right",
                       va="top", fontfamily=MONO_STACK, zorder=6,
@@ -534,7 +567,7 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
             cfg.get("subtitle") or "", cfg.get("footer"))
     rect = _plot_area(ctx, True)
     ax = fig.add_axes([rect[0] + 0.04, rect[1], rect[2] - 0.02, rect[3]])
-    ax.set_facecolor(t["bg"])
+    ax.set_facecolor(ctx.bg)
     for side in ("top", "right", "bottom"):
         ax.spines[side].set_visible(False)
     ax.spines["left"].set_color(t["axis"])
@@ -637,7 +670,7 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
                       zorder=4)
     (head,) = ax.plot([], [], "o", color=color, markersize=9 * ctx.s,
-                      markeredgecolor=t["bg"], markeredgewidth=2 * ctx.s, zorder=5)
+                      markeredgecolor=ctx.bg, markeredgewidth=2 * ctx.s, zorder=5)
     fill = [None]
 
     marks = []
@@ -714,7 +747,7 @@ def render_race(cfg, ctx, out, progress=None, still=None):
             cfg.get("footer"))
     rect = _plot_area(ctx, True)
     ax = fig.add_axes([rect[0] + 0.05, rect[1], rect[2] - 0.03, rect[3]])
-    ax.set_facecolor(t["bg"])
+    ax.set_facecolor(ctx.bg)
     for side in ("top", "right", "bottom", "left"):
         ax.spines[side].set_visible(False)
     ax.grid(True, axis="x", color=t["grid"], linewidth=0.8 * ctx.s)
@@ -789,13 +822,33 @@ def render(cfg, out_path, progress=None):
         raise ValueError(f"Unknown chart type: {kind}")
     datasrc.reset_sources()
     ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"),
-                   cfg.get("quality", "final"), cfg.get("fps"), cfg.get("resolution"))
+                   cfg.get("quality", "final"), cfg.get("fps"), cfg.get("resolution"),
+                   cfg.get("transparent", False))
     return CHARTS[kind]["fn"](cfg, ctx, out_path, progress=progress)
 
 
-def still_frame(cfg, at=0.72):
+def save_still(cfg, fileobj, at=0.72, quality="draft", dpi=None, res=None):
+    """Write one frame of the animation to `fileobj` as a PNG.
+
+    The live preview and the thumbnail export are this same call at two sizes, so the
+    still is always exactly the frame the video would have shown at that point — which is
+    the whole reason it works as a thumbnail. Returns the Ctx so the caller can report the
+    dimensions it actually got.
+
+    `res` is what makes "same size as the video" true now that the slate sets resolution
+    independently of the quality tier: the thumbnail export passes it, the preview leaves
+    it unset and stays at draft size to keep the base64 payload small.
+    """
     kind = cfg.get("chart", "line")
+    if kind not in CHARTS:
+        raise ValueError(f"Unknown chart type: {kind}")
     # Reset here too, so the preview footer matches what the render will produce.
     datasrc.reset_sources()
-    ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"), "draft")
-    return CHARTS[kind]["fn"](cfg, ctx, None, still=at)
+    ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"), quality,
+                   res=res, transparent=cfg.get("transparent", False))
+    fig = CHARTS[kind]["fn"](cfg, ctx, None, still=at)
+    try:
+        fig.savefig(fileobj, format="png", dpi=dpi or ctx.dpi, facecolor=ctx.bg)
+    finally:
+        plt.close(fig)
+    return ctx

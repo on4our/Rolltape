@@ -44,6 +44,11 @@ def _blob_target(name):
     return os.path.join(tmp, name)
 
 
+def _blob_mime(name):
+    """A transparent render is ProRes in a .mov, so the type can't be assumed."""
+    return "video/quicktime" if name.lower().endswith(".mov") else "video/mp4"
+
+
 def _blob_publish(path, name):
     token = os.environ.get("BLOB_READ_WRITE_TOKEN")
     if not token:
@@ -52,6 +57,7 @@ def _blob_publish(path, name):
         )
     with open(path, "rb") as fh:
         body = fh.read()
+    mime = _blob_mime(name)
     req = urllib.request.Request(
         f"https://blob.vercel-storage.com/{name}",
         data=body,
@@ -59,8 +65,8 @@ def _blob_publish(path, name):
         headers={
             "authorization": f"Bearer {token}",
             "x-api-version": "7",
-            "x-content-type": "video/mp4",
-            "content-type": "video/mp4",
+            "x-content-type": mime,
+            "content-type": mime,
         },
     )
     with urllib.request.urlopen(req, timeout=120) as resp:

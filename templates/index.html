@@ -143,6 +143,15 @@ button,input,select,textarea{font:inherit;color:inherit}
   background:var(--shell);border:1px solid var(--edge);border-radius:2px;overflow:hidden;
 }
 .frame img{max-width:100%;max-height:62vh;display:block}
+/* A transparent render previews as a transparent PNG, which would just blend into the
+   panel. The checkerboard is the only thing telling you the backdrop is really gone. */
+.frame.alpha{
+  background-color:#2C2926;
+  background-image:
+    linear-gradient(45deg,#211F1D 25%,transparent 25%,transparent 75%,#211F1D 75%),
+    linear-gradient(45deg,#211F1D 25%,transparent 25%,transparent 75%,#211F1D 75%);
+  background-size:18px 18px;background-position:0 0,9px 9px;
+}
 .frame .placeholder{color:var(--dim);font-family:var(--mono);font-size:12px;padding:40px;text-align:center}
 .err{color:var(--red);font-family:var(--mono);font-size:12px;padding:30px;text-align:center;max-width:520px}
 
@@ -325,6 +334,14 @@ button,input,select,textarea{font:inherit;color:inherit}
         </div>
         <div class="hint">Click the size or frame rate in the slate to change either one</div>
       </div>
+      <div class="field">
+        <label>Background</label>
+        <div class="seg" id="bgSeg">
+          <button data-v="0" aria-pressed="true">Solid</button>
+          <button data-v="1" aria-pressed="false">Transparent</button>
+        </div>
+        <div class="hint" id="bgHint">Theme colour, H.264 MP4</div>
+      </div>
     </div>
 
     <div class="group">
@@ -354,6 +371,7 @@ button,input,select,textarea{font:inherit;color:inherit}
     <div class="actions">
       <button class="render" id="renderBtn">Render video</button>
       <span class="kbd">⌘/Ctrl + Enter</span>
+      <button class="ghost" id="saveFrame" type="button">Save this frame</button>
       <button class="ghost" id="clearCache" type="button">Clear price cache</button>
       <span class="submit-err" id="submitErr" hidden></span>
     </div>
@@ -373,7 +391,8 @@ const esc = s => String(s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight",
-  aspect:"16:9", quality:"final", fps:60, resolution:1080, meta:null, maxTickers:1
+  aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0,
+  meta:null, maxTickers:1
 };
 
 /* ---------- boot ---------- */
@@ -421,6 +440,7 @@ seg("#normalizeSeg","normalize",Number);
 seg("#easingSeg","easing");
 seg("#aspectSeg","aspect");
 seg("#qualitySeg","quality", v=>v, applyTier);
+seg("#bgSeg","transparent",Number);
 
 /* ---------- editable slate ---------- */
 // A tier seeds frame rate and resolution; the slate then overrides either one. Picking a
@@ -510,7 +530,8 @@ function config(){
     metric: $("#metric").value,
     rows: manual ? collect($("#rows"), "label", "value").map(r=>({label:r.label, value:+r.value})) : [],
     annotations: state.chart==="timeline" ? collect($("#notes"), "date", "label") : [],
-    unit: $("#unit").value, decimals: +$("#decimals").value
+    unit: $("#unit").value, decimals: +$("#decimals").value,
+    transparent: !!state.transparent
   };
 }
 
@@ -530,7 +551,12 @@ function slate(){
   rate.textContent = `${fps} fps`;
   rate.setAttribute("aria-label", `Frame rate ${fps} fps. Activate to change.`);
   rate.title = `click for ${m.fps_choices.join(" / ")} fps`;
-  $("#slateRest").innerHTML = `<b>${frames}</b> frames · ${mm}:${ss}`;
+  const codec = state.transparent ? "ProRes 4444 MOV" : "H.264 MP4";
+  $("#slateRest").innerHTML = `<b>${frames}</b> frames · ${mm}:${ss} · ${codec}`;
+  $("#bgHint").textContent = state.transparent
+    ? "Alpha channel, ProRes 4444 MOV — large, drops straight into an editor"
+    : "Theme colour, H.264 MP4";
+  $("#frame").classList.toggle("alpha", !!state.transparent);
 }
 
 /* ---------- preview ---------- */
@@ -593,6 +619,36 @@ $("#renderBtn").onclick = async ()=>{
 document.addEventListener("keydown", e=>{
   if ((e.metaKey||e.ctrlKey) && e.key === "Enter") $("#renderBtn").click();
 });
+/* The still comes back as a file, not JSON, so it needs a blob download rather than
+   a link — same config and same scrub position as the preview on screen. */
+$("#saveFrame").onclick = async ()=>{
+  const btn = $("#saveFrame"), label = btn.textContent, err = $("#submitErr");
+  btn.disabled = true; btn.textContent = "Rendering frame…";
+  try{
+    const at = (+$("#scrub").value)/100;
+    const r = await fetch(`/api/still?at=${at}`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(config())
+    });
+    if (!r.ok){
+      const j = await r.json().catch(()=>({}));
+      err.hidden = false; err.textContent = j.error || "Could not save the frame.";
+      return;
+    }
+    err.hidden = true;
+    const blob = await r.blob();
+    const match = (r.headers.get("Content-Disposition")||"").match(/filename="([^"]+)"/);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = match ? match[1] : "rolltape.png";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(e){
+    err.hidden = false; err.textContent = String(e);
+  } finally{
+    btn.disabled = false; btn.textContent = label;
+  }
+};
 $("#clearCache").onclick = async ()=>{
   await fetch("/api/cache/clear", {method:"POST"});
   $("#clearCache").textContent = "Cache cleared";
