@@ -5,10 +5,13 @@ forced to fail to exercise the fallback. Run with: python -m unittest
 """
 
 import io
+import os
 import shutil
 import tempfile
 import unittest
 from unittest import mock
+
+import pandas as pd
 
 import data
 import renderers
@@ -80,7 +83,6 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(data.sources_used(), {"stooq"})
 
     def test_yahoo_is_preferred_and_stays_silent(self):
-        import pandas as pd
         frame = pd.read_csv(io.StringIO(STOOQ_CSV), parse_dates=["Date"], index_col="Date")
 
         with mock.patch.object(data, "_yahoo", return_value=frame) as yahoo, \
@@ -136,6 +138,200 @@ class FallbackTests(unittest.TestCase):
 
         self.assertFalse(df.empty)
         self.assertEqual(data.sources_used(), {"demo"})
+
+
+class CacheFreshnessTests(unittest.TestCase):
+    """A range running up to now keeps gaining bars, so its cache entry has to expire.
+
+    The End field is empty by default, so this is the path nearly every render takes. When
+    it went stale nothing failed — the chart just quietly ended on an old bar.
+    """
+
+    DAY1 = "2026-08-07"
+    DAY2 = "2026-08-19"  # eight sessions later
+
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        patcher = mock.patch.object(data, "CACHE_DIR", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        data.set_demo(False)
+        data.reset_sources()
+        self.addCleanup(data.reset_sources)
+
+    def _on(self, day):
+        return mock.patch.object(data, "_today", lambda: pd.Timestamp(day))
+
+    def _yahoo_through(self, last):
+        idx = pd.bdate_range("2024-01-02", last)
+        frame = pd.DataFrame({c: range(len(idx)) for c in data.COLUMNS}, index=idx)
+        return mock.patch.object(data, "_yahoo", lambda *a, **k: frame.astype(float))
+
+    def _files(self):
+        return sorted(os.listdir(self.cache))
+
+    def test_open_ended_range_refetches_the_next_day(self):
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            first = data.fetch("AAPL", "2024-01-01", None)
+        with self._on(self.DAY2), self._yahoo_through("2024-01-19"):
+            later = data.fetch("AAPL", "2024-01-01", None)
+
+        self.assertEqual(str(first.index[-1].date()), "2024-01-08")
+        self.assertEqual(str(later.index[-1].date()), "2024-01-19")
+
+    def test_open_ended_range_is_cached_within_the_day(self):
+        # The preview refires on a debounce as the form changes, so same-day repeats have
+        # to stay local — expiring per request would put Yahoo behind every keystroke.
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", None)
+
+        with self._on(self.DAY1), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("refetched")), \
+             mock.patch("urllib.request.urlopen", side_effect=AssertionError("refetched")):
+            df = data.fetch("AAPL", "2024-01-01", None)
+
+        self.assertEqual(str(df.index[-1].date()), "2024-01-08")
+
+    def test_an_end_date_of_today_counts_as_open_ended(self):
+        # "Through today" is the same request as "through now" — today's bar is still open.
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", self.DAY1)
+        with self._on(self.DAY2), self._yahoo_through("2024-01-19"):
+            df = data.fetch("AAPL", "2024-01-01", self.DAY1)
+
+        self.assertEqual(str(df.index[-1].date()), "2024-01-19")
+
+    def test_closed_range_is_cached_indefinitely(self):
+        # A finished historical window never changes; re-downloading it would be waste.
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", "2024-01-08")
+
+        with self._on(self.DAY2), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("refetched")), \
+             mock.patch("urllib.request.urlopen", side_effect=AssertionError("refetched")):
+            df = data.fetch("AAPL", "2024-01-01", "2024-01-08")
+
+        self.assertEqual(len(df), 5)
+
+    def test_yesterdays_copy_is_pruned(self):
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", None)
+        self.assertEqual(len(self._files()), 1)
+
+        with self._on(self.DAY2), self._yahoo_through("2024-01-19"):
+            data.fetch("AAPL", "2024-01-01", None)
+
+        # One file per ticker per day would otherwise pile up forever.
+        self.assertEqual(self._files(), [f"AAPL_{data._cache_key('AAPL', '2024-01-01', None)}"
+                                         f".{self.DAY2}.yahoo.csv"])
+
+    def test_undated_entries_from_before_the_fix_are_retired(self):
+        key = data._cache_key("AAPL", "2024-01-01", None)
+        legacy = os.path.join(self.cache, f"AAPL_{key}.yahoo.csv")
+        with self._on(self.DAY1), self._yahoo_through("2024-01-08"):
+            data.fetch("AAPL", "2024-01-01", None)
+            os.rename(os.path.join(self.cache, f"AAPL_{key}.{self.DAY1}.yahoo.csv"), legacy)
+
+        with self._on(self.DAY2), self._yahoo_through("2024-01-19"):
+            df = data.fetch("AAPL", "2024-01-01", None)
+
+        self.assertEqual(str(df.index[-1].date()), "2024-01-19")
+        self.assertFalse(os.path.exists(legacy))
+
+
+class IntradayTests(unittest.TestCase):
+    """Intraday is Yahoo-only and perishable, which is what these guard."""
+
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        patcher = mock.patch.object(data, "CACHE_DIR", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        data.set_demo(False)
+        data.reset_sources()
+        self.addCleanup(data.reset_sources)
+
+    def _at(self, when):
+        return mock.patch.object(data, "_now", lambda: pd.Timestamp(when))
+
+    def _bars(self, n=20):
+        idx = pd.date_range("2026-08-07 09:30", periods=n, freq="5min")
+        frame = pd.DataFrame({c: range(n) for c in data.COLUMNS}, index=idx).astype(float)
+        return mock.patch.object(data, "_yahoo", lambda *a, **k: frame)
+
+    def test_stooq_is_never_asked_for_intraday(self):
+        # Stooq would answer with daily bars, which would be labelled 5-minute and look
+        # entirely plausible. A failed render is the better outcome.
+        with mock.patch.object(data, "_yahoo", side_effect=RuntimeError("endpoint moved")), \
+             mock.patch("urllib.request.urlopen", side_effect=AssertionError("stooq asked")):
+            with self.assertRaises(ValueError) as caught:
+                data.fetch("AAPL", "2026-08-01", None, "5m")
+
+        self.assertIn("Yahoo-only", str(caught.exception))
+
+    def test_daily_still_falls_back_to_stooq(self):
+        with mock.patch.object(data, "_yahoo", side_effect=RuntimeError("endpoint moved")), \
+             mock.patch("urllib.request.urlopen", _urlopen_returning(STOOQ_CSV)):
+            data.fetch("AAPL", "2024-01-01", None, "1d")
+
+        self.assertEqual(data.sources_used(), {"stooq"})
+
+    def test_cache_expires_at_the_bar_interval(self):
+        with self._at("2026-08-07 10:00"), self._bars():
+            data.fetch("AAPL", "2026-08-07", None, "5m")
+
+        # Five minutes later the last bar has been replaced, so the cache must not answer.
+        with self._at("2026-08-07 10:05"), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("served stale")):
+            with self.assertRaises(ValueError):
+                data.fetch("AAPL", "2026-08-07", None, "5m")
+
+    def test_cache_holds_within_the_bar_interval(self):
+        with self._at("2026-08-07 10:00"), self._bars():
+            data.fetch("AAPL", "2026-08-07", None, "5m")
+
+        with self._at("2026-08-07 10:04"), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("refetched")):
+            df = data.fetch("AAPL", "2026-08-07", None, "5m")
+
+        self.assertEqual(len(df), 20)
+
+    def test_intervals_do_not_share_a_cache_entry(self):
+        with self._at("2026-08-07 10:00"), self._bars():
+            data.fetch("AAPL", "2026-08-07", None, "5m")
+
+        with self._at("2026-08-07 10:00"), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("wrong entry")):
+            with self.assertRaises(ValueError):
+                data.fetch("AAPL", "2026-08-07", None, "15m")
+
+    def test_daily_cache_names_are_unchanged_by_intervals_existing(self):
+        # Daily keys leave the interval out of the hash, so caches written before intraday
+        # existed stay valid instead of being silently orphaned.
+        self.assertEqual(data._cache_key("AAPL", "2024-01-01", None),
+                         data._cache_key("AAPL", "2024-01-01", None, "1d"))
+        self.assertNotEqual(data._cache_key("AAPL", "2024-01-01", None, "1d"),
+                            data._cache_key("AAPL", "2024-01-01", None, "5m"))
+
+    def test_exchange_time_survives_the_cache_round_trip(self):
+        idx = pd.date_range("2026-08-07 09:30", periods=6, freq="5min", tz="America/New_York")
+        frame = pd.DataFrame({c: range(6) for c in data.COLUMNS}, index=idx).astype(float)
+
+        with mock.patch.dict("sys.modules", {"yfinance": mock.MagicMock(
+                download=mock.Mock(return_value=frame))}):
+            got = data._yahoo("AAPL", "2026-08-07", None, "5m")
+
+        self.assertIsNone(got.index.tz)  # naive, so the CSV round-trip can't drift
+        self.assertEqual(f"{got.index[0]:%H:%M}", "09:30")  # still the opening bell
+
+    def test_volatility_annualises_per_interval(self):
+        # 252 is a count of daily bars. Using it on 5-minute returns understates
+        # volatility by the square root of the bars in a session.
+        self.assertEqual(data.periods_per_year("1d"), 252.0)
+        self.assertAlmostEqual(data.periods_per_year("5m"), 252.0 * 78)
+        self.assertAlmostEqual(data.periods_per_year("1h"), 252.0 * 6.5)
 
 
 class FooterTests(unittest.TestCase):

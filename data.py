@@ -1,5 +1,6 @@
 """Price data: Yahoo first, Stooq when Yahoo breaks, cached to disk, plus a demo mode."""
 
+import glob
 import hashlib
 import io
 import os
@@ -14,6 +15,72 @@ CACHE_DIR = config.CACHE_DIR
 _DEMO = False
 
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+
+SOURCES = ("yahoo", "stooq")
+
+# Yahoo keeps intraday history for a while and then drops it, by a different amount per
+# interval — minute bars for a week, five-minute for two months. A chart asking for more
+# gets silence rather than an error, so the ceiling is enforced before the request.
+DEFAULT_INTERVAL = "1d"
+
+INTERVALS = {
+    "1d": {"label": "Daily", "days": None, "step": None},
+    "1m": {"label": "1 minute", "days": 7, "step": "1min"},
+    "5m": {"label": "5 minutes", "days": 60, "step": "5min"},
+    "15m": {"label": "15 minutes", "days": 60, "step": "15min"},
+    "30m": {"label": "30 minutes", "days": 60, "step": "30min"},
+    "1h": {"label": "1 hour", "days": 730, "step": "1h"},
+}
+
+
+def _spec(interval):
+    return INTERVALS.get(interval) or INTERVALS[DEFAULT_INTERVAL]
+
+
+def is_intraday(interval) -> bool:
+    return _spec(interval)["step"] is not None
+
+
+def max_lookback_days(interval):
+    """How far back this interval can reach, or None when there's no limit."""
+    return _spec(interval)["days"]
+
+
+def intraday_available() -> bool:
+    """Intraday needs Yahoo, and Yahoo needs yfinance to be installed.
+
+    Stooq covers a daily chart when yfinance is missing, so the app still runs without it
+    and only this one feature goes. Better to tell the interface up front than to let
+    someone build a 5-minute chart and hit a failed render at the end of it.
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("yfinance") is not None
+    except (ImportError, ValueError):  # a half-installed package shouldn't 500 /api/meta
+        return False
+
+
+def periods_per_year(interval) -> float:
+    """Bars in a trading year, for annualising a volatility figure.
+
+    252 sessions, times however many bars fill one. Annualising intraday returns with the
+    daily 252 understates volatility by the square root of the bars per session.
+    """
+    step = _spec(interval)["step"]
+    if step is None:
+        return 252.0
+    return 252.0 * max(pd.Timedelta("6h30min") / pd.Timedelta(step), 1.0)
+
+
+def _sources_for(interval):
+    """Stooq serves daily bars and coarser, so intraday is Yahoo or nothing.
+
+    Falling through would answer a five-minute chart with daily bars and label it
+    five-minute. A failed render is recoverable; a wrong one that looks right is not.
+    """
+    return SOURCES if not is_intraday(interval) else ("yahoo",)
+
 
 # Which source answered for each ticker in the current render. One module-level record is
 # safe without locking: a render has this module to itself in its own process, and the
@@ -53,31 +120,118 @@ def attribution():
     return None
 
 
-def _cache_path(ticker, start, end, source):
-    key = hashlib.md5(f"{ticker}|{start}|{end}".encode()).hexdigest()[:16]
-    return os.path.join(CACHE_DIR, f"{ticker.upper()}_{key}.{source}.csv")
+def _now():
+    return pd.Timestamp.now()
 
 
-def _find_cached(ticker, start, end):
+def _today():
+    return _now().normalize()
+
+
+def _is_open_ended(end) -> bool:
+    """True when the requested range runs up to now, so the data is still being written.
+
+    An end date of today is no different from no end date at all — both mean "through the
+    latest bar", and the latest bar changes.
+    """
+    if not end:
+        return True
+    try:
+        return pd.Timestamp(end).normalize() >= _today()
+    except (ValueError, TypeError):
+        return False  # unparseable; fetch will complain about it in a more useful place
+
+
+def _fresh_until(interval):
+    """The window during which a fetched frame is still current.
+
+    Daily bars settle once a day, so the date is the whole answer. An intraday bar is
+    replaced every `interval`, so the stamp has to move at that cadence — otherwise a
+    five-minute chart opened at the bell is still being served at the close.
+    """
+    if not is_intraday(interval):
+        return str(_today().date())
+    return _now().floor(_spec(interval)["step"]).strftime("%Y-%m-%dT%H%M")
+
+
+def _cache_key(ticker, start, end, interval=DEFAULT_INTERVAL):
+    # The default is left out of the hash so entries written before intraday existed keep
+    # their names — which is also what lets _drop_superseded still find and retire them.
+    suffix = "" if interval == DEFAULT_INTERVAL else f"|{interval}"
+    return hashlib.md5(f"{ticker}|{start}|{end}{suffix}".encode()).hexdigest()[:16]
+
+
+def _cache_path(ticker, start, end, source, interval=DEFAULT_INTERVAL):
+    """Where a frame for this request is cached.
+
+    A closed historical range never changes, so it is cached under the request alone. An
+    open-ended one keeps gaining bars, so the window it was fetched in is part of its
+    identity — without that, a chart rendered now is served a file written earlier and
+    silently ends on a stale bar.
+    """
+    stamp = f"{_fresh_until(interval)}." if _is_open_ended(end) else ""
+    key = _cache_key(ticker, start, end, interval)
+    return os.path.join(CACHE_DIR, f"{ticker.upper()}_{key}.{stamp}{source}.csv")
+
+
+def _drop_superseded(ticker, start, end, interval=DEFAULT_INTERVAL):
+    """Delete earlier copies of an open-ended range once the current one is written.
+
+    The key covers the exact request, so everything matching the glob is a copy of this
+    same range differing only by fetch window or source. That includes files written before
+    stamped names existed, which is what retires them.
+    """
+    if not _is_open_ended(end):
+        return
+    keep = {_cache_path(ticker, start, end, s, interval) for s in _sources_for(interval)}
+    pattern = f"{ticker.upper()}_{_cache_key(ticker, start, end, interval)}.*.csv"
+    for path in glob.glob(os.path.join(CACHE_DIR, pattern)):
+        if path not in keep:
+            try:
+                os.remove(path)
+            except OSError:  # a concurrent render got there first
+                pass
+
+
+def _find_cached(ticker, start, end, interval=DEFAULT_INTERVAL):
     """Return (path, source) for a cached frame, whichever source wrote it."""
-    for source in ("yahoo", "stooq"):
-        path = _cache_path(ticker, start, end, source)
+    for source in _sources_for(interval):
+        path = _cache_path(ticker, start, end, source, interval)
         if os.path.exists(path):
             return path, source
     return None, None
 
 
-def _synthetic(ticker, start, end):
+def _session_index(start, end, step):
+    """Cash-hours timestamps at `step` spacing.
+
+    The overnight holes are the point: demo intraday has to have the same shape as the real
+    thing, or it won't exercise the axis handling whose whole job is closing them.
+    """
+    parts = [pd.date_range(d + pd.Timedelta("9h30min"), d + pd.Timedelta("15h55min"),
+                           freq=step)
+             for d in pd.bdate_range(start, end)]
+    return parts[0].append(parts[1:]) if parts else pd.DatetimeIndex([])
+
+
+def _synthetic(ticker, start, end, interval=DEFAULT_INTERVAL):
     """Deterministic fake OHLCV so the tool is testable without network."""
     seed = int(hashlib.md5(ticker.upper().encode()).hexdigest()[:8], 16)
     rng = np.random.default_rng(seed)
-    idx = pd.bdate_range(start, end)
+    step = _spec(interval)["step"]
+    idx = _session_index(start, end, step) if step else pd.bdate_range(start, end)
     n = len(idx)
     if n < 2:
         raise ValueError("Date range is too short.")
 
     drift = rng.normal(0.0007, 0.0007)
     vol = rng.uniform(0.011, 0.028)
+    if step:
+        # These are per-day figures. A bar covering a fraction of a session moves by a
+        # fraction of that, or 390 five-minute bars compound into nonsense.
+        per_session = max(int(pd.Timedelta("6h30min") / pd.Timedelta(step)), 1)
+        drift /= per_session
+        vol /= np.sqrt(per_session)
     close = (20 + seed % 400) * np.exp(np.cumsum(rng.normal(drift, vol, n)))
 
     prev = np.concatenate([[close[0]], close[:-1]])
@@ -97,21 +251,27 @@ def _stooq_symbol(ticker):
     return ticker.lower() if "." in ticker else f"{ticker.lower()}.us"
 
 
-def _yahoo(ticker, start, end):
+def _yahoo(ticker, start, end, interval=DEFAULT_INTERVAL):
     try:
         import yfinance as yf
     except ImportError:
         raise RuntimeError("yfinance is not installed. Run: pip install yfinance")
 
-    df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+    df = yf.download(ticker, start=start, end=end, interval=interval,
+                     progress=False, auto_adjust=True)
     if df is None or df.empty:
         raise ValueError("no rows returned")
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    if getattr(df.index, "tz", None) is not None:
+        # Intraday arrives in exchange time. Keep the wall clock and drop the zone: a tick
+        # should read 09:30 at the opening bell wherever the render runs, and a naive index
+        # survives the CSV cache round-trip without DST turning it into objects.
+        df.index = df.index.tz_localize(None)
     return df[COLUMNS].dropna()
 
 
-def _stooq(ticker, start, end):
+def _stooq(ticker, start, end, interval=DEFAULT_INTERVAL):
     """Daily OHLCV from Stooq's CSV endpoint — no key, no account, no SDK.
 
     Worth knowing when reading a chart sourced here: yfinance is asked for
@@ -141,11 +301,13 @@ def _stooq(ticker, start, end):
     return df
 
 
-def fetch(ticker: str, start: str, end: str | None = None) -> pd.DataFrame:
-    """Return a DataFrame indexed by date with Open/High/Low/Close/Volume.
+def fetch(ticker: str, start: str, end: str | None = None,
+          interval: str = DEFAULT_INTERVAL) -> pd.DataFrame:
+    """Return a DataFrame indexed by timestamp with Open/High/Low/Close/Volume.
 
-    Yahoo first, Stooq second. Yahoo breaks whenever it changes its endpoints, and a
-    failed render is worse than one drawn from a second-choice source.
+    For daily bars: Yahoo first, Stooq second. Yahoo breaks whenever it changes its
+    endpoints, and a failed render is worse than one drawn from a second-choice source.
+    For intraday there is no second choice — see _sources_for.
     """
     ticker = ticker.strip().upper()
     if not ticker:
@@ -153,36 +315,42 @@ def fetch(ticker: str, start: str, end: str | None = None) -> pd.DataFrame:
 
     if _DEMO:
         _SOURCES[ticker] = "demo"
-        return _synthetic(ticker, start, end or pd.Timestamp.today().normalize())
+        end = end or pd.Timestamp.today().normalize()
+        return _synthetic(ticker, start, end, interval)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
-    cached, source = _find_cached(ticker, start, end)
+    cached, source = _find_cached(ticker, start, end, interval)
     if cached:
         df = pd.read_csv(cached, index_col=0, parse_dates=True)
         if not df.empty:
             _SOURCES[ticker] = source
             return df
 
+    fetchers = {"yahoo": _yahoo, "stooq": _stooq}
     problems = []
-    for source, fn in (("yahoo", _yahoo), ("stooq", _stooq)):
+    for source in _sources_for(interval):  # preference order, as in _find_cached
         try:
-            df = fn(ticker, start, end)
+            df = fetchers[source](ticker, start, end, interval)
         except Exception as exc:  # noqa: BLE001
             problems.append(f"{source}: {exc}")
             continue
-        df.to_csv(_cache_path(ticker, start, end, source))
+        df.to_csv(_cache_path(ticker, start, end, source, interval))
+        _drop_superseded(ticker, start, end, interval)
         _SOURCES[ticker] = source
         return df
 
-    raise ValueError(f"No data for {ticker} ({'; '.join(problems)}).")
+    detail = "; ".join(problems)
+    if is_intraday(interval):
+        detail += ". Intraday is Yahoo-only — Stooq serves daily bars and coarser"
+    raise ValueError(f"No data for {ticker} ({detail}).")
 
 
-def fetch_many(tickers, start, end=None) -> dict:
+def fetch_many(tickers, start, end=None, interval=DEFAULT_INTERVAL) -> dict:
     out = {}
     errors = []
     for t in tickers:
         try:
-            out[t.strip().upper()] = fetch(t, start, end)
+            out[t.strip().upper()] = fetch(t, start, end, interval)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{t}: {exc}")
     if not out:

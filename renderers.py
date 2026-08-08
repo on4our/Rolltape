@@ -227,11 +227,105 @@ def _style_axes(ax, ctx, y_fmt=None, x_dates=True):
         ax.yaxis.set_major_formatter(y_fmt)
 
 
+# ---------------------------------------------------------------------------
+# X axis: time for daily, bar position for intraday
+# ---------------------------------------------------------------------------
+# Daily bars belong on a real date axis — the gaps are weekends, and reading the spacing as
+# elapsed time is correct. Intraday cannot have that. Five-minute bars across a week are
+# two thirds overnight by wall clock, so a time axis spends most of the frame drawing flat
+# nothing and the animated head crawls across dead space between sessions. Intraday is
+# plotted by bar position and the ticks carry the timestamps instead, which is what the
+# candle chart has always done. Daily keeps the old path exactly, so its output is unchanged.
+def _interval(cfg):
+    return cfg.get("interval") or datasrc.DEFAULT_INTERVAL
+
+
+def _intraday(cfg):
+    return datasrc.is_intraday(_interval(cfg))
+
+
+def _one_session(index):
+    return len(index) > 0 and index[0].normalize() == index[-1].normalize()
+
+
+def _x_values(index, intraday):
+    if intraday:
+        return np.arange(len(index), dtype=float)
+    return mdates.date2num(index.to_pydatetime())
+
+
+def _at_position(index, pos):
+    """Timestamp for a fractional bar position, for readouts on a positional axis."""
+    return index[int(np.clip(round(pos), 0, len(index) - 1))]
+
+
+def _position_ticks(ax, ctx, index):
+    """Label a positional axis with the timestamps those positions stand for."""
+    n = len(index)
+    if _one_session(index):
+        step = max(n // (5 if ctx.tall else 8), 1)
+        pos = np.arange(0, n, step)
+        labels = [f"{index[i]:%H:%M}" for i in pos]
+    else:
+        # One tick per session: it never repeats a day label and lands the gridlines on
+        # the opens, which is where the eye looks for them anyway.
+        days = index.normalize()
+        pos = np.flatnonzero(np.r_[True, days[1:] != days[:-1]])
+        pos = pos[::max(len(pos) // (4 if ctx.tall else 7), 1)]
+        labels = [f"{index[i]:%d %b}" for i in pos]
+    ax.set_xticks(pos)
+    ax.set_xticklabels(labels)
+    for lbl in ax.get_xticklabels():
+        lbl.set_fontfamily(MONO_STACK)
+
+
+def _range_label(index, intraday):
+    """The span shown under the title."""
+    a, b = index[0], index[-1]
+    if not intraday:
+        return f"{a:%b %Y} – {b:%b %Y}"
+    if _one_session(index):
+        return f"{a:%d %b %Y}, {a:%H:%M} – {b:%H:%M}"
+    return f"{a:%d %b} – {b:%d %b %Y}"
+
+
+def _stamp(ts, index, intraday, daily="%d %b %Y"):
+    """Label for one moment — the candle readout and the race clock."""
+    if not intraday:
+        return format(ts, daily)
+    return f"{ts:%H:%M}" if _one_session(index) else f"{ts:%d %b %H:%M}"
+
+
 def _money(v, _=None):
     a = abs(v)
     if a >= 100:
         return f"${v:,.0f}"
     return f"${v:,.2f}" if a < 10 else f"${v:,.1f}"
+
+
+def _decimals(lo, hi, floor=0):
+    """Decimals needed to keep gridline labels distinct across this range.
+
+    _money picks precision from a value's magnitude, which is right for a single readout
+    and wrong for an axis: a $159–$162 range rounds to whole dollars and prints the same
+    label three times down the side. Daily ranges are wide enough that the magnitude rule
+    already holds, so `floor` keeps their labels exactly as they were.
+    """
+    step = abs(hi - lo) / 7
+    need = 0 if step >= 1 else 1 if step >= 0.1 else 2
+    return max(need, floor)
+
+
+def _money_axis(lo, hi):
+    mag = max(abs(lo), abs(hi))
+    floor = 0 if mag >= 100 else 1 if mag >= 10 else 2
+    dec = _decimals(lo, hi, floor)
+    return lambda v, _=None: f"${v:,.{dec}f}"
+
+
+def _num_axis(lo, hi):
+    dec = _decimals(lo, hi)
+    return lambda v, _=None: f"{v:,.{dec}f}"
 
 
 def _glow(ax, color, ctx, zorder=2):
@@ -295,8 +389,9 @@ def _export(fig, anim, path, ctx, progress):
 # ---------------------------------------------------------------------------
 def render_line(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"))
-    x = mdates.date2num(df.index.to_pydatetime())
+    intraday = _intraday(cfg)
+    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"), _interval(cfg))
+    x = _x_values(df.index, intraday)
     y = df["Close"].to_numpy(float)
 
     dense_n = max(int(cfg["duration"] * ctx.fps) * 2, 2000)
@@ -311,14 +406,17 @@ def render_line(cfg, ctx, out, progress=None, still=None):
 
     fig = _new_fig(ctx)
     _titles(fig, ctx, cfg.get("title") or tk,
-            cfg.get("subtitle") or f"{df.index[0]:%b %Y} – {df.index[-1]:%b %Y}   ·   {pct:+.1f}%",
+            cfg.get("subtitle")
+            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%",
             cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=_money)
+    _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday)
 
     pad = (y.max() - y.min()) * 0.12 or y.max() * 0.05
     ax.set_xlim(x[0], x[-1])
     ax.set_ylim(y.min() - pad, y.max() + pad)
+    if intraday:
+        _position_ticks(ax, ctx, df.index)
     floor = ax.get_ylim()[0]
 
     glow = _glow(ax, color, ctx)
@@ -358,14 +456,15 @@ def render_line(cfg, ctx, out, progress=None, still=None):
 # 2. Multi-ticker comparison
 # ---------------------------------------------------------------------------
 def render_compare(cfg, ctx, out, progress=None, still=None):
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"))
+    intraday = _intraday(cfg)
+    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"), _interval(cfg))
     closes = pd.DataFrame({k: v["Close"] for k, v in frames.items()}).dropna()
     if closes.empty:
         raise ValueError("Tickers have no overlapping trading days.")
 
     normalize = cfg.get("normalize", True)
     vals = closes / closes.iloc[0] * 100 if normalize else closes
-    x = mdates.date2num(closes.index.to_pydatetime())
+    x = _x_values(closes.index, intraday)
 
     dense_n = max(int(cfg["duration"] * ctx.fps) * 2, 2000)
     xd = np.linspace(x[0], x[-1], dense_n)
@@ -377,16 +476,20 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
     palette = t["series"]
     fig = _new_fig(ctx)
     sub = ("Indexed to 100" if normalize else "Closing price") + \
-          f"   ·   {closes.index[0]:%b %Y} – {closes.index[-1]:%b %Y}"
+          f"   ·   {_range_label(closes.index, intraday)}"
     _titles(fig, ctx, cfg.get("title") or " vs ".join(vals.columns),
             cfg.get("subtitle") or sub, cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=(lambda v, _: f"{v:,.0f}") if normalize else _money)
 
     allv = np.concatenate(list(series.values()))
+    _style_axes(ax, ctx, x_dates=not intraday,
+                y_fmt=(_num_axis if normalize else _money_axis)(allv.min(), allv.max()))
+
     pad = (allv.max() - allv.min()) * 0.12
     ax.set_xlim(x[0], x[-1])
     ax.set_ylim(allv.min() - pad, allv.max() + pad)
+    if intraday:
+        _position_ticks(ax, ctx, closes.index)
     if normalize:
         ax.axhline(100, color=t["axis"], lw=1.2 * ctx.s, ls=(0, (4, 4)), zorder=1)
 
@@ -427,14 +530,21 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 def render_candles(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"))
+    intraday = _intraday(cfg)
+    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"), _interval(cfg))
     max_c = int(cfg.get("max_candles", 90))
     if len(df) > max_c:
-        rule = "W" if len(df) / 5 <= max_c else "ME"
-        df = df.resample(rule).agg({"Open": "first", "High": "max", "Low": "min",
-                                    "Close": "last", "Volume": "sum"}).dropna()
-        if len(df) > max_c:
+        if intraday:
+            # Rolling daily bars up into weeks is the right answer for a multi-year chart
+            # and the wrong one here — it would throw away the intraday shape that is the
+            # entire reason for asking. Keep the most recent candles at the chosen interval.
             df = df.iloc[-max_c:]
+        else:
+            rule = "W" if len(df) / 5 <= max_c else "ME"
+            df = df.resample(rule).agg({"Open": "first", "High": "max", "Low": "min",
+                                        "Close": "last", "Volume": "sum"}).dropna()
+            if len(df) > max_c:
+                df = df.iloc[-max_c:]
 
     n = len(df)
     o, h, l, c = (df[k].to_numpy(float) for k in ("Open", "High", "Low", "Close"))
@@ -448,7 +558,8 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     fig = _new_fig(ctx)
     pct = (c[-1] / o[0] - 1) * 100
     _titles(fig, ctx, cfg.get("title") or tk,
-            cfg.get("subtitle") or f"{df.index[0]:%b %Y} – {df.index[-1]:%b %Y}   ·   {pct:+.1f}%",
+            cfg.get("subtitle")
+            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%",
             cfg.get("footer"))
 
     rect = _plot_area(ctx, True)
@@ -456,7 +567,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     ax = fig.add_axes([rect[0], rect[1] + vol_h + rect[3] * 0.06,
                        rect[2], rect[3] - vol_h - rect[3] * 0.06])
     axv = fig.add_axes([rect[0], rect[1], rect[2], vol_h], sharex=ax)
-    _style_axes(ax, ctx, y_fmt=_money, x_dates=False)
+    _style_axes(ax, ctx, y_fmt=_money_axis(l.min(), h.max()), x_dates=False)
     _style_axes(axv, ctx, y_fmt=lambda v, _: f"{v/1e6:,.0f}M", x_dates=False)
     ax.tick_params(labelbottom=False)
     axv.grid(False)
@@ -467,11 +578,14 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     axv.set_ylim(0, vol.max() * 1.15)
     axv.set_yticks([vol.max()])
 
-    step = max(n // 6, 1)
-    axv.set_xticks(idx[::step])
-    axv.set_xticklabels([f"{d:%b %y}" for d in df.index[::step]])
-    for lbl in axv.get_xticklabels():
-        lbl.set_fontfamily(MONO_STACK)
+    if intraday:
+        _position_ticks(axv, ctx, df.index)
+    else:
+        step = max(n // 6, 1)
+        axv.set_xticks(idx[::step])
+        axv.set_xticklabels([f"{d:%b %y}" for d in df.index[::step]])
+        for lbl in axv.get_xticklabels():
+            lbl.set_fontfamily(MONO_STACK)
 
     wicks = LineCollection([], linewidths=1.4 * ctx.s, zorder=3)
     bodies = PolyCollection([], zorder=4, linewidths=0)
@@ -511,7 +625,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
         vbars.set_verts(vol_v)
         vbars.set_color(vcols)
         vbars.set_alpha(0.45)
-        readout.set_text(f"{_money(c[k-1])}   {df.index[k-1]:%d %b %Y}")
+        readout.set_text(f"{_money(c[k-1])}   {_stamp(df.index[k-1], df.index, intraday)}")
         return ()
 
     if still is not None:
@@ -534,7 +648,8 @@ def _bar_rows(cfg):
             return clean, cfg.get("unit", ""), int(cfg.get("decimals", 1))
 
     metric = cfg.get("metric", "return")
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"))
+    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"), _interval(cfg))
+    periods = datasrc.periods_per_year(_interval(cfg))
     out = []
     for tk, df in frames.items():
         cl = df["Close"].to_numpy(float)
@@ -545,7 +660,7 @@ def _bar_rows(cfg):
             out.append((tk, ((cl / peak - 1) * 100).min()))
         elif metric == "volatility":
             r = np.diff(np.log(cl))
-            out.append((tk, r.std() * np.sqrt(252) * 100))
+            out.append((tk, r.std() * np.sqrt(periods) * 100))
         else:
             out.append((tk, cl[-1]))
     unit = "$" if metric == "price" else "%"
@@ -631,8 +746,9 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 def render_timeline(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
-    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"))
-    x = mdates.date2num(df.index.to_pydatetime())
+    intraday = _intraday(cfg)
+    df = datasrc.fetch(tk, cfg["start"], cfg.get("end"), _interval(cfg))
+    x = _x_values(df.index, intraday)
     y = df["Close"].to_numpy(float)
 
     notes = []
@@ -640,7 +756,11 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
         if not a.get("date") or not str(a.get("label", "")).strip():
             continue
         try:
-            d = mdates.date2num(pd.Timestamp(a["date"]).to_pydatetime())
+            ts = pd.Timestamp(a["date"])
+            # On a positional axis a callout has to land on the bar it refers to, so the
+            # timestamp is resolved to the nearest one rather than to a coordinate.
+            d = (float(df.index.get_indexer([ts], method="nearest")[0]) if intraday
+                 else mdates.date2num(ts.to_pydatetime()))
         except Exception:  # noqa: BLE001
             continue
         if x[0] <= d <= x[-1]:
@@ -657,14 +777,17 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     fig = _new_fig(ctx)
     pct = (y[-1] / y[0] - 1) * 100
     _titles(fig, ctx, cfg.get("title") or tk,
-            cfg.get("subtitle") or f"{df.index[0]:%b %Y} – {df.index[-1]:%b %Y}   ·   {pct:+.1f}%",
+            cfg.get("subtitle")
+            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%",
             cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=_money)
+    _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday)
 
     pad = (y.max() - y.min()) * 0.18
     ax.set_xlim(x[0], x[-1])
     ax.set_ylim(y.min() - pad * 0.6, y.max() + pad)
+    if intraday:
+        _position_ticks(ax, ctx, df.index)
     floor = ax.get_ylim()[0]
     span_y = ax.get_ylim()[1] - floor
 
@@ -725,7 +848,8 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
 # 6. Bar chart race
 # ---------------------------------------------------------------------------
 def render_race(cfg, ctx, out, progress=None, still=None):
-    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"))
+    intraday = _intraday(cfg)
+    frames = datasrc.fetch_many(cfg["tickers"], cfg["start"], cfg.get("end"), _interval(cfg))
     closes = pd.DataFrame({k: v["Close"] for k, v in frames.items()}).dropna()
     if closes.shape[1] < 2:
         raise ValueError("A race needs at least two tickers.")
@@ -733,7 +857,7 @@ def render_race(cfg, ctx, out, progress=None, still=None):
     normalize = cfg.get("normalize", True)
     vals = closes / closes.iloc[0] * 100 if normalize else closes
     names = list(vals.columns)
-    x = mdates.date2num(closes.index.to_pydatetime())
+    x = _x_values(closes.index, intraday)
 
     dense_n = max(int(cfg["duration"] * ctx.fps), 600)
     xd = np.linspace(x[0], x[-1], dense_n)
@@ -791,7 +915,9 @@ def render_race(cfg, ctx, out, progress=None, still=None):
             name_txt[c].set_position((-xmax * 0.012, pos[j]))
             val_txt[c].set_position((cur[j] + xmax * 0.012, pos[j]))
             val_txt[c].set_text(f"{cur[j]:,.0f}" if normalize else _money(cur[j]))
-        clock.set_text(f"{mdates.num2date(xd[k]):%b %Y}")
+        moment = (_at_position(closes.index, xd[k]) if intraday
+                  else mdates.num2date(xd[k]))
+        clock.set_text(_stamp(moment, closes.index, intraday, "%b %Y"))
         return ()
 
     if still is not None:

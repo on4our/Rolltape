@@ -105,6 +105,20 @@ before animating so the line head moves smoothly rather than hopping between dai
 Any time-based motion should be frame-rate independent — see the race renderer's
 `1 - exp(-11/fps)` smoothing rather than a fixed per-frame constant.
 
+**The x axis depends on the interval.** Daily bars go on a real date axis; intraday bars go
+on their *position*, with the timestamps moved onto the tick labels. This is not a style
+preference — five-minute bars across a week are about two thirds overnight by wall clock,
+so a date axis spends most of the frame drawing a flat line between sessions. Any renderer
+that plots against time must take `x` from `_x_values(index, intraday)`, pass
+`x_dates=not intraday` to `_style_axes`, and call `_position_ticks` when intraday. Label
+text goes through `_range_label` and `_stamp` so a one-day chart reads `09:30` and a
+multi-day one reads `06 Aug`. Anything that maps a date onto the axis — the timeline's
+callouts, the race clock — has to resolve to a bar position too, not to a coordinate.
+
+**Anything per-year is per-bar.** `sqrt(252)` is a count of daily bars. Annualising against
+it on five-minute returns understates volatility by about 8.8x. Use
+`datasrc.periods_per_year(interval)`.
+
 **Mobile CSS.** The narrow-screen media query sits at the *end* of the stylesheet and must
 stay there. It has the same specificity as the base rules, so moving it earlier silently
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
@@ -120,13 +134,6 @@ draining the queue is still what bounds CPU, not the lock.
 
 ## Known rough edges
 
-- **An open-ended date range caches forever.** `_cache_path()` hashes `end` as the literal
-  string `"None"`, so a range with no end date keeps hitting the same cache file — and an
-  empty end date is what the UI ships by default. Render a ticker on Monday, render it
-  again on Friday, and you get Monday's chart with no warning and nothing in the footer.
-  `Clear price cache` is the only way out and nothing tells you to press it. This is the
-  most damaging bug in the repo: it puts stale prices on camera. Fold the last market close
-  into the cache key, or expire the file on mtime.
 - `clean_config()` validates less than the contract above claims. Theme, aspect, easing,
   metric and both dates pass through unchecked — a typo'd theme silently renders as
   Midnight — and `duration` has no upper bound, so one request can queue tens of thousands
@@ -136,9 +143,12 @@ draining the queue is still what bounds CPU, not the lock.
   1080p60 clip — and needs enough memory that a small container host may OOM-kill it. That
   now costs you the one render rather than the server, and the job reports the memory hint
   instead of a signal number. `final` uses `medium` for the same reason.
-- Daily bars only. Intraday needs `interval="5m"` and is limited to ~60 days of history.
-  Note that Stooq's CSV endpoint is daily-grain, so intraday would have no fallback — it
-  is the one feature that breaks outright when Yahoo does.
+- yfinance breaks periodically when Yahoo changes their endpoints. Daily renders survive
+  it — `data.py` falls through to Stooq and the footer names the source. Intraday does not:
+  Stooq serves daily bars and coarser, so there is nothing to fall through to.
+- Intraday is therefore also the one feature that needs yfinance installed rather than
+  merely working. `/api/meta` reports `intraday: false` when it is missing and the
+  interface drops the option rather than offering one that always fails.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
 - `clean_config()` holds all validation and has no tests of its own.
@@ -150,14 +160,11 @@ draining the queue is still what bounds CPU, not the lock.
 Near term, in rough priority order. The Stooq fallback that used to head this list has
 shipped; so has moving renders out of process.
 
-1. Expire the price cache on open-ended ranges — see the first known rough edge. Nothing
-   else on this list matters as much as the tool not drawing stale prices.
-2. Make `clean_config()` match its own contract: validate theme, aspect, easing, metric and
+1. Make `clean_config()` match its own contract: validate theme, aspect, easing, metric and
    the dates, and bound `duration`.
-3. Intraday interval option — needed for same-day coverage of Fed days and earnings gaps.
-4. Encoder preset exposed in the UI (`final` now defaults to `medium`).
-5. Brand kit: save theme, footer, and default title format as a named preset.
-6. Batch render — one config, many tickers, queued. The render subprocess is the piece
+2. Encoder preset exposed in the UI (`final` now defaults to `medium`).
+3. Brand kit: save theme, footer, and default title format as a named preset.
+4. Batch render — one config, many tickers, queued. The render subprocess is the piece
    that was missing; the queue already handles the rest.
 
 Done: Stooq fallback in `data.py`, so a render survives Yahoo changing its endpoints.
