@@ -51,6 +51,14 @@ button,input,select,textarea{font:inherit;color:inherit}
 .slate button:hover{color:var(--amber);border-bottom-color:var(--amber)}
 .slate button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 
+/* Only shown on a demo instance, where the visitor is someone deciding whether to buy.
+   A local install belongs to someone who already has it, so it stays out of their way. */
+.pricelink{
+  font-family:var(--mono);font-size:11.5px;color:var(--dim);text-decoration:none;
+  border-bottom:1px dotted var(--edge);padding-bottom:1px;white-space:nowrap;
+}
+.pricelink:hover{color:var(--amber);border-bottom-color:var(--amber)}
+
 .layout{display:grid;grid-template-columns:352px minmax(0,1fr);align-items:start}
 
 
@@ -213,7 +221,10 @@ button,input,select,textarea{font:inherit;color:inherit}
   .main{order:-1;padding:14px 14px 26px}
   .topbar{height:auto;padding:8px 14px;flex-wrap:wrap;row-gap:6px}
   .pill{white-space:nowrap}
-  .slate{margin-left:0;flex-basis:100%;font-size:11px}
+  /* The slate takes a row of its own, so the pricing link rides up next to the wordmark
+     rather than claiming a third row for one word. */
+  .slate{margin-left:0;flex-basis:100%;font-size:11px;order:1}
+  .pricelink{margin-left:auto;font-size:12px}
   .slate button{padding:5px 4px}  /* thumb-sized tap target, not an 11px word */
   .rail{height:auto;position:static;border-right:0;border-top:1px solid var(--edge)}
   .stage{padding:10px}
@@ -243,6 +254,7 @@ button,input,select,textarea{font:inherit;color:inherit}
     <button type="button" id="fpsBtn">—</button> ·
     <span id="slateRest"></span>
   </div>
+  <a class="pricelink" id="pricingLink" href="/pricing" hidden>Pricing</a>
 </div>
 
 <div class="layout">
@@ -496,6 +508,7 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
   state.meta = m;
   applyTier();
   $("#demoPill").hidden = !m.demo;
+  $("#pricingLink").hidden = !m.demo;
   $("#modes").innerHTML = m.charts.map(c=>`
     <button class="mode" data-id="${c.id}" aria-pressed="${c.id===state.chart}">
       <div class="mode-name">${c.label}</div>

@@ -310,6 +310,15 @@ def index():
     return send_from_directory(app.template_folder, "index.html")
 
 
+# Served from every instance rather than only the public demo one, because the point of a
+# pricing page is that someone can be sent a link to it. The app only *links* to it in
+# demo mode — see the topbar in index.html — so a local install stays a tool rather than a
+# shopfront.
+@app.get("/pricing")
+def pricing():
+    return send_from_directory(app.template_folder, "pricing.html")
+
+
 @app.get("/api/meta")
 def meta():
     return jsonify({
