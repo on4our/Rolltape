@@ -164,6 +164,22 @@ framing exactly, which is why adding this changed no existing output — `extent
 `rest_y` are how a renderer tells the camera what its own resting frame was. Charts built
 from ranked rows (`bars`, `race`) have no plane to move over and never construct one.
 
+**Interface styling.** The chrome follows Stripe: a light ground with white cards, navy
+text, indigo for the one thing you are meant to press. Every colour, shadow and focus ring
+is a custom property in `:root` — nothing below it hardcodes a hex, the same rule `THEMES`
+follows for the renderers. Three things are load-bearing rather than taste:
+
+- Depth is a hairline *ring inside the box-shadow*, never a border. A border changes the
+  box on focus and shifts the control by a pixel; the ring swaps for `--focus` and nothing
+  moves. Adding `border:1px` to a `.ctrl` or a button reintroduces that jump.
+- The preview viewport stays dark on the light chrome so a rendered frame reads as footage
+  rather than as another panel — and so does the transparency checkerboard, which takes
+  navy instead of the usual white. Three of the four themes draw light text that would
+  disappear on a pale check.
+- Nothing here reaches into `THEMES`. Chart colour and interface colour are separate
+  vocabularies; the swatch dots are the only place a theme's colours appear in the chrome,
+  and they arrive from `/api/meta` as data.
+
 **Mobile CSS.** The narrow-screen media query sits at the *end* of the stylesheet and must
 stay there. It has the same specificity as the base rules, so moving it earlier silently
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
