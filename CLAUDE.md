@@ -32,9 +32,16 @@ jobs.py         The render job registry
 presets.py      Named brand kits, saved to one JSON file
 templates/      One HTML file, inline CSS and JS, no build step
 outputs/        Rendered MP4s
+test_*.py       The suite — see Tests below
 ```
 
 Deployment support sits off to the side and nothing local reads it: `Dockerfile`.
+
+Two directories hold no code the app runs. `docs/` is the commercial plan — `pricing.md`,
+`acquisition.md`, `revenue-projection.md` — and `scripts/revenue_model.py` regenerates
+every number in the last of those. They are decided-but-unshipped, so nothing in the app
+enforces any of it; treat them as the source of truth for product direction and this file
+as the source of truth for the code.
 
 There is deliberately no frontend build step and no database. Job state is an in-memory
 `OrderedDict` in `jobs.py` that resets on restart. `config.py`, `storage.py` and
@@ -43,13 +50,19 @@ abstraction layer to grow. Don't add a build pipeline or an ORM without a concre
 exception and the only state meant to survive a restart: `presets.py` keeps them in a
 single JSON document, written atomically and read fresh on every call.
 
+**One process, or the registry splits.** Because job state is that dict, `--workers 1` in
+the Dockerfile is load-bearing rather than a tuning choice — a second worker process is a
+second registry, so renders start, finish, and never appear in the UI that asked for them.
+Threads are fine and the Dockerfile uses eight of them; processes are not. Hosting this
+for more than one user means a shared store behind the `jobs.py` seam first.
+
 ## How a render works
 
 1. Browser POSTs config JSON to `/api/render`.
 2. `clean_config()` normalises and validates it. **All validation lives here** — the
    renderers assume a clean config and will raise unhelpfully otherwise. (It is currently
-   thinner than that claim: theme, aspect, easing, metric and the dates go through
-   unchecked, and a bad theme silently renders as Midnight.)
+   thinner than that claim: theme, aspect, easing and metric go through unchecked, and a
+   bad theme silently renders as Midnight.)
 3. Job goes on a `Queue`; one worker thread drains it.
 4. `render_job.run()` spawns a child process, which calls
    `renderers.render(cfg, path, progress)` — dispatching on `cfg["chart"]` via the `CHARTS`
@@ -81,9 +94,42 @@ def render_x(cfg, ctx, out, progress=None, still=None) -> str | Figure
 - `progress(i, n)` is passed straight to matplotlib's `progress_callback`.
 
 To add a chart type: write the function, add an entry to `CHARTS` at the bottom of
-`renderers.py`. The UI builds its chart list from `/api/meta`, so it appears
-automatically. Chart-specific form fields need a `data-for="yourchart"` attribute in
-`index.html`.
+`renderers.py`, and add a fixture to `CHART_FIXTURES` in `test_render.py`. The UI builds
+its chart list from `/api/meta`, so it appears automatically. Chart-specific form fields
+need a `data-for="yourchart"` attribute in `index.html`. The fixture is what makes the
+suite cover the new chart at all — several tests iterate the whole registry, so a chart
+missing from it is silently untested rather than failing.
+
+## Tests
+
+```bash
+python -m unittest              # all 141, about 15 seconds
+python -m unittest test_camera  # one module
+```
+
+No network and no ffmpeg. Yahoo is forced to fail and Stooq answers from a recorded CSV
+sample, everything else runs on the demo generator, and the two end-to-end encode tests
+skip themselves when there is no ffmpeg to call. So the suite is fast enough to run on
+every change, and there is no excuse for not having run it.
+
+- `test_app.py` — `clean_config()`, every input the interface can send.
+- `test_data.py` — the Yahoo/Stooq fallback, range presets, cache freshness, attribution.
+- `test_render.py` — the export path: backgrounds, date labelling, stills, every theme.
+- `test_camera.py` — the planned limits behind each move.
+- `test_render_job.py` — the two-process protocol, and preview latency under load.
+- `test_presets.py` — brand kit persistence and the title template.
+
+Two things the suite is built around, both worth preserving:
+
+- **Draw stills, don't encode.** `test_render.py` renders one frame and reads the pixels
+  back, which exercises the same figure scaffolding a video render uses without paying
+  for the encode. A test that needs a whole clip is nearly always a test that wanted one
+  frame.
+- **The tests that matter most are the ones about the properties, not the pictures.** That
+  a locked camera reproduces exactly the pre-camera framing; that a preview still answers
+  during an in-flight render; that a transparent export has no opaque backdrop. Those are
+  the conventions below, made enforceable — when you add one to this file, ask what would
+  fail if someone ignored it.
 
 ## Conventions that matter
 
@@ -193,11 +239,12 @@ draining the queue is still what bounds CPU, not the lock.
   that meaningfully speeds up a render has to make `_new_fig`/draw cheaper — blitting,
   reusing artists between frames, or rendering in parallel processes. Chasing the encoder
   settings is not worth it; that was measured, not assumed.
-- `clean_config()` validates less than the contract above claims. Theme, aspect, easing,
-  metric and both dates pass through unchecked — a typo'd theme silently renders as
-  Midnight — and `duration` has no upper bound, so one request can queue tens of thousands
-  of frames. `color_by_sign` is read by `render_bars` but stripped by `clean_config`, so the
-  option is unreachable.
+- `clean_config()` validates less than the contract above claims. Theme, aspect, easing and
+  metric pass through unchecked — a typo'd theme silently renders as Midnight — and
+  `duration` has no upper bound, so one request can queue tens of thousands of frames.
+  `color_by_sign` is read by `render_bars` but stripped by `clean_config`, so the option is
+  unreachable. The dates are the part that *is* checked: `_date()` refuses anything that
+  isn't ISO and `resolve_window()` rejects an end on or before the start.
 - `preset=slow` on the `max` quality tier is genuinely slow — roughly 70s for a 7.5s
   1080p60 clip — and needs enough memory that a small container host may OOM-kill it. That
   now costs you the one render rather than the server, and the job reports the memory hint
@@ -210,7 +257,6 @@ draining the queue is still what bounds CPU, not the lock.
   interface drops the option rather than offering one that always fails.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
-- `clean_config()` holds all validation and has no tests of its own.
 - Cancelling only works on a queued job. Killing an in-flight render is now a matter of
   signalling the child, but nothing in the UI calls the endpoint that would do it.
 - `still=` maps 0..1 across the reveal, not across reveal + hold, so the preview scrub
@@ -229,8 +275,10 @@ draining the queue is still what bounds CPU, not the lock.
 
 Near term, in rough priority order.
 
-1. Make `clean_config()` match its own contract: validate easing and metric, and bound
-   `duration`.
+1. Make `clean_config()` match its own contract: validate theme, aspect, easing and
+   metric, and bound `duration`. Mostly a matter of calling `_one_of()`, which already
+   does this for the three camera fields — the work is deciding what a bad theme should
+   do to an API caller who has been getting Midnight, not writing the check.
 2. Batch render — one config, many tickers, queued. The render subprocess is the piece
    that was missing; the queue already handles the rest.
 3. Frame-drawing speed — the only lever that actually shortens a render. See the first
@@ -281,9 +329,13 @@ way.
 
 ### Further out
 
-This is being explored as a product. That means watermarking on a free tier,
-render credits, the cinematography plan above, and eventually an API endpoint that accepts
-a config and returns an MP4.
+This is being explored as a product, and **`docs/pricing.md` is the decided plan** —
+three paid tiers, no free tier and no watermarking, both of which were considered and
+dropped. It supersedes the "watermarking, render credits" sketch this section used to
+carry, and the $40 cinematography tier above is pencilled against it rather than in it.
+`docs/acquisition.md` covers how anyone arrives; neither is enforced anywhere in the code.
+Beyond the tiers, the last piece is an API endpoint that accepts a config and returns an
+MP4.
 **Before any of that ships, the data source must be replaced with a licensed feed** —
 yfinance scrapes Yahoo and redistributing that data to paying users is not permitted.
 Tiingo, Twelve Data, EOD Historical and Polygon all license end-of-day US equities in the
@@ -293,6 +345,13 @@ but it has to be covered before the first paying user, not after.
 
 ## Style
 
-Python: standard library plus the four deps, no frameworks beyond Flask. Comments explain
-*why*, not *what* — the existing comments are the reference for tone. Keep functions flat
-and readable over clever.
+Python: standard library plus the four that do the work — Flask, matplotlib, numpy,
+pandas — with yfinance and imageio-ffmpeg alongside them as the two the app degrades
+gracefully without. No frameworks beyond Flask. Comments explain *why*, not *what* — the
+existing comments are the reference for tone. Keep functions flat and readable over
+clever.
+
+The same standard applies to tests: `unittest`, no pytest, no fixtures library, and a
+docstring at the top of each module saying what it covers and what it deliberately
+doesn't touch (network, ffmpeg, a real presets file). Run the suite before you call
+anything done.
