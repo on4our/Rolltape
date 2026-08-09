@@ -30,7 +30,7 @@ config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
 presets.py      Named brand kits, saved to one JSON file
-templates/      One HTML file, inline CSS and JS, no build step
+templates/      The app and the pricing page — inline CSS and JS each, no build step
 outputs/        Rendered MP4s
 ```
 

@@ -3,6 +3,11 @@
 The plan for charging for Rolltape. Decided, not shipped — nothing in the code enforces
 any of this yet. See [Sequencing](#sequencing) for what has to exist first.
 
+The public page quoting all of this is `templates/pricing.html`, served at `/pricing`. It
+is the only place these numbers appear outside this file, and `test_app.py` fails when the
+two disagree — so a price changes here first. The page carries monthly prices only and
+multiplies for the year, because the 10x rule below is one number rather than three.
+
 This supersedes the "watermarking on a free tier, render credits" sketch in CLAUDE.md's
 roadmap. Both of those ideas were dropped, for reasons in [What we're not
 doing](#what-were-not-doing).

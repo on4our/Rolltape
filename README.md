@@ -171,7 +171,7 @@ data.py         Yahoo fetch, Stooq fallback, disk cache, plus the demo generator
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go
 jobs.py         The render job registry
-templates/      The interface
+templates/      The interface, and the pricing page at /pricing
 outputs/        Rendered MP4s land here
 ```
 

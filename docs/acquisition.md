@@ -7,8 +7,9 @@ pay; this settles how they arrive. Same status: decided, not shipped.
 
 There is no path from stranger to paying customer. Not a narrow one — none.
 
-- **Nowhere to send anyone.** `templates/` contains exactly one file, and it's the app.
-  No landing page, no email capture, no waitlist.
+- **Nowhere to send anyone.** There is a pricing page now (`templates/pricing.html`, step
+  3 below), but it answers "what does it cost" for someone already sold. No landing page,
+  no email capture, no waitlist — nothing that takes a stranger's interest and keeps it.
 - **Nothing to try.** The launch product is a local Python app: `pip install -r
   requirements.txt`, plus ffmpeg on PATH. That is the first thing an interested stranger
   meets.
@@ -163,9 +164,12 @@ building billing for a customer count you can hold in your head.
 
 1. Verify the competitor claims above by hand. They're from vendor marketing.
 2. Deploy the demo instance. Uses code that exists today.
-3. Landing page with email capture — what it is, the demo link, three example clips.
+3. Landing page with email capture — what it is, the demo link, three example clips. The
+   pricing page is built and links back to the app; the landing page in front of it and
+   the email capture are what's still missing.
 4. Package the local app with ffmpeg bundled.
-5. Stripe payment link, manual fulfilment, first paying users.
+5. Stripe payment link, manual fulfilment, first paying users. The pricing page turns
+   itself into a checkout when those links exist — see `CHECKOUT` in `pricing.html`.
 6. The "how I make these charts" video, pointing at all of it.
 7. Show HN, then outreach, then Product Hunt.
 
