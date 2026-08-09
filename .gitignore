@@ -5,6 +5,8 @@ outputs/*
 !outputs/.gitkeep
 presets.json
 presets.json.tmp
+signups.jsonl
+.examples/
 .venv/
 venv/
 .env

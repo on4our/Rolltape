@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1A1917">
+<title>Rolltape — animated stock charts for investing videos</title>
+<meta name="description" content="Type a ticker, get a broadcast-ready animated chart as MP4 — and the thumbnail out of the same render. Six chart types, four themes, transparent ProRes for overlays.">
+<meta property="og:title" content="Rolltape — animated charts for investing content, from a ticker">
+<meta property="og:description" content="Type a ticker, get a broadcast-ready animated chart as MP4 — and the thumbnail out of the same render.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="{{ url_for('example_still', example_id='line', _external=True) }}">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* Same palette and type as the app itself (templates/index.html). Someone arriving here
+   and then opening the tool should not feel handed off to a different product. */
+:root{
+  --shell:#1A1917; --panel:#232120; --panel2:#2C2926; --edge:#3A352F;
+  --ink:#EDE8E0; --dim:#8C8378; --amber:#E8A33D; --sage:#7FB069; --red:#D96A5B;
+  --sans:'Archivo',system-ui,-apple-system,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --wrap:1080px;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--shell);color:var(--ink);font-family:var(--sans);
+  font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased;
+}
+button,input{font:inherit;color:inherit}
+a{color:var(--amber)}
+.wrap{max-width:var(--wrap);margin:0 auto;padding:0 24px}
+.eyebrow{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim);margin:0 0 14px;
+}
+
+/* ---- top bar ------------------------------------------------------- */
+.topbar{
+  display:flex;align-items:center;gap:18px;height:56px;
+  border-bottom:1px solid var(--edge);background:var(--panel);
+  position:sticky;top:0;z-index:20;
+}
+.topbar .wrap{display:flex;align-items:center;gap:16px;width:100%}
+.wordmark{font-weight:700;letter-spacing:.16em;text-transform:uppercase;font-size:13px}
+.wordmark span{color:var(--amber)}
+.pill{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+  border:1px solid var(--edge);border-radius:2px;padding:3px 8px;color:var(--dim);
+}
+.pill.warn{border-color:var(--amber);color:var(--amber)}
+.topbar .spacer{margin-left:auto}
+.topnav{
+  text-decoration:none;font-family:var(--mono);font-size:11.5px;color:var(--dim);
+  border:1px solid var(--edge);border-radius:2px;padding:7px 14px;
+}
+.topnav:hover{color:var(--amber);border-color:var(--amber)}
+
+/* ---- hero ---------------------------------------------------------- */
+/* Longhand, because .wrap owns the horizontal padding and a shorthand here would reset
+   it to zero — invisible on a wide screen where the 1080px column is centred anyway, and
+   text flush against the bezel on a phone. */
+.hero{padding-top:76px;padding-bottom:8px}
+h1{
+  font-size:52px;line-height:1.06;letter-spacing:-.022em;font-weight:800;
+  margin:0 0 20px;max-width:19ch;
+}
+h1 em{font-style:normal;color:var(--amber)}
+.lede{font-size:19px;color:var(--dim);max-width:56ch;margin:0 0 30px}
+.lede b{color:var(--ink);font-weight:500}
+.cta{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.btn{
+  background:var(--amber);color:#1A1917;border:0;border-radius:2px;font-weight:700;
+  padding:14px 30px;cursor:pointer;letter-spacing:.06em;text-transform:uppercase;
+  font-size:12.5px;text-decoration:none;display:inline-block;
+}
+.btn:hover{filter:brightness(1.08)}
+.btn.ghost{
+  background:none;border:1px solid var(--edge);color:var(--dim);font-weight:500;
+  font-family:var(--mono);text-transform:none;letter-spacing:0;padding:13px 20px;
+}
+.btn.ghost:hover{color:var(--ink);border-color:var(--dim)}
+.cta .note{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+
+/* The hero frame carries the same furniture as the app's preview stage, because it is
+   showing the same thing: a frame the renderer actually produced. */
+.stage{
+  border:1px solid var(--edge);background:var(--panel);border-radius:3px;
+  padding:14px;margin:44px 0 0;
+}
+.stage-head{
+  display:flex;align-items:center;gap:10px;margin-bottom:12px;
+  font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--dim);
+}
+.stage-head .dot{width:6px;height:6px;border-radius:50%;background:var(--sage)}
+.stage img{width:100%;display:block;border-radius:2px}
+.stage .missing{
+  display:flex;align-items:center;justify-content:center;min-height:280px;padding:40px;
+  background:var(--shell);border:1px dashed var(--edge);border-radius:2px;
+  color:var(--dim);font-family:var(--mono);font-size:12px;text-align:center;
+}
+.shot.noimg img{display:none}
+.shot .missing{display:none}
+.shot.noimg .missing{display:flex}
+
+/* ---- sections ------------------------------------------------------ */
+section{padding:78px 0}
+section + section{border-top:1px solid var(--edge)}
+h2{font-size:30px;line-height:1.15;letter-spacing:-.015em;margin:0 0 14px;font-weight:700}
+.sub{color:var(--dim);max-width:62ch;margin:0 0 36px}
+
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+.card{
+  border:1px solid var(--edge);background:var(--panel);border-radius:3px;padding:26px 24px;
+}
+.card h3{margin:0 0 10px;font-size:19px;font-weight:600;letter-spacing:-.01em}
+.card p{margin:0;color:var(--dim);font-size:15px}
+.card p + p{margin-top:12px}
+.card code{
+  font-family:var(--mono);font-size:13px;color:var(--ink);background:var(--panel2);
+  border:1px solid var(--edge);border-radius:2px;padding:1px 5px;
+}
+
+/* ---- showcase ------------------------------------------------------ */
+.shots{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.shot{border:1px solid var(--edge);background:var(--panel);border-radius:3px;overflow:hidden}
+.shot img{width:100%;display:block;aspect-ratio:16/9;object-fit:cover;background:var(--shell)}
+.shot .missing{min-height:150px;border:0;border-bottom:1px solid var(--edge)}
+.shot .body{padding:16px 18px 20px}
+.shot h3{margin:0 0 7px;font-size:15.5px;font-weight:600}
+.shot p{margin:0;color:var(--dim);font-size:13.5px;line-height:1.5}
+
+/* ---- chart list ---------------------------------------------------- */
+.charts{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--edge);
+  border:1px solid var(--edge);border-radius:3px;overflow:hidden}
+.chart{background:var(--panel);padding:22px 20px}
+.chart .name{font-weight:600;font-size:15px;margin-bottom:5px}
+.chart .desc{color:var(--dim);font-size:13.5px;line-height:1.5}
+
+/* ---- steps --------------------------------------------------------- */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:26px;counter-reset:step}
+.step{counter-increment:step}
+.step::before{
+  content:counter(step,decimal-leading-zero);display:block;font-family:var(--mono);
+  font-size:11px;letter-spacing:.14em;color:var(--amber);margin-bottom:10px;
+}
+.step h3{margin:0 0 8px;font-size:16.5px;font-weight:600}
+.step p{margin:0;color:var(--dim);font-size:14.5px}
+
+/* ---- spec list ----------------------------------------------------- */
+.spec{display:grid;grid-template-columns:repeat(2,1fr);gap:0 40px;margin:0;padding:0;
+  list-style:none}
+.spec li{
+  display:flex;gap:12px;padding:13px 0;border-bottom:1px solid var(--edge);
+  font-size:14.5px;color:var(--dim);
+}
+.spec b{color:var(--ink);font-weight:500;flex:0 0 auto}
+.spec li::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--sage);
+  margin-top:9px;flex:0 0 auto}
+
+/* ---- signup -------------------------------------------------------- */
+.signup-band{background:var(--panel);border-top:1px solid var(--edge)}
+.signup{display:flex;gap:10px;max-width:520px;margin-top:24px;flex-wrap:wrap}
+.signup input{
+  flex:1 1 240px;background:var(--shell);border:1px solid var(--edge);border-radius:2px;
+  padding:13px 12px;font-family:var(--mono);font-size:14px;min-width:0;
+}
+.signup input:focus-visible{outline:2px solid var(--amber);outline-offset:1px;
+  border-color:var(--amber)}
+.signup button{
+  background:var(--amber);color:#1A1917;border:0;border-radius:2px;font-weight:700;
+  padding:13px 26px;cursor:pointer;letter-spacing:.06em;text-transform:uppercase;
+  font-size:12px;
+}
+.signup button:hover{filter:brightness(1.08)}
+.signup button:disabled{opacity:.5;cursor:not-allowed}
+.msg{font-family:var(--mono);font-size:12.5px;margin-top:12px;min-height:1.2em}
+.msg.ok{color:var(--sage)}
+.msg.err{color:var(--red)}
+.fineprint{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:14px}
+
+/* ---- footer -------------------------------------------------------- */
+footer{border-top:1px solid var(--edge);padding:32px 0 54px;color:var(--dim);font-size:13px}
+footer .row{display:flex;gap:22px;flex-wrap:wrap;align-items:center}
+footer .spacer{margin-left:auto}
+footer a{color:var(--dim);text-decoration:none;font-family:var(--mono);font-size:12px}
+footer a:hover{color:var(--amber)}
+
+/* --- narrow screens: keep this last so it wins over the base rules --- */
+@media (max-width:880px){
+  .wrap{padding:0 18px}
+  .hero{padding-top:48px;padding-bottom:4px}
+  h1{font-size:36px;max-width:none}
+  .lede{font-size:17px}
+  section{padding:52px 0}
+  h2{font-size:25px}
+  .pair,.shots,.charts,.steps,.spec{grid-template-columns:1fr}
+  .steps{gap:30px}
+  .charts{gap:1px}
+  /* Stacked rather than shrunk: two mono labels side by side on a 390px screen either
+     overflow or wrap mid-word, and the primary action wants the full width anyway. */
+  .cta .btn{flex:1 1 100%;text-align:center}
+  /* Safari zooms the page when a focused input is smaller than 16px. */
+  .signup input{font-size:16px}
+  .topnav{padding:8px 12px}
+}
+/* After the media query, exactly as in index.html. `display:flex` on .signup outranks
+   the browser's default styling for [hidden], so without this the form stays on screen
+   underneath its own thank-you message. */
+[hidden]{display:none !important}
+@media (prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <div class="wordmark">Roll<span>·</span>tape</div>
+    {% if demo %}<div class="pill warn">Demo data</div>{% endif %}
+    <div class="spacer"></div>
+    <a class="topnav" href="{{ demo_url }}">Open the app →</a>
+  </div>
+</div>
+
+<div class="wrap hero">
+  <h1>Animated charts for investing content, <em>from a ticker</em>.</h1>
+  <p class="lede">Type <b>NVDA</b>. Pick a chart. Get a broadcast-ready MP4 —
+    and the thumbnail out of the same render. No spreadsheet to fill in, no
+    After Effects pass afterwards.</p>
+  <div class="cta">
+    <a class="btn" href="{{ demo_url }}">Try it now</a>
+    <a class="btn ghost" href="#examples">See what it makes</a>
+    <span class="note">No signup. Nothing to install.</span>
+  </div>
+
+  {% set hero = examples.get('line') %}
+  {% if hero %}
+  <div class="stage shot">
+    <div class="stage-head"><span class="dot"></span><span>Frame from a rendered clip · {{ hero.label }}</span></div>
+    <img src="{{ url_for('example_still', example_id='line') }}"
+         alt="{{ hero.blurb }}" loading="eager"
+         onerror="this.closest('.shot').classList.add('noimg')">
+    <div class="missing">The renderer draws this frame on first request.<br>
+      It isn't available right now — the price source may be down.</div>
+  </div>
+  {% endif %}
+</div>
+
+<section id="why">
+  <div class="wrap">
+    <p class="eyebrow">Why this one</p>
+    <h2>Two things nothing else in the category does.</h2>
+    <div class="pair">
+      <div class="card">
+        <h3>Ticker in, not data in.</h3>
+        <p>Almost every tool like this takes pasted rows or an uploaded CSV. You type
+          <code>AAPL</code> and the fetch does the rest — prices, splits, the date range,
+          the moving averages already warm on the first bar drawn.</p>
+        <p>For someone covering markets every week, that is the whole difference between
+          a tool you use and a tool you keep meaning to use.</p>
+      </div>
+      <div class="card">
+        <h3>The thumbnail comes out of the same render.</h3>
+        <p><b>Save this frame</b> writes whatever the preview is showing as a
+          full-resolution PNG — same chart, same moment, same size as the video.</p>
+        <p>The thumbnail is not a side quest for anyone publishing this stuff. Shipping it
+          in the same pass as the clip is worth more than it sounds.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="examples">
+  <div class="wrap">
+    <p class="eyebrow">Output</p>
+    <h2>Frames the renderer actually produced.</h2>
+    <p class="sub">Not mockups — each one is drawn on request by the same code path that
+      writes the video, at the same framing and the same moment through the animation.
+      {% if demo %}<b>On this instance the prices behind them are generated, not real</b>,
+      so read the shapes and the labels rather than the numbers. Every frame is stamped to
+      say so.{% endif %}</p>
+    <div class="shots">
+      {% for example_id, ex in examples.items() %}
+      <figure class="shot" style="margin:0">
+        <img src="{{ url_for('example_still', example_id=example_id) }}"
+             alt="{{ ex.blurb }}" loading="lazy"
+             onerror="this.closest('.shot').classList.add('noimg')">
+        <div class="missing">Not available right now</div>
+        <figcaption class="body">
+          <h3>{{ ex.label }}</h3>
+          <p>{{ ex.blurb }}</p>
+        </figcaption>
+      </figure>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<section id="charts">
+  <div class="wrap">
+    <p class="eyebrow">Chart types</p>
+    <h2>{{ charts|length }} chart types, built for long-horizon investing stories.</h2>
+    <p class="sub">Ten years of the Mag 7. What $10k in each of these would be worth now.
+      A timeline of the 2020 drawdown with the callouts landing on the dates they happened.
+      Not trade-setup markup — that is somebody else's tool.</p>
+    <div class="charts">
+      {% for chart in charts %}
+      <div class="chart">
+        <div class="name">{{ chart.label }}</div>
+        <div class="desc">{{ chart.desc }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <p class="eyebrow">How it goes</p>
+    <h2>Ticker to finished clip, in about a minute of your attention.</h2>
+    <div class="steps">
+      <div class="step">
+        <h3>Pick the chart and the symbols</h3>
+        <p>One ticker or eight, a date-range preset or your own dates, daily bars or
+          five-minute ones.</p>
+      </div>
+      <div class="step">
+        <h3>Scrub the preview until it looks right</h3>
+        <p>A live frame from anywhere in the animation, redrawn as you change things. No
+          render needed to see the composition.</p>
+      </div>
+      <div class="step">
+        <h3>Render, and take the thumbnail with you</h3>
+        <p>Progress by the frame while it works. An MP4 at the end, plus the still if you
+          want it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="spec">
+  <div class="wrap">
+    <p class="eyebrow">What's in it</p>
+    <h2>Broadcast-ready straight out of the renderer.</h2>
+    <p class="sub">Every default is chosen so the file you get can go on a timeline
+      untouched. If a feature would need you to fix it up afterwards, it isn't finished.</p>
+    <ul class="spec">
+      <li><span><b>{{ themes }} themes</b> — colour lives in one place, never hardcoded
+        into a chart.</span></li>
+      <li><span><b>16:9, 9:16 and 1:1</b> — landscape, shorts and square from the same
+        config.</span></li>
+      <li><span><b>Transparent ProRes 4444</b> — real alpha for overlaying on footage,
+        not a matte to key.</span></li>
+      <li><span><b>Four camera moves</b> — push in, pull back, follow the line, or locked
+        off.</span></li>
+      <li><span><b>Log price axes</b> — equal percentage moves at equal height, with
+        moving averages.</span></li>
+      <li><span><b>Up to 1440p at 60fps</b> — draft tier for checking, max for
+        publishing.</span></li>
+      <li><span><b>Intraday intervals</b> — five-minute bars on their own position axis,
+        so overnight gaps don't eat the frame.</span></li>
+      <li><span><b>Brand kits</b> — theme, footer and title template, saved between
+        runs.</span></li>
+    </ul>
+  </div>
+</section>
+
+<section id="honest">
+  <div class="wrap">
+    <p class="eyebrow">Straight answer</p>
+    <h2>Today it runs on your machine.</h2>
+    <div class="pair">
+      <div class="card">
+        <h3>What that gets you</h3>
+        <p>Your renders are yours — unlimited, unwatermarked, at full quality, never
+          queued behind anyone. Nothing phones home and the price cache is a folder you
+          can delete.</p>
+        <p>ffmpeg ships with it, so <code>pip install -r requirements.txt</code> and
+          <code>python app.py</code> is the whole setup.</p>
+      </div>
+      <div class="card">
+        <h3>What it costs you</h3>
+        <p>That is still a Python install, and the honest read is that it is the step most
+          people stop at. A packaged one-click build is next, and hosted rendering after
+          that.</p>
+        <p>The link at the top runs the real interface in your browser with no install at
+          all, so you can find out whether it's worth the trouble first.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="signup-band" id="signup">
+  <div class="wrap">
+    <p class="eyebrow">Stay posted</p>
+    <h2>Know when the one-click build lands.</h2>
+    <p class="sub">One email when there is a packaged download, one when hosted rendering
+      opens. Nothing else — no newsletter, no drip sequence.</p>
+
+    <form class="signup" method="post" action="{{ url_for('signup') }}" id="signupForm">
+      <input type="email" name="email" id="email" required autocomplete="email"
+             placeholder="you@example.com" aria-label="Email address">
+      <button type="submit" id="signupBtn">Notify me</button>
+    </form>
+    {% set state = request.args.get('signup') %}
+    <div class="msg {{ 'ok' if state == 'ok' else 'err' if state == 'error' }}" id="signupMsg"
+         role="status" aria-live="polite">
+      {%- if state == 'ok' -%}
+        That's saved. You'll hear from me twice.
+      {%- elif state == 'error' -%}
+        {{ request.args.get('message', "That didn't work — try again.") }}
+      {%- endif -%}
+    </div>
+    <p class="fineprint">Your address, used for those two emails. Not sold, not shared.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap row">
+    <div class="wordmark">Roll<span>·</span>tape</div>
+    <span>Ticker in, animated chart video out.</span>
+    <div class="spacer"></div>
+    <a href="{{ demo_url }}">Open the app</a>
+    <a href="#examples">Examples</a>
+    <a href="#signup">Get notified</a>
+  </div>
+  {% if demo %}
+  <div class="wrap" style="margin-top:16px">
+    <span class="pill warn">Demo data</span>
+    <span style="margin-left:10px">This instance generates synthetic prices, so every
+      chart on it is illustrative. Renders are stamped to say so.</span>
+  </div>
+  {% endif %}
+</footer>
+
+<script>
+// Progressive enhancement only — the form posts and redirects perfectly well without
+// this. All it buys is staying on the page.
+(function(){
+  const form = document.getElementById("signupForm");
+  const btn  = document.getElementById("signupBtn");
+  const msg  = document.getElementById("signupMsg");
+  form.addEventListener("submit", async function(ev){
+    ev.preventDefault();
+    const email = document.getElementById("email").value;
+    btn.disabled = true;
+    msg.className = "msg";
+    msg.textContent = "Saving…";
+    try{
+      const res = await fetch(form.action, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({email: email, source: "landing"}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok){
+        form.hidden = true;
+        msg.className = "msg ok";
+        msg.textContent = "That's saved. You'll hear from me twice.";
+      } else {
+        msg.className = "msg err";
+        msg.textContent = data.error || "That didn't work — try again.";
+      }
+    } catch(e){
+      msg.className = "msg err";
+      msg.textContent = "Couldn't reach the server — try again shortly.";
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

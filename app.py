@@ -11,14 +11,17 @@ import uuid
 from datetime import date
 from queue import Queue
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import (Flask, Response, jsonify, redirect, render_template, request,
+                   send_file, send_from_directory, url_for)
 
 import config
 import data as datasrc
+import examples as showcase
 import jobs as jobstore
 import render_job
 import presets
 import renderers
+import signups
 import storage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -306,7 +309,19 @@ threading.Thread(target=worker, daemon=True).start()
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/")
+def root():
+    # A local run has no use for a marketing page in front of its own tool, so the app
+    # keeps "/" unless a host says otherwise. See config.LANDING.
+    if config.LANDING:
+        return landing()
+    return index()
+
+
+@app.get("/app")
 def index():
+    # Served as a file rather than through Jinja: index.html is 960 lines of inline JS
+    # and there is nothing in it for a template engine to do. The landing page is the
+    # opposite — all content, no behaviour — so that one is rendered.
     return send_from_directory(app.template_folder, "index.html")
 
 
@@ -317,6 +332,75 @@ def index():
 @app.get("/pricing")
 def pricing():
     return send_from_directory(app.template_folder, "pricing.html")
+
+
+@app.get("/landing")
+def landing():
+    """The public page. Always reachable, so it can be checked without setting the flag."""
+    return render_template(
+        "landing.html",
+        charts=list(renderers.CHARTS.values()),
+        examples=showcase.EXAMPLES,
+        themes=len(renderers.THEMES),
+        # Both point at this same process by default, which is what makes the demo
+        # container self-contained: the page and the thing it advertises are one deploy.
+        demo_url=config.DEMO_URL,
+        demo=datasrc.is_demo(),
+    )
+
+
+@app.get("/examples/<example_id>.png")
+def example_still(example_id):
+    """One showcase frame, drawn once and cached.
+
+    A 404 here is not an error worth showing anyone — the page falls back to describing
+    the chart in words. That matters because the most likely cause is the data source
+    being down, which is exactly when the landing page should still load.
+    """
+    spec = showcase.EXAMPLES.get(example_id)
+    if not spec:
+        return jsonify({"error": "No such example."}), 404
+
+    path = showcase.path_for(example_id, config.EXAMPLES_DIR)
+    if not os.path.exists(path):
+        try:
+            cfg = clean_config(dict(spec["cfg"]))
+            with DRAW_LOCK:
+                showcase.write_still(example_id, cfg, config.EXAMPLES_DIR)
+        except Exception as exc:  # noqa: BLE001
+            app.logger.warning("Example %s failed to draw: %s", example_id, exc)
+            return jsonify({"error": "Not available."}), 404
+
+    resp = send_file(path, mimetype="image/png")
+    # The frame for a given example only changes when its config does, and a stale one is
+    # a slightly old chart rather than a wrong page.
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
+def _page_url(**params):
+    """URL of the landing page, which sits at "/" or "/landing" depending on the flag."""
+    return url_for("root" if config.LANDING else "landing", _anchor="signup", **params)
+
+
+@app.post("/api/signup")
+def signup():
+    """Email capture. Works as a fetch and as a plain form post.
+
+    The form fallback is not ceremony: this is the only conversion on the page, and a
+    page that silently does nothing with JS blocked converts at zero.
+    """
+    wants_json = request.is_json
+    body = request.get_json(silent=True) or request.form
+    try:
+        signups.add(body.get("email"), source=(body.get("source") or "landing"))
+    except signups.SignupError as exc:
+        if wants_json:
+            return jsonify({"error": str(exc)}), 400
+        return redirect(_page_url(signup="error", message=str(exc)))
+    if wants_json:
+        return jsonify({"ok": True})
+    return redirect(_page_url(signup="ok"))
 
 
 @app.get("/api/meta")

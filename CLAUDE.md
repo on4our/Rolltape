@@ -30,7 +30,10 @@ config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
 presets.py      Named brand kits, saved to one JSON file
-templates/      The app and the pricing page — inline CSS and JS each, no build step
+examples.py     The three configs the landing page draws as its showcase
+signups.py      Email capture — a list provider when configured, a file otherwise
+templates/      The app, the landing page and the pricing page — inline CSS and JS
+                each, no build step
 outputs/        Rendered MP4s
 test_*.py       The suite — see Tests below
 ```
@@ -103,7 +106,7 @@ missing from it is silently untested rather than failing.
 ## Tests
 
 ```bash
-python -m unittest              # all 141, about 15 seconds
+python -m unittest              # all 178, about 25 seconds
 python -m unittest test_camera  # one module
 ```
 
@@ -118,6 +121,7 @@ every change, and there is no excuse for not having run it.
 - `test_camera.py` — the planned limits behind each move.
 - `test_render_job.py` — the two-process protocol, and preview latency under load.
 - `test_presets.py` — brand kit persistence and the title template.
+- `test_landing.py` — the landing page, the showcase stills and email capture.
 
 Two things the suite is built around, both worth preserving:
 
@@ -213,7 +217,22 @@ from ranked rows (`bars`, `race`) have no plane to move over and never construct
 **Mobile CSS.** The narrow-screen media query sits at the *end* of the stylesheet and must
 stay there. It has the same specificity as the base rules, so moving it earlier silently
 breaks the mobile layout. Inputs are 16px on mobile because Safari zooms the page for
-anything smaller.
+anything smaller. Both pages also carry `[hidden]{display:none !important}` after that
+query, because a `display:` rule of their own outranks the attribute otherwise — that is
+what makes the signup form actually leave when it sets `hidden`.
+
+**The landing page.** `/` is the app unless `ROLLTAPE_LANDING` says otherwise, in which
+case the page takes `/` and the app moves to `/app`. It is the one template rendered
+through Jinja rather than served as a file: it is all content and no behaviour, so it
+builds its chart list from the `CHARTS` registry the same way the app builds its own from
+`/api/meta`, and adding a chart type needs no edit here. Its showcase frames come from
+`examples.py` through `renderers.save_still()` — the actual renderer, cached to disk on
+first request — because a page arguing that the output looks good cannot illustrate itself
+with a mockup. A frame that won't draw 404s and the page describes the chart in words
+instead; the price source being down is exactly when the rest of the page still has to
+load. Anything laid over a `.wrap` sets `padding-top`/`padding-bottom` rather than the
+shorthand, which would reset the horizontal padding `.wrap` owns and put text against the
+bezel on a phone.
 
 **Brand kits.** A kit is theme, footer and a default title template. The client applies a
 kit to its own form state and sends the resolved values, so the server never needs to know
@@ -295,7 +314,9 @@ Near term, in rough priority order.
 Done since this list was last rewritten: the Stooq fallback, renders out of process,
 intraday intervals, date-range presets, camera moves, log price axes with moving
 averages, the encoder preset (`final` moved from `slow` to `medium`, with an
-Auto/Faster/Slower override in the UI) and brand kits.
+Auto/Faster/Slower override in the UI), brand kits, and the landing page with email
+capture — step 3 of docs/acquisition.md's sequencing, which leaves the demo instance
+above it as a deploy rather than a code change.
 
 ### Cinematography — transitions
 

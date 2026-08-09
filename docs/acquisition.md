@@ -7,9 +7,13 @@ pay; this settles how they arrive. Same status: decided, not shipped.
 
 There is no path from stranger to paying customer. Not a narrow one — none.
 
-- **Nowhere to send anyone.** There is a pricing page now (`templates/pricing.html`, step
-  3 below), but it answers "what does it cost" for someone already sold. No landing page,
-  no email capture, no waitlist — nothing that takes a stranger's interest and keeps it.
+- **Nowhere to send anyone.** ~~`templates/` contains exactly one file, and it's the app.
+  No landing page, no email capture, no waitlist.~~ **Built** — `templates/landing.html`,
+  served at `/landing`, or at `/` with `ROLLTAPE_LANDING=1`. Email capture posts to a list
+  provider when `ROLLTAPE_SIGNUP_URL` is set and appends to a file when it isn't. Behind
+  it, `templates/pricing.html` at `/pricing` answers "what does it cost" once someone is
+  sold. It has nowhere to point a demo link *at* yet, which is the next item and a deploy
+  rather than a code change.
 - **Nothing to try.** The launch product is a local Python app: `pip install -r
   requirements.txt`, plus ffmpeg on PATH. That is the first thing an interested stranger
   meets.
@@ -164,9 +168,13 @@ building billing for a customer count you can hold in your head.
 
 1. Verify the competitor claims above by hand. They're from vendor marketing.
 2. Deploy the demo instance. Uses code that exists today.
-3. Landing page with email capture — what it is, the demo link, three example clips. The
-   pricing page is built and links back to the app; the landing page in front of it and
-   the email capture are what's still missing.
+3. ~~Landing page with email capture — what it is, the demo link, three example clips.~~
+   **Done**, with two caveats. The examples are stills rather than clips — drawn on
+   request by the real renderer, which is what keeps them honest and current, but static;
+   `scripts/make_examples.py --clips` produces video when there's somewhere to host it.
+   And the demo link defaults to the app on the same host, so deploying step 2 in demo
+   mode makes the page and the demo one container and the link correct with no config.
+   The pricing page behind it is built too, and links back to the app.
 4. Package the local app with ffmpeg bundled.
 5. Stripe payment link, manual fulfilment, first paying users. The pricing page turns
    itself into a checkout when those links exist — see `CHECKOUT` in `pricing.html`.

@@ -171,7 +171,9 @@ data.py         Yahoo fetch, Stooq fallback, disk cache, plus the demo generator
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go
 jobs.py         The render job registry
-templates/      The interface, and the pricing page at /pricing
+examples.py     The three charts the landing page shows
+signups.py      Email capture, to a list provider or a local file
+templates/      The interface, the landing page, and the pricing page at /pricing
 outputs/        Rendered MP4s land here
 ```
 
@@ -210,6 +212,41 @@ position for a paid tier — see CLAUDE.md.
 
 Run the tests with `python -m unittest`. They mock both sources, so they need no network.
 
+## The landing page
+
+There is a public page at `/landing` — what the tool is, the three chart types it shows
+best, and an email field. It is off the path of a local run: `/` stays the app, and you
+only ever see the page if you go looking for it.
+
+Set `ROLLTAPE_LANDING=1` and the two swap. `/` serves the landing page and the app moves
+to `/app`, which is the arrangement a public instance wants. Both URLs work either way, so
+a link you hand out keeps working if you change your mind.
+
+The showcase frames are drawn by the renderer itself — `examples.py` holds three configs
+and the page asks for `/examples/<id>.png`, which draws the frame once and caches it. So
+what a visitor sees is genuinely what the tool produces, and adding a chart type to
+`CHARTS` puts it in the page's chart list without anyone editing HTML. If the price source
+is down the frames 404 and the page explains the gap rather than breaking.
+
+Drawing three frames takes a second or so, which the first visitor to a cold container
+would otherwise pay in series. Move it to deploy time:
+
+```bash
+python3 scripts/make_examples.py            # pre-warm the stills
+python3 scripts/make_examples.py --clips    # and an MP4 of each, ~1 min per clip
+```
+
+**Point `ROLLTAPE_SIGNUP_URL` at a list provider before sending anyone there.** Without
+one, addresses append to `signups.jsonl`, which is right on a laptop and lossy in a
+container that restarts — the file goes when the instance does. With one set, the address
+is POSTed as `{"email": ..., "source": ...}` and nothing touches the disk. A `409` back
+from the provider counts as success, because "already subscribed" is not a failure from
+the visitor's side.
+
+Running it in demo mode is the honest way to put it in public: `ROLLTAPE_DEMO=1` needs no
+market data, so there is no licensing question, and the page says on itself that the
+prices are generated.
+
 ## Deploying
 
 Rolltape is a local tool and runs best that way — rendering is CPU-bound, so your own
@@ -227,6 +264,11 @@ The code is deployment-ready. These env vars all default to the local behaviour:
 | `ROLLTAPE_OUT_DIR` | `./outputs` | Where MP4s are written |
 | `ROLLTAPE_CACHE_DIR` | `./.cache` | Where the price cache lives |
 | `ROLLTAPE_DEMO` | off | Same as `--demo`, for hosts with no CLI |
+| `ROLLTAPE_LANDING` | off | Landing page at `/`, app at `/app` |
+| `ROLLTAPE_DEMO_URL` | `/app` | Where the landing page's buttons point |
+| `ROLLTAPE_SIGNUP_URL` | unset | List provider to POST signups to |
+| `ROLLTAPE_SIGNUPS` | `./signups.jsonl` | Where signups go without a provider |
+| `ROLLTAPE_EXAMPLES_DIR` | `./.examples` | Cached showcase frames |
 
 ### A container host
 
