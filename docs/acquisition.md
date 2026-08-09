@@ -7,8 +7,12 @@ pay; this settles how they arrive. Same status: decided, not shipped.
 
 There is no path from stranger to paying customer. Not a narrow one — none.
 
-- **Nowhere to send anyone.** `templates/` contains exactly one file, and it's the app.
-  No landing page, no email capture, no waitlist.
+- **Nowhere to send anyone.** ~~`templates/` contains exactly one file, and it's the app.
+  No landing page, no email capture, no waitlist.~~ **Built** — `templates/landing.html`,
+  served at `/landing`, or at `/` with `ROLLTAPE_LANDING=1`. Email capture posts to a list
+  provider when `ROLLTAPE_SIGNUP_URL` is set and appends to a file when it isn't. It has
+  nowhere to point a demo link *at* yet, which is the next item and a deploy rather than
+  a code change.
 - **Nothing to try.** The launch product is a local Python app: `pip install -r
   requirements.txt`, plus ffmpeg on PATH. That is the first thing an interested stranger
   meets.
@@ -163,7 +167,12 @@ building billing for a customer count you can hold in your head.
 
 1. Verify the competitor claims above by hand. They're from vendor marketing.
 2. Deploy the demo instance. Uses code that exists today.
-3. Landing page with email capture — what it is, the demo link, three example clips.
+3. ~~Landing page with email capture — what it is, the demo link, three example clips.~~
+   **Done**, with two caveats. The examples are stills rather than clips — drawn on
+   request by the real renderer, which is what keeps them honest and current, but static;
+   `scripts/make_examples.py --clips` produces video when there's somewhere to host it.
+   And the demo link defaults to the app on the same host, so deploying step 2 in demo
+   mode makes the page and the demo one container and the link correct with no config.
 4. Package the local app with ffmpeg bundled.
 5. Stripe payment link, manual fulfilment, first paying users.
 6. The "how I make these charts" video, pointing at all of it.
