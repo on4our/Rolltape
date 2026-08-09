@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#FFFFFF">
+<title>{{ code }} · Rolltape</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23635BFF'/%3E%3Cpath d='M7 21.5 13 15l4.5 4L25 10' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+/* Deliberately self-contained: no webfont, no shared stylesheet, no second request. This
+   page renders when something is already broken, so it must not depend on anything that
+   could be the broken thing — a stylesheet served by the process that just threw is not a
+   dependency an error page can afford. The tokens below are the subset of index.html's
+   :root that it actually uses, and that duplication is the price of the guarantee. */
+:root{
+  color-scheme:light;
+  --ground:#F6F9FC; --surface:#FFFFFF; --sunken:#F0F4F8;
+  --navy:#0A2540; --slate:#3C4257; --muted:#697386; --faint:#8792A2;
+  --line:#E3E8EE;
+  --indigo:#635BFF; --indigo-lift:#7A73FF; --indigo-press:#5A54E8;
+  --sh2:0 2px 5px rgba(50,50,93,.08), 0 1px 1.5px rgba(0,0,0,.04);
+  --sh3:0 4px 10px rgba(50,50,93,.10), 0 1px 2px rgba(0,0,0,.06);
+  --focus:0 0 0 1px var(--indigo), 0 0 0 4px rgba(99,91,255,.22);
+  --sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;min-height:100vh;background:var(--ground);color:var(--slate);
+  font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;
+}
+.topbar{
+  display:flex;align-items:center;padding:0 20px;height:56px;
+  border-bottom:1px solid var(--line);background:var(--surface);
+}
+.wordmark{
+  font-weight:600;font-size:17px;letter-spacing:-.02em;color:var(--navy);
+  text-decoration:none;border-radius:4px;
+}
+.wordmark span{color:var(--indigo)}
+.wordmark:focus-visible{outline:0;box-shadow:var(--focus)}
+main{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 20px 80px}
+.card{
+  background:var(--surface);border-radius:8px;padding:32px;max-width:520px;width:100%;
+  box-shadow:0 0 0 1px rgba(50,50,93,.07),var(--sh2);
+}
+.code{
+  font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--faint);
+}
+h1{margin:8px 0 0;font-size:22px;font-weight:600;letter-spacing:-.02em;
+  color:var(--navy);line-height:1.3}
+p{margin:10px 0 0}
+/* The address is the useful part when a download link goes stale, so it gets shown
+   rather than folded into the sentence. */
+.path{
+  margin-top:18px;background:var(--sunken);border-radius:6px;padding:10px 12px;
+  font-family:var(--mono);font-size:12.5px;color:var(--muted);overflow-wrap:anywhere;
+}
+.back{
+  display:inline-flex;align-items:center;margin-top:24px;
+  background:var(--indigo);color:#fff;border-radius:6px;padding:9px 18px;
+  font-size:14px;font-weight:500;letter-spacing:-.01em;text-decoration:none;
+  box-shadow:0 1px 1px rgba(0,0,0,.08),0 1px 2px rgba(50,50,93,.12);
+  transition:background-color .15s ease,box-shadow .15s ease,transform .1s ease;
+}
+.back:hover{background:var(--indigo-lift);box-shadow:0 1px 1px rgba(0,0,0,.08),var(--sh3)}
+.back:active{background:var(--indigo-press);transform:translateY(1px);
+  box-shadow:0 1px 1px rgba(0,0,0,.08)}
+.back:focus-visible{outline:0;box-shadow:var(--focus)}
+@media (prefers-reduced-motion:reduce){*{transition:none !important}}
+</style>
+</head>
+<body>
+<div class="topbar"><a class="wordmark" href="/">Roll<span>·</span>tape</a></div>
+<main>
+  <div class="card">
+    <div class="code">Error {{ code }}</div>
+    <h1>{{ title }}</h1>
+    <p>{{ message }}</p>
+    <div class="path">{{ path }}</div>
+    <a class="back" href="/">Back to Rolltape</a>
+  </div>
+</main>
+</body>
+</html>

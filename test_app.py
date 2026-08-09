@@ -17,6 +17,14 @@ import data
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+# Registered at import time because Flask refuses new routes once the app has served a
+# request, and it is the only way to prove a real exception reaches the 500 handler rather
+# than testing that handler in isolation.
+@app.app.route("/boom-for-test")
+def _boom():
+    raise RuntimeError("boom")
+
+
 def cfg(**over):
     raw = {"chart": "line", "tickers": ["AAPL"], "start": "2024-01-01"}
     raw.update(over)
@@ -113,6 +121,63 @@ class PricingPageTests(unittest.TestCase):
             r"\$(\d+)", re.search(r"Annual is 10x monthly — (.+?)\.", doc).group(1))]
         self.assertEqual(stated, [m * 10 for m in monthly])
         self.assertIn("monthly * 10", self._read("templates/pricing.html"))
+
+
+class ErrorPageTests(unittest.TestCase):
+    """The split that matters: pages get HTML, /api/* keeps getting JSON.
+
+    The interface calls .json() on every API response, so an HTML body under /api/ would
+    turn a missing route into a parse error on the client rather than a message.
+    """
+
+    def setUp(self):
+        self.client = app.app.test_client()
+
+    def test_a_missing_page_renders_the_styled_page(self):
+        resp = self.client.get("/nope")
+        self.assertEqual(resp.status_code, 404)
+        self.assertTrue(resp.mimetype.startswith("text/html"))
+        self.assertIn(b"Nothing at this address.", resp.data)
+
+    def test_a_missing_render_says_the_file_is_gone(self):
+        resp = self.client.get("/outputs/not-a-real-render.mp4")
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn(b"outputs folder", resp.data)
+
+    def test_the_path_is_shown_and_escaped(self):
+        # The address is the useful part of a stale download link, and it is also the one
+        # piece of the page that comes from the request.
+        resp = self.client.get("/outputs/%3Cimg%20src=x%3E.mp4")
+        self.assertIn(b"&lt;img src=x&gt;.mp4", resp.data)
+        self.assertNotIn(b"<img src=x>", resp.data)
+
+    def test_a_missing_api_route_stays_json(self):
+        resp = self.client.get("/api/nope")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.mimetype, "application/json")
+        self.assertIn("error", resp.get_json())
+
+    def test_a_route_that_answers_its_own_404_is_untouched(self):
+        # An errorhandler only fires for a raised or aborted response, so the views that
+        # already return their own jsonify 404 have to keep doing exactly that.
+        for path in ("/api/presets/no-such-kit", "/examples/nope.png"):
+            with self.subTest(path=path):
+                method = self.client.delete if "presets" in path else self.client.get
+                resp = method(path)
+                self.assertEqual(resp.status_code, 404)
+                self.assertEqual(resp.mimetype, "application/json")
+
+    def test_an_unhandled_exception_renders_the_page_not_a_traceback(self):
+        # Werkzeug re-raises to the test client unless the app is asked not to; serving
+        # with debug off, as the app does, already behaves this way.
+        app.app.config["PROPAGATE_EXCEPTIONS"] = False
+        try:
+            resp = self.client.get("/boom-for-test")
+        finally:
+            app.app.config.pop("PROPAGATE_EXCEPTIONS", None)
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn(b"Rolltape hit an error.", resp.data)
+        self.assertNotIn(b"RuntimeError", resp.data)
 
 
 if __name__ == "__main__":

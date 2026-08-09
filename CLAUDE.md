@@ -32,7 +32,8 @@ jobs.py         The render job registry
 presets.py      Named brand kits, saved to one JSON file
 examples.py     The three configs the landing page draws as its showcase
 signups.py      Email capture — a list provider when configured, a file otherwise
-templates/      The app, the landing page and the pricing page — inline CSS and JS
+templates/      The app, the landing page, the pricing page and an error page — inline
+                CSS and JS
                 each, no build step
 outputs/        Rendered MP4s
 test_*.py       The suite — see Tests below
@@ -115,7 +116,8 @@ sample, everything else runs on the demo generator, and the two end-to-end encod
 skip themselves when there is no ffmpeg to call. So the suite is fast enough to run on
 every change, and there is no excuse for not having run it.
 
-- `test_app.py` — `clean_config()`, every input the interface can send.
+- `test_app.py` — `clean_config()`, every input the interface can send; the pricing page's
+  numbers against `docs/pricing.md`; and the error page's HTML-versus-JSON split.
 - `test_data.py` — the Yahoo/Stooq fallback, range presets, cache freshness, attribution.
 - `test_render.py` — the export path: backgrounds, date labelling, stills, every theme.
 - `test_camera.py` — the planned limits behind each move.
@@ -229,6 +231,24 @@ follows for the renderers. Three things are load-bearing rather than taste:
 - Nothing here reaches into `THEMES`. Chart colour and interface colour are separate
   vocabularies; the swatch dots are the only place a theme's colours appear in the chrome,
   and they arrive from `/api/meta` as data.
+
+All four templates carry the same palette, and each holds its own copy of the `:root` block
+because there is no build step to share one. That duplication is the deliberate cost of the
+no-build-step rule, not drift — change a token in one and change it in all four. The two
+public pages stay a step larger than the app throughout: `index.html` is a dense tool sized
+for someone working in it, the others are prose sized for someone reading them once.
+
+**The error page.** `error.html` is rendered for 404 and 500, and it is the one template
+that pulls in no webfont — it renders when something is already broken, so it must not
+depend on anything that could be the broken thing. It therefore takes whatever `system-ui`
+resolves to rather than Inter, which is close enough on a page this short and worth not
+blocking first paint on a font request when the network may be what failed. The handler
+skips `/api/*`: the interface calls `.json()` on every API response, so an HTML body under
+that prefix turns a missing route into a parse error instead of a message. Views that
+already answer their own 404 through `jsonify` — `delete_preset`, the example stills — are
+untouched, because an `errorhandler` only fires for a raised or aborted response. A 404
+under `/outputs/` gets its own wording: those files outlive a restart, so a missing one was
+removed rather than expired, and that is the likeliest way anyone reaches this page at all.
 
 **Mobile CSS.** The narrow-screen media query sits at the *end* of the stylesheet and must
 stay there. It has the same specificity as the base rules, so moving it earlier silently

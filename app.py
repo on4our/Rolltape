@@ -552,6 +552,48 @@ def clear_cache():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+# Werkzeug's default is an unstyled Times New Roman page, which is a jarring place for a
+# visitor to land from a page that otherwise looks finished — and it is reachable in normal
+# use, because a Download link stops resolving once its file has left `outputs/`.
+#
+# /api/* is excluded on purpose. The interface calls .json() on every API response, so an
+# HTML body under that prefix would turn a missing route into a parse error on the client
+# instead of a message. Routes that already answer their own 404 through jsonify —
+# delete_preset, the example stills — are untouched either way: an errorhandler only fires
+# for a raised or aborted response, never for one a view returned itself.
+def _error_page(code, title, message):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": message}), code
+    return render_template("error.html", code=code, title=title, message=message,
+                           path=request.path), code
+
+
+@app.errorhandler(404)
+def not_found(_exc):
+    # A 404 under /outputs/ means the render itself is gone, which is worth saying plainly
+    # — the file outlives a restart, so it missing means something removed it.
+    if request.path.startswith("/outputs/"):
+        return _error_page(
+            404, "That render isn't there any more.",
+            "Rendered files stay in the outputs folder between restarts, so this one was "
+            "moved or deleted — or the server is running somewhere that doesn't keep the "
+            "folder. Render it again and the new link will work.")
+    return _error_page(
+        404, "Nothing at this address.",
+        "Check the address, or head back to the app.")
+
+
+@app.errorhandler(500)
+def server_error(_exc):
+    return _error_page(
+        500, "Rolltape hit an error.",
+        "The terminal running the server has the traceback. Renders already finished are "
+        "still in the outputs folder.")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=5000)
