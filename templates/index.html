@@ -24,6 +24,9 @@
   --indigo:#635BFF; --indigo-lift:#7A73FF; --indigo-press:#5A54E8;
   --wash:rgba(99,91,255,.08);
   --red:#DF1B41;
+  /* Same pair landing.html and pricing.html already name. A price readout needs a
+     positive to sit opposite --red, and the Done badge stops carrying its own hexes. */
+  --green-bg:#CBF4C9; --green-ink:#0E6245;
 
   /* Depth is a hairline ring plus a shadow, never a border. The ring stays one physical
      pixel at any density, and swapping it for the focus ring can't reflow the control the
@@ -131,6 +134,53 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
 .hint{color:var(--muted);font-size:12.5px;line-height:1.45;margin-top:6px}
+
+/* ---- ticker suggestions ------------------------------------------- */
+/* The list is absolutely positioned inside the field rather than pinned to the viewport,
+   so it travels with the rail when that scrolls instead of hanging in mid-air. */
+.combo{position:relative}
+.suggest{
+  position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:30;
+  margin:0;padding:4px;list-style:none;max-height:264px;overflow-y:auto;
+  background:var(--surface);border-radius:7px;box-shadow:var(--ring),var(--sh3);
+}
+.suggest li{
+  display:flex;align-items:baseline;gap:8px;border-radius:5px;cursor:pointer;
+  padding:7px 9px;
+}
+/* Hover and keyboard share one highlight. Two different ones and the arrow keys look
+   like they have lost their place the moment the pointer crosses the list. */
+.suggest li:hover,.suggest li[aria-selected="true"]{background:var(--wash)}
+.suggest .s-sym{
+  font-family:var(--mono);font-size:13px;font-weight:500;color:var(--navy);
+  flex:none;min-width:58px;
+}
+.suggest li[aria-selected="true"] .s-sym{color:var(--indigo)}
+.suggest .s-name{
+  font-size:12.5px;color:var(--muted);flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+/* Exchange and asset class are the tie-breakers between two identical-looking symbols,
+   so they are present but never compete with the symbol itself. */
+.suggest .s-tag{font-size:11px;color:var(--faint);flex:none;text-transform:uppercase;
+  letter-spacing:.03em}
+.suggest .s-none{padding:8px 9px;font-size:12.5px;color:var(--muted);cursor:default}
+.suggest .s-none:hover{background:none}
+
+/* The resolved data, once /api/series has answered for what is in the field. */
+.quotes{margin-top:8px;display:flex;flex-direction:column;gap:3px}
+.quote{
+  display:flex;align-items:baseline;gap:8px;font-size:12.5px;
+  font-variant-numeric:tabular-nums;
+}
+.quote b{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--navy);
+  min-width:58px;flex:none}
+.quote .q-last{color:var(--slate)}
+.quote .q-chg{font-weight:500}
+.quote .q-chg.up{color:var(--green-ink)}
+.quote .q-chg.down{color:var(--red)}
+.quote .q-note{color:var(--faint);margin-left:auto;white-space:nowrap}
+.quote.bad span{color:var(--red)}
 
 /* Segmented control: one sunken track, the selected option lifted out of it on white.
    Same shape Stripe uses, and it reads as a single control rather than three buttons. */
@@ -288,7 +338,7 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
 .job-meta span[class^="status-"]{
   font-size:12px;font-weight:600;line-height:18px;border-radius:10px;padding:1px 8px;
 }
-.job-meta .status-done{background:#CBF4C9;color:#0E6245}
+.job-meta .status-done{background:var(--green-bg);color:var(--green-ink)}
 .job-meta .status-failed{background:#FDE2DD;color:#A41C4E}
 .job-meta .status-rendering{background:#D6ECFF;color:#3D4EAC}
 .job-meta .status-queued{background:var(--line);color:#4F566B}
@@ -318,6 +368,11 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
   /* Chips are buttons, so they don't trigger that zoom and don't need the full 16px —
      which is what keeps twelve of them off a fourth row on a phone. */
   .chip{font-size:14px;padding:10px 4px}
+  /* Suggestions are tapped rather than clicked, so the rows grow to a thumb and the
+     company name drops out — a 44px row and a symbol beat four columns of 11px text. */
+  .suggest li{padding:11px 10px}
+  .suggest .s-sym{font-size:14px}
+  .suggest .s-tag{display:none}
   .actions{gap:8px}
   .render{flex:1;padding:13px 18px}
   .kbd{display:none}
@@ -349,8 +404,18 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
     <div class="group">
       <div class="field">
         <label for="tickers">Tickers</label>
-        <input class="ctrl" id="tickers" value="NVDA" autocomplete="off" spellcheck="false">
+        <div class="combo">
+          <input class="ctrl" id="tickers" value="NVDA" autocomplete="off"
+                 spellcheck="false" role="combobox" aria-expanded="false"
+                 aria-autocomplete="list" aria-controls="tickerList"
+                 aria-describedby="tickerHint">
+          <ul class="suggest" id="tickerList" role="listbox"
+              aria-label="Ticker suggestions" hidden></ul>
+        </div>
         <div class="hint" id="tickerHint">One symbol</div>
+        <!-- What /api/series came back with. aria-live so the price arriving is announced
+             rather than only appearing, since nothing else on the page says it. -->
+        <div class="quotes" id="tickerData" aria-live="polite" hidden></div>
       </div>
       <div class="field">
         <label>Date range</label>
@@ -771,7 +836,6 @@ function seg(id, key, cast = v=>v, after = null, slateOnly = false){
     slateOnly ? slate() : schedule();
   });
 }
-$("#tickers").addEventListener("input", ()=>{ state.tickersTouched = true; });
 seg("#normalizeSeg","normalize",Number);
 seg("#easingSeg","easing");
 seg("#aspectSeg","aspect");
@@ -841,6 +905,170 @@ function toggleRows(){
   if (manual && !$("#rows").children.length){
     addRow("Revenue 2023", "24.6"); addRow("Revenue 2024", "38.1");
   }
+}
+
+/* ---------- ticker suggestions ---------- */
+/* The field holds a comma-separated list, so everything here works on the token the caret
+   sits in rather than on the whole value — typing the third symbol of a comparison chart
+   must not offer to overwrite the first two. */
+const tickerBox = $("#tickers"), tickerList = $("#tickerList");
+let hits = [], active = -1, searchTimer = null, searchSeq = 0;
+
+function token(){
+  const v = tickerBox.value, caret = tickerBox.selectionStart ?? v.length;
+  const start = v.lastIndexOf(",", caret - 1) + 1;
+  const comma = v.indexOf(",", caret);
+  return {start, end: comma === -1 ? v.length : comma,
+          text: v.slice(start, comma === -1 ? v.length : comma).trim()};
+}
+
+function closeSuggest(){
+  tickerList.hidden = true;
+  tickerList.replaceChildren();
+  tickerBox.setAttribute("aria-expanded", "false");
+  tickerBox.removeAttribute("aria-activedescendant");
+  hits = []; active = -1;
+}
+
+function drawSuggest(list, q){
+  hits = list; active = -1;
+  // A symbol that doesn't exist is an answer worth showing. A list that silently stops
+  // appearing reads as the suggestions having broken rather than as nothing matching.
+  tickerList.innerHTML = hits.length
+    ? hits.map((h,i)=>`
+        <li role="option" id="tk-${i}" data-i="${i}" aria-selected="false">
+          <span class="s-sym">${esc(h.symbol)}</span>
+          <span class="s-name">${esc(h.name || "")}</span>
+          <span class="s-tag">${esc(h.exchange || h.type || "")}</span>
+        </li>`).join("")
+    : `<li class="s-none">No match for ${esc(q)}</li>`;
+  tickerList.hidden = false;
+  tickerBox.setAttribute("aria-expanded", "true");
+}
+
+function highlight(i){
+  const rows = [...tickerList.querySelectorAll("li[data-i]")];
+  if (!rows.length) return;
+  active = (i + rows.length) % rows.length;
+  rows.forEach((r,n)=>r.setAttribute("aria-selected", n===active));
+  rows[active].scrollIntoView({block:"nearest"});
+  tickerBox.setAttribute("aria-activedescendant", rows[active].id);
+}
+
+function accept(i){
+  const hit = hits[i]; if(!hit) return;
+  const t = token();
+  // A symbol after a comma gets the space back, so a list picked from the dropdown reads
+  // the same as one typed by hand.
+  const head = tickerBox.value.slice(0, t.start) + (t.start > 0 ? " " : "") + hit.symbol;
+  tickerBox.value = head + tickerBox.value.slice(t.end);
+  tickerBox.setSelectionRange(head.length, head.length);
+  state.tickersTouched = true;
+  closeSuggest();
+  tickerBox.focus();
+  schedule();
+}
+
+function askSuggest(highlightFirst){
+  const q = token().text;
+  if (!q){ closeSuggest(); return; }
+  const mine = ++searchSeq;
+  fetch(`/api/search?q=${encodeURIComponent(q)}`)
+    .then(r=>r.json())
+    .then(j=>{
+      // A late answer must not reopen the list after the field has been left.
+      if (mine !== searchSeq || document.activeElement !== tickerBox) return;
+      drawSuggest(j.results || [], q);
+      if (highlightFirst) highlight(0);
+    })
+    // Typing still works without suggestions, so a failed lookup just puts the list away.
+    .catch(()=>{ if (mine === searchSeq) closeSuggest(); });
+}
+
+tickerBox.addEventListener("input", ()=>{
+  state.tickersTouched = true;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(askSuggest, 140);
+});
+
+tickerBox.addEventListener("keydown", e=>{
+  const open = !tickerList.hidden && hits.length;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+    e.preventDefault();  // otherwise the caret jumps to either end of the field
+    if (!open) return askSuggest(true);
+    highlight(active + (e.key === "ArrowDown" ? 1 : -1));
+  } else if ((e.key === "Enter" || e.key === "Tab") && open && active >= 0){
+    // Swallowed only while something is highlighted, so Enter in an untouched field still
+    // reaches the ⌘-Enter render shortcut and Tab still leaves the control.
+    e.preventDefault();
+    accept(active);
+  } else if (e.key === "Escape" && open){
+    e.preventDefault();
+    closeSuggest();
+  }
+});
+
+// mousedown rather than click, and prevented: a blur would close the list out from under
+// the pointer before the click could land on anything.
+tickerList.addEventListener("mousedown", e=>{
+  const row = e.target.closest("li[data-i]"); if(!row) return;
+  e.preventDefault();
+  accept(+row.dataset.i);
+});
+tickerBox.addEventListener("blur", closeSuggest);
+
+/* ---------- resolved data ---------- */
+/* schedule() runs on every keystroke of every field, but only some of them change what
+   gets fetched — so this compares the part of the config that decides the window and stays
+   quiet otherwise. One call site inside schedule() rather than a listener on each of the
+   five controls, which is what stops a sixth being added later without this noticing. */
+let dataTimer = null, dataKey = "", dataSeq = 0;
+function scheduleData(){
+  const c = config();
+  const key = JSON.stringify([c.tickers, c.range, c.start, c.end, c.interval]);
+  if (key === dataKey) return;
+  dataKey = key;
+  clearTimeout(dataTimer);
+  dataTimer = setTimeout(loadSeries, 500);
+}
+
+// No currency symbol: Yahoo lists in the exchange's own currency and a wrong $ is worse
+// than none. Big numbers lose their decimals — an index at 6,481 doesn't need two.
+const price = v => v >= 1000 ? v.toLocaleString(undefined, {maximumFractionDigits:0})
+                             : v.toFixed(2);
+
+async function loadSeries(){
+  const mine = ++dataSeq;
+  let j = null;
+  try{
+    // points=2 because this is a headline, not a second chart — the stage already has the
+    // real one. The endpoint serves the whole series to anyone who asks for it.
+    const r = await fetch("/api/series?points=2", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(config())
+    });
+    j = await r.json();
+  } catch(e){ /* the preview reports the same outage in a louder place */ }
+  if (mine !== dataSeq) return;
+
+  const host = $("#tickerData");
+  // A rejected config already says so on the preview, so the readout stands down rather
+  // than printing the same message twice in two places.
+  if (!j || j.error || !(j.series || []).length){ host.hidden = true; return; }
+  host.hidden = false;
+  host.innerHTML = j.series.map(s=>{
+    if (s.error) return `<div class="quote bad"><b>${esc(s.symbol)}</b>
+      <span>${esc(s.error)}</span></div>`;
+    const pct = s.change_pct;
+    const move = pct == null ? `<span class="q-chg">—</span>`
+      : `<span class="q-chg ${pct >= 0 ? "up" : "down"}">${
+           pct >= 0 ? "+" : ""}${pct.toFixed(1)}%</span>`;
+    // Only a source other than Yahoo is named, the same rule the rendered footer follows.
+    const note = `${s.bars} bars${s.source && s.source !== "yahoo" ? ` · ${esc(s.source)}` : ""}`;
+    return `<div class="quote"><b>${esc(s.symbol)}</b>
+      <span class="q-last">${price(s.last)}</span>${move}
+      <span class="q-note">${note}</span></div>`;
+  }).join("");
 }
 
 /* ---------- repeating rows ---------- */
@@ -929,6 +1157,7 @@ function slate(){
 let timer = null, seq = 0;
 function schedule(){
   slate();
+  scheduleData();
   clearTimeout(timer);
   timer = setTimeout(preview, 420);
 }
@@ -1021,6 +1250,9 @@ $("#clearCache").onclick = async ()=>{
   await fetch("/api/cache/clear", {method:"POST"});
   $("#clearCache").textContent = "Cache cleared";
   setTimeout(()=>$("#clearCache").textContent="Clear price cache", 1600);
+  // Nothing about the config changed, so scheduleData() would skip the refetch — but the
+  // whole point of the button is that the numbers behind it might now be different.
+  dataKey = "";
   schedule();
 };
 
