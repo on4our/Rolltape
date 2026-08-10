@@ -733,12 +733,11 @@ Auto/Faster/Slower override in the UI), brand kits, the landing page with email
 capture — step 3 of docs/acquisition.md's sequencing, which leaves the demo instance
 above it as a deploy rather than a code change — the licensed price feed, which was the
 one hard blocker in front of charging anybody, symbol suggestions in the ticker field
-with `/api/series` behind them, economic series from FRED behind that same field, and the
-timeline's automatic callouts: earnings, splits and dividends looked up per kind through
+with `/api/series` behind them, economic series from FRED behind that same field, the
+timeline's automatic callouts — earnings, splits and dividends looked up per kind through
 `data.events()`, laid out by `plan_callouts()`, and merged with the typed ones rather than
-replacing them.
-with `/api/series` behind them, and the revenue waterfall — the first chart here drawn
-from something other than prices, which is what `fundamentals.py` exists for.
+replacing them — and the revenue waterfall, the first chart here drawn from something
+other than prices, which is what `fundamentals.py` exists for.
 
 Two things the waterfall opens up that are not on the list above because they are one
 fetcher each now rather than a module: a `pe` or `margin` metric on the bar chart, which
