@@ -54,7 +54,7 @@ shows up straight away instead of at the end of a render. Change the range and t
 follow it.
 
 Two things worth knowing. Suggestions come from Yahoo's search with a built-in list of
-common symbols underneath, so the field still works offline, under `--demo`, and when Yahoo
+common symbols underneath, so the field still works offline and when Yahoo
 is having a bad day — you may just have to type an unusual symbol in full. And a symbol
 that doesn't resolve says so on its own line; the others still load.
 

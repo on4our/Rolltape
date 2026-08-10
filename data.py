@@ -917,8 +917,12 @@ def search(query, limit=8):
     The built-in list answers first and always: it costs nothing, it works offline, and it
     holds the symbols this tool actually gets pointed at. Yahoo finds everything else and
     is allowed to fail — a dead lookup should quietly narrow the suggestions, never break
-    the field someone is in the middle of typing into. Demo mode skips it entirely, the
-    same way the price fetch does, so --demo still never reaches the network.
+    the field someone is in the middle of typing into.
+
+    Yahoo answers here whichever source is drawing the charts. The search endpoint is a
+    different service from the price download and free of the display terms a licensed
+    feed exists to satisfy, because a suggestion is a symbol and a company name rather
+    than a price.
     """
     q = str(query or "").strip().upper()
     if not q:
@@ -926,11 +930,10 @@ def search(query, limit=8):
     limit = max(int(limit), 1)
 
     groups = [_local_search(q)]
-    if not _DEMO:
-        try:
-            groups.append(_yahoo_search_cached(q, limit))
-        except Exception:  # noqa: BLE001 - deliberate; see the docstring
-            pass
+    try:
+        groups.append(_yahoo_search_cached(q, limit))
+    except Exception:  # noqa: BLE001 - deliberate; see the docstring
+        pass
 
     hits = _merge_hits(groups)
     hits.sort(key=lambda hit: _match_rank(hit, q))

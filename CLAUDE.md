@@ -112,7 +112,7 @@ missing from it is silently untested rather than failing.
 ## Tests
 
 ```bash
-python -m unittest              # all 220, about 25 seconds
+python -m unittest              # all 262, about 20 seconds
 python -m unittest test_camera  # one module
 ```
 
@@ -278,10 +278,12 @@ search endpoint and ranks exact symbol over prefix over substring over a name-on
 someone typing MU means Micron, not every company with those letters in its name. It never
 answers with an error status: mid-word junk means "no suggestions yet", and a field that
 turns red halfway through a symbol is worse than one that finds nothing. The built-in list
-is a floor rather than a universe — it is what answers offline, under `--demo`, and before
-a round trip could have finished — and Yahoo finds everything past it. That call is plain
-urllib rather than yfinance on purpose, so the lookup still works on an install where
-Stooq is drawing the charts. A failed lookup is swallowed and never cached; caching it
+is a floor rather than a universe — it is what answers offline and before a round trip
+could have finished — and Yahoo finds everything past it. That call is plain urllib rather
+than yfinance on purpose, so the lookup still works on an install where a licensed feed or
+Stooq is drawing the charts, and it runs whichever source that is: a suggestion is a symbol
+and a name rather than a price, so it carries none of the display terms the licensed feed
+exists to satisfy. A failed lookup is swallowed and never cached; caching it
 would keep the field degraded long after Yahoo came back.
 
 `/api/series` is the other half: the numbers a chart would be drawn from, without drawing

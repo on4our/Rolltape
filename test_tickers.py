@@ -1,7 +1,8 @@
 """Tests for the symbol lookup and for /api/series, the two halves of the ticker field.
 
 No network: Yahoo's search endpoint is mocked with a recorded JSON sample, and every test
-that fetches prices runs on the demo generator. Nothing here encodes anything — the series
+that fetches prices runs on the generated prices in testsupport. Nothing here encodes
+anything — the series
 endpoint reads a frame and never draws, which is the whole reason it can answer on a
 keystroke. Run with: python -m unittest
 """
@@ -15,6 +16,7 @@ from unittest import mock
 
 import app
 import data
+import testsupport
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -51,8 +53,11 @@ class LocalSymbolTests(unittest.TestCase):
     """The built-in list, which is what answers offline and on the first keystroke."""
 
     def setUp(self):
-        data.set_demo(True)  # the shortest way to keep Yahoo out of these entirely
-        self.addCleanup(data.set_demo, False)
+        # Stub the remote half rather than the network under it, so these stay about
+        # ranking the built-in rows and say nothing about how the lookup is transported.
+        patcher = mock.patch.object(data, "_yahoo_search_cached", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_a_symbol_prefix_matches(self):
         symbols = [h["symbol"] for h in data.search("NVD")]
@@ -95,8 +100,11 @@ class LocalSymbolTests(unittest.TestCase):
         self.assertIn("^GSPC", [h["symbol"] for h in data.search("S&P 500", limit=20)])
         self.assertIn("BTC-USD", [h["symbol"] for h in data.search("bitcoin")])
 
-    def test_demo_mode_never_reaches_the_network(self):
-        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("searched")):
+    def test_the_built_in_list_answers_with_the_lookup_dead(self):
+        # The reason the list exists: a suggestion has to arrive before a round trip could
+        # have finished, and has to keep arriving when the round trip fails outright.
+        with mock.patch.object(data, "_yahoo_search_cached",
+                               side_effect=OSError("no route to host")):
             self.assertTrue(data.search("NVDA"))
 
 
@@ -104,7 +112,6 @@ class YahooSearchTests(unittest.TestCase):
     """Yahoo finds everything the built-in list doesn't, and is allowed to fail."""
 
     def setUp(self):
-        data.set_demo(False)
         data.clear_search_cache()
         self.addCleanup(data.clear_search_cache)
 
@@ -193,8 +200,9 @@ class SearchEndpointTests(unittest.TestCase):
 
     def setUp(self):
         self.client = app.app.test_client()
-        data.set_demo(True)
-        self.addCleanup(data.set_demo, False)
+        patcher = mock.patch.object(data, "_yahoo_search_cached", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_the_shape_the_field_reads(self):
         body = self.client.get("/api/search?q=NVD").get_json()
@@ -232,8 +240,7 @@ class SeriesEndpointTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(shutil.rmtree, self.cache, True)
-        data.set_demo(True)
-        self.addCleanup(data.set_demo, False)
+        testsupport.patch_fetch(self)
         data.reset_sources()
         self.addCleanup(data.reset_sources)
 
@@ -251,7 +258,7 @@ class SeriesEndpointTests(unittest.TestCase):
     def test_a_row_carries_the_headline_and_the_source(self):
         row = self._post().get_json()["series"][0]
         self.assertGreater(row["bars"], 200)
-        self.assertEqual(row["source"], "demo")
+        self.assertEqual(row["source"], "yahoo")
         self.assertAlmostEqual(row["change"], row["last"] - row["first"], places=3)
         self.assertAlmostEqual(row["change_pct"],
                                (row["last"] / row["first"] - 1) * 100, places=1)
