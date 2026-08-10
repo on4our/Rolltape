@@ -31,7 +31,8 @@ COPY . .
 # Not set here, deliberately: ROLLTAPE_FMP_KEY is a secret and belongs in the host's secret
 # store rather than an image layer. A deploy that serves anyone but its owner wants
 # ROLLTAPE_LICENSED_ONLY=1 alongside it, and ROLLTAPE_FMP_HISTORY_YEARS set to match the
-# plan being paid for — see the README.
+# plan being paid for — see the README. ROLLTAPE_FRED_KEY goes the same way; without it the
+# economic symbols are simply not offered and every price chart works as before.
 ENV ROLLTAPE_OUT_DIR=/data/outputs \
     ROLLTAPE_CACHE_DIR=/data/.cache \
     MPLCONFIGDIR=/tmp/matplotlib \

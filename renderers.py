@@ -709,6 +709,159 @@ def _scale_note(log):
     return "   ·   log scale" if log else ""
 
 
+# ---------------------------------------------------------------------------
+# Economic series
+# ---------------------------------------------------------------------------
+# A FRED series is one number per period rather than a price, and four things a price chart
+# takes for granted stop being true of it: what the chart is called, how a value is printed,
+# what a move means, and how long "50" is. All four are answered from the series' own
+# metadata, and all four fall straight back to the price behaviour for an ordinary ticker —
+# so a chart with no economic symbol on it renders exactly as it did before any of this.
+
+def _econ(tk):
+    """Metadata for an economic symbol, or None for an ordinary ticker.
+
+    None is the whole switch. Every helper below takes it as "this is a price", which keeps
+    the old path a default rather than a branch anybody has to remember to write.
+    """
+    return datasrc.economic_meta(tk) if datasrc.is_economic(tk) else None
+
+
+def _unit_style(meta):
+    """(prefix, suffix) for a value in this series' units.
+
+    FRED writes units as prose — "Percent", "Billions of Dollars", "Index 1982-1984=100".
+    Only two of those change how a number should be printed, and guessing at the rest would
+    be worse than a plain number under a subtitle that names the unit. An unknown unit and a
+    metadata lookup that failed land in the same place for the same reason: a chart should
+    never print a dollar sign it hasn't been told about.
+    """
+    if not meta:
+        return "$", ""
+    units = (meta.get("units") or "").lower()
+    short = (meta.get("units_short") or "").lower()
+    if "percent" in units or "%" in short:
+        return "", "%"
+    if "dollar" in units or "$" in short:
+        for word, mag in (("trillions", "T"), ("billions", "B"),
+                          ("millions", "M"), ("thousands", "K")):
+            if word in units:
+                return "$", mag
+        return "$", ""
+    return "", ""
+
+
+def _value_text(tk, v):
+    """One value printed in its own units — the line readout, a race row, a bar label."""
+    meta = _econ(tk)
+    if not meta:
+        return _money(v)
+    pre, suf = _unit_style(meta)
+    a = abs(v)
+    dec = 2 if a < 1 else 1 if a < 100 else 0
+    return f"{pre}{v:,.{dec}f}{suf}"
+
+
+def _value_axis(tk, lo, hi):
+    """Y-axis formatter for a series, in its own units."""
+    meta = _econ(tk)
+    if not meta:
+        return _money_axis(lo, hi)
+    pre, suf = _unit_style(meta)
+    dec = _decimals(lo, hi)
+    return lambda v, _=None: f"{pre}{v:,.{dec}f}{suf}"
+
+
+def _chart_title(tk):
+    """What to call the chart when no title was typed.
+
+    A ticker is its own title. A series id is not: "Unemployment Rate" is what a viewer
+    reads, and UNRATE is a thing nobody says out loud.
+    """
+    meta = _econ(tk)
+    return (meta.get("title") or tk) if meta else tk
+
+
+def _headline(tk, first, last):
+    """The change a default subtitle leads with.
+
+    A price moves in percent. A *rate* does not: unemployment going 4.0 to 4.5 is half a
+    point, and calling that +12.5% is the kind of number a video gets corrected on in the
+    comments. So a series already denominated in percent reports points, and everything
+    else — prices, indices, dollar levels — reports percent, which is what they have always
+    reported.
+    """
+    meta = _econ(tk)
+    if (meta and _unit_style(meta)[1] == "%") or not first:
+        delta = last - first
+        return f"{delta:+.2f} pts" if abs(delta) < 1 else f"{delta:+.1f} pts"
+    return f"{(last / first - 1) * 100:+.1f}%"
+
+
+def _units_note(tk):
+    """The unit a chart is drawn in, for the subtitle.
+
+    A price chart needs none: the axis has dollar signs on it and everyone knows what a
+    share price is. An economic series does, because the same line at 4 means percent on one
+    series and trillions of dollars on another, and the axis alone cannot say which.
+    """
+    meta = _econ(tk)
+    if not meta:
+        return ""
+    parts = [p for p in (meta.get("units"), meta.get("seasonal")) if p]
+    return f"   ·   {', '.join(parts)}" if parts else ""
+
+
+def _shared_unit(tickers):
+    """The symbol whose units the whole chart is in, or None when they disagree.
+
+    A comparison on one axis is only readable when everything on it shares a unit. Indexed
+    to 100 they always do; in raw levels they only do when the symbols agree, and a chart
+    mixing a share price with an unemployment rate falls back to plain numbers rather than
+    putting a dollar sign on one of them.
+    """
+    if not tickers:
+        return None
+    styles = {_unit_style(_econ(t)) for t in tickers}
+    return tickers[0] if len(styles) == 1 else None
+
+
+def _level_word(tickers):
+    """What the un-normalised value on a comparison or a race actually is."""
+    return ("Level" if all(datasrc.is_economic(t) for t in tickers)
+            else "Closing price")
+
+
+# How long one observation of a series is, in words and in calendar days. FRED publishes on
+# its own calendar, so a "12" on a monthly series is twelve months — both the moving-average
+# label and its run-up have to read that from the series rather than from the chart's
+# interval, which only ever says "daily".
+ECONOMIC_PERIODS = {"daily": ("day", 1), "weekly": ("week", 7),
+                    "biweekly": ("fortnight", 14), "monthly": ("month", 31),
+                    "quarterly": ("quarter", 92), "semiannual": ("half-year", 183),
+                    "annual": ("year", 366)}
+
+
+def _econ_period(meta):
+    """(word, calendar days) for one observation of this series.
+
+    Longest key first, because these names contain each other: "semiannual" ends in
+    "annual" and "biweekly" ends in "weekly", so a shortest-first scan would halve two of
+    them.
+    """
+    freq = ((meta or {}).get("frequency") or "").lower()
+    for key in sorted(ECONOMIC_PERIODS, key=len, reverse=True):
+        if key in freq:
+            return ECONOMIC_PERIODS[key]
+    return ("day", 1)
+
+
+def _ma_unit(tk):
+    """What to call one period in an average's label — "50-day", "12-month"."""
+    meta = _econ(tk)
+    return _econ_period(meta)[0] if meta else "day"
+
+
 
 
 
@@ -768,11 +921,18 @@ def _fetch_with_ma(tk, cfg, periods):
 
     interval = win.get("interval") or datasrc.DEFAULT_INTERVAL
     sessions = win.get("sessions")
-    # Bars to sessions to calendar days, with slack for weekends and holidays. Reading the
-    # run-up off the interval is what keeps it sane on intraday: 200 five-minute bars is
-    # about three sessions of lead, not the best part of a year.
-    per_session = max(datasrc.periods_per_year(interval) / 252.0, 1.0)
-    lead_days = int(max(periods) / per_session * 1.5) + 14
+    meta = _econ(tk)
+    if meta:
+        # An economic series is published on its own calendar rather than the market's, so
+        # the run-up is measured in its periods: a 12 on monthly CPI needs a year of lead,
+        # not twelve days of it. Same arithmetic as below, different definition of a bar.
+        lead_days = int(max(periods) * _econ_period(meta)[1] * 1.5) + 14
+    else:
+        # Bars to sessions to calendar days, with slack for weekends and holidays. Reading
+        # the run-up off the interval is what keeps it sane on intraday: 200 five-minute
+        # bars is about three sessions of lead, not the best part of a year.
+        per_session = max(datasrc.periods_per_year(interval) / 252.0, 1.0)
+        lead_days = int(max(periods) / per_session * 1.5) + 14
     limit = datasrc.max_lookback_days(interval)
     if limit:  # asking past what the source keeps returns silence, not an error
         lead_days = min(lead_days, limit - 1)
@@ -829,7 +989,7 @@ def _extend_range(lo, hi, arrays):
     return lo, hi
 
 
-def _ma_lines(ax, ctx, series, zorder=3, avoid=()):
+def _ma_lines(ax, ctx, series, zorder=3, avoid=(), unit="day"):
     """One subordinate line per average, coloured from the theme's series palette.
 
     `series` is a list of (period, values); returns (artist, values) pairs ready to
@@ -838,6 +998,10 @@ def _ma_lines(ax, ctx, series, zorder=3, avoid=()):
     `avoid` is any colour already carrying meaning on this chart — the price line, the
     candle bodies. Every theme's series palette overlaps its own up/down colours, so
     without this the 200-day comes out the same green as the thing it's drawn against.
+
+    `unit` is what one period is called. Daily bars make it a day and that is every price
+    chart; a monthly economic series makes it a month, and a "12-day MA" on twelve months
+    of CPI would be a caption that contradicts the line under it.
     """
     avoid = {avoid} if isinstance(avoid, str) else set(avoid)
     palette = [c for c in ctx.theme["series"] if c not in avoid] or ctx.theme["series"]
@@ -847,7 +1011,7 @@ def _ma_lines(ax, ctx, series, zorder=3, avoid=()):
             continue
         (ln,) = ax.plot([], [], color=palette[i % len(palette)], lw=1.5 * ctx.s,
                         alpha=0.85, solid_capstyle="round", zorder=zorder,
-                        label=f"{period}-day MA")
+                        label=f"{period}-{unit} MA")
         out.append((ln, vals))
     return out
 
@@ -942,15 +1106,15 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     t = ctx.theme
     up = y[-1] >= y[0]
     color = t["up"] if up else t["down"]
-    pct = (y[-1] / y[0] - 1) * 100
 
     fig = _new_fig(ctx)
-    _titles(fig, ctx, cfg.get("title") or tk,
+    _titles(fig, ctx, cfg.get("title") or _chart_title(tk),
             cfg.get("subtitle")
-            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%{_scale_note(log)}",
+            or f"{_range_label(df.index, intraday)}   ·   {_headline(tk, y[0], y[-1])}"
+               f"{_units_note(tk)}{_scale_note(log)}",
             cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
-    _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday,
+    _style_axes(ax, ctx, y_fmt=_value_axis(tk, y.min(), y.max()), x_dates=not intraday,
                 log=log)
 
     pad = (y.max() - y.min()) * 0.12 or y.max() * 0.05
@@ -961,7 +1125,7 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     if intraday:
         _position_ticks(ax, ctx, df.index, ax.get_xlim())
 
-    ma_pairs = _ma_lines(ax, ctx, ma_vals, avoid=color)
+    ma_pairs = _ma_lines(ax, ctx, ma_vals, avoid=color, unit=_ma_unit(tk))
     _ma_key(ax, ctx, ma_pairs, rising=up)
     glow = _glow(ax, color, ctx)
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
@@ -991,7 +1155,7 @@ def render_line(cfg, ctx, out, progress=None, still=None):
         fill[0] = ax.fill_between(xs, cam.bottom(i), ys, color=color, alpha=0.10,
                                   linewidth=0, zorder=1)
         readout.set_position((xs[-1] + cam.width(i) * 0.012, ys[-1]))
-        readout.set_text(_money(ys[-1]))
+        readout.set_text(_value_text(tk, ys[-1]))
         if cam.moving:
             # A date axis re-formats; a positional one re-labels. Same job either way —
             # the camera changed the visible span underneath the ticks.
@@ -1033,16 +1197,21 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
 
     t = ctx.theme
     palette = t["series"]
+    cols = list(vals.columns)
     fig = _new_fig(ctx)
-    sub = ("Indexed to 100" if normalize else "Closing price") + \
+    sub = ("Indexed to 100" if normalize else _level_word(cols)) + \
           f"   ·   {_range_label(closes.index, intraday)}{_scale_note(log)}"
-    _titles(fig, ctx, cfg.get("title") or " vs ".join(vals.columns),
+    _titles(fig, ctx, cfg.get("title") or " vs ".join(_chart_title(c) for c in cols),
             cfg.get("subtitle") or sub, cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
 
     allv = np.concatenate(list(series.values()))
+    # Indexed to 100 everything is dimensionless and a plain number is right. In raw levels
+    # the axis can only carry a unit when every symbol shares one — see _shared_unit.
+    shared = None if normalize else _shared_unit(cols)
     _style_axes(ax, ctx, x_dates=not intraday, log=log,
-                y_fmt=(_num_axis if normalize else _money_axis)(allv.min(), allv.max()))
+                y_fmt=(_num_axis(allv.min(), allv.max()) if shared is None
+                       else _value_axis(shared, allv.min(), allv.max())))
 
     stack = np.vstack([series[c] for c in vals.columns])
     pad = (stack.max() - stack.min()) * 0.12
@@ -1079,7 +1248,8 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
             placed.append(pos)
             lines[c].set_data(xd[:k], series[c][:k])
             labels[c].set_position((cam.right(i) + cam.width(i) * 0.015, pos))
-            labels[c].set_text(f"{c} {v:,.0f}" if normalize else f"{c} {_money(v)}")
+            labels[c].set_text(f"{c} {v:,.0f}" if normalize
+                               else f"{c} {_value_text(c, v)}")
         if cam.moving:
             # A date axis re-formats; a positional one re-labels. Same job either way —
             # the camera changed the visible span underneath the ticks.
@@ -1101,6 +1271,16 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 def render_candles(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
+    # `clean_config` refuses this pairing first, so reaching here means a renderer call that
+    # skipped it. Refused in both places because the failure it prevents is the silent kind:
+    # a FRED series has one value per period, so its open, high, low and close are the same
+    # number, and a candlestick of it draws a column of flat dashes that reads as a market
+    # in which nothing moved rather than as a chart of the wrong thing.
+    if datasrc.is_economic(tk):
+        raise ValueError(
+            "An economic series has one value per period, not an open, high, low and "
+            "close — a candlestick of it would be a row of flat dashes. Use the line or "
+            "timeline chart.")
     intraday = _intraday(cfg)
     periods = cfg.get("ma") or []
     df, ma_series = _fetch_with_ma(tk, cfg, periods)
@@ -1270,6 +1450,17 @@ def _bar_rows(cfg):
     metric = cfg.get("metric", "return")
     frames = datasrc.fetch_many(cfg["tickers"], **datasrc.window(cfg))
     periods = datasrc.periods_per_year(_interval(cfg))
+    # Volatility is annualised from the number of bars in a trading year, which is a count
+    # of *market* sessions. An economic series is published monthly or quarterly, so the
+    # figure would come out too large by the square root of the difference — about eight
+    # times over on monthly data. Refused rather than scaled, because a plausible-looking
+    # volatility number is exactly the sort of wrong that survives into a video.
+    if metric == "volatility" and any(datasrc.is_economic(tk) for tk in frames):
+        raise ValueError(
+            "Volatility is annualised from the number of trading days in a year, and an "
+            "economic series is published monthly or quarterly — the figure would be wrong "
+            "by the square root of the difference. Pick another metric.")
+
     out = []
     for tk, df in frames.items():
         cl = df["Close"].to_numpy(float)
@@ -1283,7 +1474,17 @@ def _bar_rows(cfg):
             out.append((tk, r.std() * np.sqrt(periods) * 100))
         else:
             out.append((tk, cl[-1]))
-    unit = "$" if metric == "price" else "%"
+
+    if metric == "price":
+        # Levels carry a unit and only one of them fits on the axis, so a chart mixing an
+        # unemployment rate with a share price prints plain numbers rather than choosing a
+        # dollar sign for both. An all-ticker chart resolves to "$" exactly as it always
+        # did — see _shared_unit and _unit_style.
+        shared = _shared_unit(list(frames))
+        pre, suf = _unit_style(_econ(shared)) if shared else ("", "")
+        unit = pre or suf
+    else:
+        unit = "%"
     return out, unit, 1
 
 
@@ -1529,14 +1730,14 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     rising = y[-1] >= y[0]
     color = t["up"] if rising else t["down"]
     fig = _new_fig(ctx)
-    pct = (y[-1] / y[0] - 1) * 100
-    _titles(fig, ctx, cfg.get("title") or tk,
+    _titles(fig, ctx, cfg.get("title") or _chart_title(tk),
             cfg.get("subtitle")
-            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%{_scale_note(log)}",
+            or f"{_range_label(df.index, intraday)}   ·   {_headline(tk, y[0], y[-1])}"
+               f"{_units_note(tk)}{_scale_note(log)}",
             cfg.get("footer"))
     rect = _plot_area(ctx, True)
     ax = fig.add_axes(rect)
-    _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday,
+    _style_axes(ax, ctx, y_fmt=_value_axis(tk, y.min(), y.max()), x_dates=not intraday,
                 log=log)
 
     # A chart carrying callouts makes room for them, because they lift off their own points
@@ -1565,7 +1766,7 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
             return base * (cam.y1[i] / cam.y0[i]) ** frac
         return base + cam.height(i) * frac
 
-    ma_pairs = _ma_lines(ax, ctx, ma_vals, avoid=color)
+    ma_pairs = _ma_lines(ax, ctx, ma_vals, avoid=color, unit=_ma_unit(tk))
     _ma_key(ax, ctx, ma_pairs, rising=rising)
     glow = _glow(ax, color, ctx)
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
@@ -1666,7 +1867,8 @@ def render_race(cfg, ctx, out, progress=None, still=None):
     n = len(names)
     fig = _new_fig(ctx)
     _titles(fig, ctx, cfg.get("title") or "Performance race",
-            cfg.get("subtitle") or ("Indexed to 100" if normalize else "Closing price"),
+            cfg.get("subtitle")
+            or ("Indexed to 100" if normalize else _level_word(names)),
             cfg.get("footer"))
     rect = _plot_area(ctx, True)
     ax = fig.add_axes([rect[0] + 0.05, rect[1], rect[2] - 0.03, rect[3]])
@@ -1711,7 +1913,8 @@ def render_race(cfg, ctx, out, progress=None, still=None):
             bars[c].set_width(cur[j])
             name_txt[c].set_position((-xmax * 0.012, pos[j]))
             val_txt[c].set_position((cur[j] + xmax * 0.012, pos[j]))
-            val_txt[c].set_text(f"{cur[j]:,.0f}" if normalize else _money(cur[j]))
+            val_txt[c].set_text(f"{cur[j]:,.0f}" if normalize
+                                else _value_text(c, cur[j]))
         moment = (_at_position(closes.index, xd[k]) if intraday
                   else mdates.num2date(xd[k]))
         clock.set_text(_stamp(moment, closes.index, intraday, "%b %Y"))

@@ -242,6 +242,29 @@ def clean_config(raw):
     # lag to ask for, and "none" is that render.
     ma_lag = _one_of(raw.get("ma_lag"), renderers.MA_LAG, "none", "Average lag")
 
+    metric = raw.get("metric", "return")
+    # An economic series is one number per period rather than a price, and three of the
+    # things a ticker can ask for stop meaning anything for it. All three are refused here
+    # rather than in the renderer, so the interface gets a message while someone is still
+    # setting the chart up instead of a failed job four seconds after they pressed render.
+    if any(datasrc.is_economic(t) for t in tickers):
+        if not datasrc.economic_available():
+            raise ValueError(
+                "Economic series come from FRED, which needs a key. Set ROLLTAPE_FRED_KEY "
+                "— it is free from fred.stlouisfed.org.")
+        if chart == "candles":
+            raise ValueError(
+                "An economic series has no open, high or low — only one value per period. "
+                "Use the line or timeline chart.")
+        if datasrc.is_intraday(interval):
+            raise ValueError(
+                "Economic series are published daily at best. Pick a daily date range.")
+        if chart == "bars" and metric == "volatility":
+            raise ValueError(
+                "Volatility is annualised from the number of trading days in a year, and "
+                "an economic series is published monthly or quarterly. Pick another "
+                "metric.")
+
     cfg = {
         "chart": chart,
         "tickers": tickers,
@@ -269,7 +292,7 @@ def clean_config(raw):
         "footer": (raw.get("footer") or "").strip() or None,
         "normalize": bool(raw.get("normalize", True)),
         "max_candles": int(raw.get("max_candles", 90) or 90),
-        "metric": raw.get("metric", "return"),
+        "metric": metric,
         "rows": raw.get("rows") or [],
         "annotations": raw.get("annotations") or [],
         # Off by default, for the reason the camera is locked and the average lag is none:
@@ -458,6 +481,16 @@ def meta():
         "intervals": [{"id": k, "label": v["label"], "days": v["days"]}
                       for k, v in datasrc.INTERVALS.items()],
         "intraday": datasrc.intraday_available(),
+        # The economic namespace, so the ticker field can say it exists before anyone
+        # guesses at it, and the built-in list so the first keystroke is useful without a
+        # round trip. `enabled` is false without a FRED key, and the interface then stops
+        # offering a symbol that would always fail.
+        "economic": {
+            "enabled": datasrc.economic_available(),
+            "prefix": datasrc.ECONOMIC_PREFIX,
+            "series": [{"symbol": datasrc.ECONOMIC_PREFIX + sid, "name": name}
+                       for sid, name, _ in datasrc.LOCAL_SERIES],
+        },
         "sizes": {a: {q: list(s) for q, s in qs.items()}
                   for a, qs in renderers.SIZES.items()},
         "presets": list(renderers.PRESETS),
@@ -551,8 +584,16 @@ def series():
         except Exception as exc:  # noqa: BLE001
             out.append({"symbol": ticker, "error": str(exc)})
             continue
-        out.append({"symbol": ticker, "source": datasrc.source_for(ticker),
-                    **_series_payload(df, cap)})
+        row = {"symbol": ticker, "source": datasrc.source_for(ticker),
+               **_series_payload(df, cap)}
+        if datasrc.is_economic(ticker):
+            # A series id is not a label. The readout has the same problem the chart title
+            # does — nobody reads CPIAUCSL — and the unit is what says whether a 4 on this
+            # line is percent or trillions of dollars.
+            info = datasrc.economic_meta(ticker)
+            row["name"] = info.get("title")
+            row["units"] = info.get("units")
+        out.append(row)
 
     return jsonify({"range": cfg["range"], "start": cfg["start"], "end": cfg["end"],
                     "interval": cfg["interval"], "series": out})

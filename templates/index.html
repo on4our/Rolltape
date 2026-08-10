@@ -1051,8 +1051,14 @@ function applyChart(){
     el.hidden = !el.dataset.for.split(" ").includes(state.chart);
   });
   const t = $("#tickers");
-  $("#tickerHint").textContent = spec.max_tickers === 1
-    ? "One symbol" : `Up to ${spec.max_tickers}, comma separated`;
+  // The economic namespace is worth naming here: nobody guesses a prefix, and searching
+  // FRED is the same gesture as using it. Left off the candlestick chart, which is the one
+  // that refuses an economic series — see clean_config.
+  const econ = state.meta.economic || {};
+  const hint = econ.enabled && state.chart !== "candles"
+    ? `, or ${econ.prefix} for economic data` : "";
+  $("#tickerHint").textContent = (spec.max_tickers === 1
+    ? "One symbol" : `Up to ${spec.max_tickers}, comma separated`) + hint;
   // Only rewrite symbols the user hasn't typed themselves.
   if (!state.tickersTouched){
     t.value = spec.max_tickers === 1 ? "NVDA" : "NVDA, AMD, MU, INTC";
