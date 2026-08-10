@@ -90,6 +90,12 @@ appearing two thirds of the way across. On a candlestick chart that has rolled u
 weekly or monthly bars, a "50-day" average is still fifty *days* — it's computed on daily
 closes before the rollup, not fifty candles.
 
+**Average lag** holds the averages a beat behind the price line while it draws, so a
+lagging indicator looks like one: the price moves and the average answers. Subtle, Standard
+and Bold are how far behind — a fraction of a second up to about half of one — and the gap
+closes as the reveal ends, so the last frame is the same finished chart either way. Off by
+default, and the control only appears once you've asked for an average.
+
 ## Output settings
 
 - **Frame** — 16:9 for the main video, 9:16 for Shorts, 1:1 for square posts.

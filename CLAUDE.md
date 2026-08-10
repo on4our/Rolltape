@@ -107,7 +107,7 @@ missing from it is silently untested rather than failing.
 ## Tests
 
 ```bash
-python -m unittest              # all 188, about 25 seconds
+python -m unittest              # all 195, about 25 seconds
 python -m unittest test_camera  # one module
 ```
 
@@ -179,6 +179,16 @@ averages are already warm on the first bar drawn. It returns averages over the *
 fetched index; the caller aligns them to whatever bars it draws, with `ffill=True` where
 bars have been resampled. Compute them before any rollup, so "50-day" means fifty days
 even when each candle is a week.
+
+`ma_lag` holds them behind the reveal head, which is what an indicator that lags the price
+looks like in motion. It is *planned* for the same reason the camera is: `ma_track()`
+reworks the renderer's own frame-to-index array once, before the first frame, so `still=`
+still answers for frame 200 without drawing the 199 before it. The delay is in seconds —
+frame-rate independent, like every other move — capped as a share of the reveal so a short
+clip isn't swallowed by it, and closed over the last quarter so the final frame is the same
+chart a lagged and an unlagged render both end on. `none` is the default and reproduces
+the pre-lag output exactly. A renderer opts in by drawing its averages from that second
+array rather than from `cut`; drawing them from `cut` is how they keep pace.
 
 **Motion.** `ease()` maps normalised time to progress; `_plan()` maps frame index to a
 position along a densely-interpolated series. Series are upsampled to ~2x the frame count

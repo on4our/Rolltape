@@ -433,6 +433,13 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
           <div class="hint">Trading days, up to three. Leave blank for none.</div>
         </div>
 
+        <div class="field" data-for="line candles timeline" id="maLagField">
+          <label>Average lag</label>
+          <div class="seg" id="maLagSeg"></div>
+          <div class="hint">Holds the averages behind the price line as it draws — a
+            lagging indicator that looks like one. They catch up before the reveal ends.</div>
+        </div>
+
         <div class="field" data-for="candles">
           <label for="maxCandles">Maximum candles</label>
           <input class="ctrl" id="maxCandles" type="number" min="20" max="250" value="90">
@@ -638,7 +645,7 @@ const esc = s => String(s).replace(/[&<>"']/g,
 const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight", range:"1y",
   aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0, preset:"auto",
-  camera:"locked", travel:"standard", cameraY:"track", log:0,
+  camera:"locked", travel:"standard", cameraY:"track", log:0, maLag:"none",
   meta:null, maxTickers:1, kits:{}
 };
 const CUSTOM = "custom";
@@ -659,6 +666,9 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
   $("#travelSeg").innerHTML = m.travels.map(v=>
     `<button data-v="${v}" aria-pressed="${v===state.travel}">${
       v[0].toUpperCase()+v.slice(1)}</button>`).join("");
+  $("#maLagSeg").innerHTML = m.ma_lags.map(v=>
+    `<button data-v="${v}" aria-pressed="${v===state.maLag}">${
+      v==="none" ? "Off" : v[0].toUpperCase()+v.slice(1)}</button>`).join("");
   applyCamera();
   $("#themes").innerHTML = m.themes.map(t=>`
     <button class="swatch" data-id="${t.id}" aria-pressed="${t.id===state.theme}">
@@ -883,6 +893,7 @@ seg("#presetSeg","preset", v=>v, null, true);
 seg("#bgSeg","transparent",Number);
 seg("#travelSeg","travel");
 seg("#cameraYSeg","cameraY");
+seg("#maLagSeg","maLag");
 
 /* ---------- camera ---------- */
 // Travel and vertical only mean something once the frame is actually moving, so a locked
@@ -935,6 +946,7 @@ function applyChart(){
     t.value = t.value.split(",")[0].trim();
   }
   toggleRows();
+  applyMaLag();
   slate();
 }
 $("#metric").addEventListener("change", ()=>{ toggleRows(); schedule(); });
@@ -945,6 +957,14 @@ function toggleRows(){
     addRow("Revenue 2023", "24.6"); addRow("Revenue 2024", "38.1");
   }
 }
+// A lag with nothing to lag is a control that does nothing, so it follows the averages on
+// and off the way travel follows a moving camera. Both conditions are recomputed rather
+// than accumulated, so it comes back when the field is filled in again.
+function applyMaLag(){
+  const f = $("#maLagField");
+  f.hidden = !f.dataset.for.split(" ").includes(state.chart) || !$("#ma").value.trim();
+}
+$("#ma").addEventListener("input", applyMaLag);
 
 /* ---------- repeating rows ---------- */
 function repeatRow(host, a, b, phA, phB, typeA="text"){
@@ -997,7 +1017,7 @@ function config(){
     unit: $("#unit").value, decimals: +$("#decimals").value,
     transparent: !!state.transparent,
     log_scale: !!state.log,
-    ma: $("#ma").value
+    ma: $("#ma").value, ma_lag: state.maLag
   };
 }
 

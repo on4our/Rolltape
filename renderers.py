@@ -716,6 +716,41 @@ def _scale_note(log):
 # ---------------------------------------------------------------------------
 # Moving averages
 # ---------------------------------------------------------------------------
+# How far the averages trail the reveal head, in seconds. An average is a lagging
+# indicator, and letting it arrive a beat late says so in the motion rather than in a
+# caption — the price moves, the average answers. Off by default, because every render
+# made before this existed had the two arriving together.
+MA_LAG = {"none": 0.0, "subtle": 0.15, "standard": 0.30, "bold": 0.55}
+MA_LAGS = tuple(MA_LAG)
+
+_MA_CATCH = 0.25    # share of the reveal spent closing the gap again
+_MA_MAX_LAG = 0.18  # ceiling on the delay, as a share of the reveal
+
+
+def ma_track(cfg, cut, n_frames, fps):
+    """Frame -> series index for the averages, which may trail the price line.
+
+    Planned off `cut` rather than accumulated, for the reason the camera is: `still=`
+    asks for frame 200 without drawing the 199 before it, so a lag that held a little
+    back each frame would hand the still export a different frame than the video.
+
+    The delay is set in seconds — the same beat at 30fps and at 60 — and it closes over
+    the end of the reveal so the averages land with the price line. A clip ending on a
+    short average reads as a chart that failed to finish drawing rather than as a
+    decision, and the last frame is the one people screenshot.
+    """
+    lag = MA_LAG.get(cfg.get("ma_lag"), 0.0)
+    if lag <= 0 or n_frames < 2:
+        return cut
+    # Capped against the reveal as well as set in seconds: on a two-second clip a third of
+    # a second behind is a third of the chart, which stops reading as a trailing average
+    # and starts reading as a second, shorter one.
+    delay = min(lag * fps, n_frames * _MA_MAX_LAG)
+    i = np.arange(n_frames, dtype=float)
+    close = ease("inout", np.clip((1.0 - i / (n_frames - 1)) / _MA_CATCH, 0.0, 1.0))
+    return cut[np.clip(i - delay * close, 0, n_frames - 1).astype(int)]
+
+
 def _fetch_with_ma(tk, cfg, periods):
     """Fetch a ticker plus any moving averages, warmed up before the chart starts.
 
@@ -900,6 +935,7 @@ def render_line(cfg, ctx, out, progress=None, still=None):
 
     mas = _align_ma(ma_series, df.index)
     ma_vals = [(p, _dense_ma(x, mas[p], xd)) for p in periods]
+    ma_cut = ma_track(cfg, cut, n_frames, ctx.fps)
     lo, hi = _extend_range(y.min(), y.max(), [v for _, v in ma_vals])
     log = _log_ok(cfg, lo)
 
@@ -944,8 +980,9 @@ def render_line(cfg, ctx, out, progress=None, still=None):
         line.set_data(xs, ys)
         for g in glow:
             g.set_data(xs, ys)
+        km = ma_cut[min(i, n_frames - 1)]
         for ln, vals in ma_pairs:
-            ln.set_data(xs, vals[:k])
+            ln.set_data(xd[:km], vals[:km])
         head.set_data([xs[-1]], [ys[-1]])
         if fill[0] is not None:
             fill[0].remove()
@@ -1093,6 +1130,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     # line still means fifty days on a chart whose candles are weeks.
     mas = _align_ma(ma_series, df.index, ffill=True)
     ma_vals = [(p, mas[p]) for p in periods]
+    ma_cut = ma_track(cfg, cut, n_frames, ctx.fps)
     lo, hi = _extend_range(float(l.min()), float(h.max()), [v for _, v in ma_vals])
     log = _log_ok(cfg, lo)
 
@@ -1187,8 +1225,9 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
         if cam.moving:
             retick(i)
         k = cut[min(i, n_frames - 1)]
+        km = ma_cut[min(i, n_frames - 1)]
         for ln, vals in ma_pairs:
-            ln.set_data(idx[:k], vals[:k])
+            ln.set_data(idx[:km], vals[:km])
         wick_seg, body_v, vol_v, cols, vcols = [], [], [], [], []
         for j in range(k):
             wick_seg.append([(j, l[j]), (j, h[j])])
@@ -1356,6 +1395,7 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
 
     mas = _align_ma(ma_series, df.index)
     ma_vals = [(p, _dense_ma(x, mas[p], xd)) for p in periods]
+    ma_cut = ma_track(cfg, cut, n_frames, ctx.fps)
     lo, hi = _extend_range(y.min(), y.max(), [v for _, v in ma_vals])
     log = _log_ok(cfg, lo)
 
@@ -1424,8 +1464,9 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
         line.set_data(xs, ys)
         for g in glow:
             g.set_data(xs, ys)
+        km = ma_cut[min(i, n_frames - 1)]
         for ln, vals in ma_pairs:
-            ln.set_data(xs, vals[:k])
+            ln.set_data(xd[:km], vals[:km])
         head.set_data([xs[-1]], [ys[-1]])
         if fill[0] is not None:
             fill[0].remove()
