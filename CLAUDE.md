@@ -14,7 +14,8 @@ pip install -r requirements.txt
 python app.py                    # http://127.0.0.1:5000
 python app.py --host 0.0.0.0     # reachable from phone on the same wifi
 
-ROLLTAPE_TWELVEDATA_KEY=...      # the licensed feed answers first
+ROLLTAPE_FMP_KEY=...             # the licensed feed answers first
+ROLLTAPE_FMP_HISTORY_YEARS=5     # Starter's ceiling; 30 on Professional
 ROLLTAPE_LICENSED_ONLY=1         # and the scraped fallbacks are refused entirely
 ```
 
@@ -27,7 +28,7 @@ fallback. An ffmpeg already on PATH still wins when there is one.
 app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
 renderers.py    Six chart types + themes + easing + camera + ffmpeg export
-data.py         Twelve Data (licensed), Yahoo (yfinance), Stooq — in that order, CSV cache
+data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, CSV cache
 config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
@@ -110,12 +111,12 @@ missing from it is silently untested rather than failing.
 ## Tests
 
 ```bash
-python -m unittest              # all 178, about 25 seconds
+python -m unittest              # all 211, about 20 seconds
 python -m unittest test_camera  # one module
 ```
 
-No network and no ffmpeg. Each source is forced to fail so the one below it runs, Stooq and
-Twelve Data answer from recorded response samples, everything else draws from
+No network and no ffmpeg. Each source is forced to fail so the one below it runs, Stooq,
+FMP and Twelve Data answer from recorded response samples, everything else draws from
 `testsupport.py`, and the two end-to-end encode tests skip themselves when there is no
 ffmpeg to call. So the suite is fast enough to run on every change, and there is no excuse
 for not having run it.
@@ -131,8 +132,8 @@ path instead of a test-only one.
 
 - `test_app.py` — `clean_config()`, every input the interface can send; the pricing page's
   numbers against `docs/pricing.md`; and the error page's HTML-versus-JSON split.
-- `test_data.py` — the three-source fallback order, Twelve Data parsing and paging, range
-  presets, cache freshness, attribution.
+- `test_data.py` — the four-source fallback order, FMP and Twelve Data parsing, the plan
+  horizon, range presets, cache freshness, attribution.
 - `test_render.py` — the export path: backgrounds, date labelling, stills, every theme.
 - `test_camera.py` — the planned limits behind each move.
 - `test_render_job.py` — the two-process protocol, the inherited cache, and preview latency
@@ -173,20 +174,29 @@ today's bar. Renderers ask for their window with `datasrc.window(cfg)` rather th
 preset is one entry in `RANGES`; the UI builds its buttons from `/api/meta`.
 
 **Price sources.** `SOURCES` in `data.py` is the preference order and `_sources_for()` is
-the only place it gets narrowed — by whether there's a key, by `LICENSED_ONLY`, and by
-whether the source can serve the interval. Everything else (`_find_cached`,
-`_drop_superseded`, the fetch loop) reads that one function, so a fourth source is an entry
-in `SOURCES`, a fetcher with the shared `(ticker, start, end, interval)` signature, an entry
-in the `fetchers` dict, and nothing else.
+the only place it gets narrowed. Everything else (`_find_cached`, `_drop_superseded`, the
+fetch loop) reads that one function, so another source is an entry in `SOURCES`, a fetcher
+with the shared `(ticker, start, end, interval)` signature, an entry in the `fetchers` dict,
+an entry in `SOURCE_KEYS` if it needs one, and nothing else.
 
-Two properties hold across all of them. **A source that can't serve the request is dropped,
-never approximated** — Stooq is out for intraday because answering a five-minute chart with
-daily bars and labelling it five-minute is worse than failing; a failed render is
-recoverable and a wrong one that looks right is not. And **the footer names whichever
-sources actually answered**, all of them when a render mixed sources, because a comparison
-chart pulling one ticker from a fallback is exactly when a single label would be a lie.
-Yahoo is the one that stays silent: nobody to credit, and nothing a viewer wouldn't already
-assume.
+**A source that can't serve the request is dropped, never asked to approximate it.** There
+are three ways to be dropped and they exist for the same reason — a failed render is
+recoverable and a wrong one that looks right is not:
+
+- *No key.* A licensed source without one never spends a call finding that out.
+- *Wrong interval.* Stooq is out for intraday, because answering a five-minute chart with
+  daily bars and labelling it five-minute is the exact failure this rule exists for.
+- *Past the plan's horizon.* FMP Starter reaches back five years and answers a longer
+  window with a **short frame rather than an error** — a MAX request would come back as
+  five years under a MAX label. `config.FMP_HISTORY_YEARS` is checked before the request,
+  so the window falls through to a deeper source instead. This is the subtle one: it is
+  enforced client-side because the API gives no signal, so a plan upgrade means changing
+  the env var or the ceiling silently stays wrong in the safe direction.
+
+**The footer names whichever sources actually answered**, all of them when a render mixed
+sources, because a comparison chart pulling one ticker from a fallback is exactly when a
+single label would be a lie. Yahoo is the one that stays silent: nobody to credit, and
+nothing a viewer wouldn't already assume.
 
 There is no generated-price source and there must not be one — see Tests.
 
@@ -339,15 +349,24 @@ draining the queue is still what bounds CPU, not the lock.
   instead of a signal number. `final` uses `medium` for the same reason.
 - yfinance breaks periodically when Yahoo changes their endpoints. Daily renders survive it
   — `data.py` falls through to Stooq and the footer names the source. Intraday survives it
-  only with a Twelve Data key; Stooq serves daily bars and coarser, so without one there is
+  only with a licensed key; Stooq serves daily bars and coarser, so without one there is
   nothing to fall through to.
-- Intraday therefore needs a Twelve Data key or yfinance installed. `/api/meta` reports
+- Intraday therefore needs a licensed key or yfinance installed. `/api/meta` reports
   `intraday: false` when there is neither, and the interface drops the option rather than
   offering one that always fails.
-- How Twelve Data adjusts for dividends and splits has not been compared against the other
-  two. It is the same class of discrepancy the README already warns about for Yahoo versus
-  Stooq, and the same thing roadmap item 7 is about — but it is unmeasured rather than
-  merely unexposed, so check it before narrating a total return off a licensed render.
+- **A MAX or 10Y chart does not come from the licensed feed on FMP Starter.** It falls
+  through to Yahoo, draws in full, and the footer stops naming FMP — correct, and
+  surprising if you are watching which source answered. Under `LICENSED_ONLY` the same
+  render fails instead.
+- **FMP's individual plans do not cover displaying data to end users or the public**, which
+  is what every render is. That needs their Data Display and Licensing Agreement, quoted
+  rather than listed, and it is unresolved. Twelve Data is wired and tested as the
+  alternative — its $29 plan states display use is included — so switching is a key swap
+  rather than a rewrite.
+- Neither licensed feed's dividend and split adjustment has been compared against Yahoo or
+  Stooq. Same class of discrepancy the README warns about for Yahoo versus Stooq, and the
+  same thing roadmap item 7 is about — but unmeasured rather than merely unexposed, so
+  check it before narrating a total return off a licensed render.
 - The Twelve Data paging loop is capped at `TWELVEDATA_MAX_PAGES`. That ceiling is a guard
   against a paging bug becoming an unbounded request loop against a metered API, not a real
   limit — but a `max` render on a symbol with two centuries of history would silently start
@@ -436,13 +455,16 @@ carry, and the $40 cinematography tier above is pencilled against it rather than
 `docs/acquisition.md` covers how anyone arrives; neither is enforced anywhere in the code.
 Beyond the tiers, the last piece is an API endpoint that accepts a config and returns an
 MP4.
-**The licensed feed this used to be blocked on has shipped.** Twelve Data is in `data.py`
-and answers first whenever `ROLLTAPE_TWELVEDATA_KEY` is set; it was chosen over Tiingo, EOD
-Historical and Polygon because its interval grid matches the one the interface offers, its
-paid plans cover display use, and it has no history ceiling at the entry price — see the
-README for the full argument. $29/month, a fixed cost rather than a per-user one, so
-roughly one cinematography subscriber covers it and everything past that is compute and
-margin.
+**The licensed feed this used to be blocked on has shipped.** Two of them are in `data.py`,
+either inert without its key: FMP answers first (`ROLLTAPE_FMP_KEY`), Twelve Data second.
+FMP was chosen for its interval grid and for intraday history reaching back years rather
+than months; Twelve Data stays in the order as the fallback and as the answer if FMP's
+display licence turns out badly. $29/month either way — a fixed cost rather than a per-user
+one, so roughly one cinematography subscriber covers it and everything past that is compute
+and margin.
+
+Two live caveats sit in Known rough edges rather than here: FMP Starter's five-year horizon,
+and the display licence FMP's individual plans do not grant.
 
 What is *not* automatic: the scraped sources are still in the order below it, because a
 local install should keep working without an account. A deploy that takes money must set

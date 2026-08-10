@@ -597,7 +597,9 @@ def main():
     p.add_argument("--port", type=int, default=5000)
     p.add_argument("--host", default="127.0.0.1")
     a = p.parse_args()
-    feed = "Twelve Data" if config.TWELVEDATA_KEY else "Yahoo/Stooq"
+    # Name the feed that will actually answer, so a key that didn't reach the process is
+    # visible at startup rather than in the footer of a finished render.
+    feed = datasrc.primary_source()
     print(f"\n  Rolltape running at http://{a.host}:{a.port}  [{feed}]\n")
     app.run(host=a.host, port=a.port, threaded=True, debug=False)
 

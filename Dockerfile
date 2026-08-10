@@ -28,9 +28,10 @@ COPY . .
 # Defaults suit a host with no volume attached. Mount one and point these at it to keep
 # renders and the price cache across restarts.
 #
-# Not set here, deliberately: ROLLTAPE_TWELVEDATA_KEY is a secret and belongs in the host's
-# secret store rather than an image layer. A deploy that serves anyone but its owner wants
-# ROLLTAPE_LICENSED_ONLY=1 alongside it — see the README.
+# Not set here, deliberately: ROLLTAPE_FMP_KEY is a secret and belongs in the host's secret
+# store rather than an image layer. A deploy that serves anyone but its owner wants
+# ROLLTAPE_LICENSED_ONLY=1 alongside it, and ROLLTAPE_FMP_HISTORY_YEARS set to match the
+# plan being paid for — see the README.
 ENV ROLLTAPE_OUT_DIR=/data/outputs \
     ROLLTAPE_CACHE_DIR=/data/.cache \
     MPLCONFIGDIR=/tmp/matplotlib \

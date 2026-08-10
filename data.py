@@ -1,10 +1,15 @@
 """Price data: a licensed feed first, the scraped sources behind it, cached to disk.
 
-Three sources, in preference order. Twelve Data is licensed, covers the same intraday grid
-the interface offers, and is the only one of the three whose terms permit showing the data
-to anyone but yourself — it answers first whenever a key is configured. Yahoo and Stooq
-stay behind it as fallbacks so a clone with no key still renders, and so a provider outage
-costs a render rather than the afternoon.
+Four sources, in preference order. Financial Modeling Prep leads — it is licensed, its
+interval grid matches the one the interface offers, and its intraday history goes back
+years rather than months. Twelve Data sits behind it as the other licensed option, and
+Yahoo and Stooq behind both so a clone with no key still renders and a provider outage
+costs a render rather than the afternoon. Each licensed source is inert without its key,
+so which ones are live is a matter of configuration rather than code.
+
+The one thing FMP's entry plan cannot do is reach past five years. That is a plan property
+rather than an API one and it fails quietly — a MAX request comes back short rather than
+refused — so the ceiling is enforced in `_sources_for` before the request is made.
 
 There is deliberately no generated-data mode. A chart drawn from invented prices looks
 exactly like a real one three steps later in a video editor, and no flag is worth that.
@@ -27,13 +32,18 @@ CACHE_DIR = config.CACHE_DIR
 
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
-# Preference order. Twelve Data drops out with no key, Stooq drops out for intraday, and
-# `_sources_for` is where both of those happen.
-SOURCES = ("twelvedata", "yahoo", "stooq")
+# Preference order. Each licensed source drops out without its key, Stooq drops out for
+# intraday, and a source drops out for a window older than it can serve — `_sources_for` is
+# where all three of those happen.
+SOURCES = ("fmp", "twelvedata", "yahoo", "stooq")
 
 # The ones whose terms cover showing the data to someone other than the person who fetched
 # it. config.LICENSED_ONLY narrows the order to these.
-LICENSED = ("twelvedata",)
+LICENSED = ("fmp", "twelvedata")
+
+# Which config key turns each licensed source on. A source whose key is blank is dropped
+# before any request is made, so an unconfigured one never spends a call finding out.
+SOURCE_KEYS = {"fmp": "FMP_KEY", "twelvedata": "TWELVEDATA_KEY"}
 
 # Yahoo keeps intraday history for a while and then drops it, by a different amount per
 # interval — minute bars for a week, five-minute for two months. A chart asking for more
@@ -73,13 +83,13 @@ def _yfinance_installed() -> bool:
 
 
 def intraday_available() -> bool:
-    """Intraday needs a source that serves it — Twelve Data, or Yahoo via yfinance.
+    """Intraday needs a source that serves it — a licensed feed, or Yahoo via yfinance.
 
-    Stooq covers a daily chart when neither is there, so the app still runs and only this
-    one feature goes. Better to tell the interface up front than to let someone build a
-    5-minute chart and hit a failed render at the end of it.
+    Stooq covers a daily chart when none of those is there, so the app still runs and only
+    this one feature goes. Better to tell the interface up front than to let someone build
+    a 5-minute chart and hit a failed render at the end of it.
     """
-    if config.TWELVEDATA_KEY:
+    if _keyed("fmp") or _keyed("twelvedata"):
         return True
     return _yfinance_installed() and not config.LICENSED_ONLY
 
@@ -96,24 +106,61 @@ def periods_per_year(interval) -> float:
     return 252.0 * max(pd.Timedelta("6h30min") / pd.Timedelta(step), 1.0)
 
 
-def _sources_for(interval):
+def _keyed(source) -> bool:
+    """True when a licensed source has a key configured. Unlicensed sources need none."""
+    attr = SOURCE_KEYS.get(source)
+    return True if attr is None else bool(getattr(config, attr, ""))
+
+
+def _horizon_days(source):
+    """How far back this source's plan reaches, or None when it has no ceiling.
+
+    Only FMP has one, and it is a property of the subscription rather than the API — see
+    config.FMP_HISTORY_YEARS.
+    """
+    if source == "fmp":
+        years = config.FMP_HISTORY_YEARS
+        return years * 365.25 if years and years > 0 else None
+    return None
+
+
+def _covers(source, start) -> bool:
+    """Whether `source` can reach back to `start`."""
+    days = _horizon_days(source)
+    if days is None or start is None:
+        return True
+    try:
+        return (_today() - pd.Timestamp(start)).days <= days
+    except (ValueError, TypeError):
+        return True  # unparseable; fetch complains about it somewhere more useful
+
+
+def _sources_for(interval, start=None):
     """The sources that can answer this request, in preference order.
 
-    Twelve Data leads when there is a key and drops out when there isn't, which is the
-    whole of what an unconfigured clone notices. `LICENSED_ONLY` goes further and removes
-    the scraped sources outright — see config.py for why a paid deploy wants that.
+    Three ways to be dropped, and the same principle behind all of them: **a source that
+    cannot serve the request is removed, never asked to approximate it.** A failed render
+    is recoverable; a wrong one that looks right is not.
 
-    Stooq serves daily bars and coarser, so intraday never falls through to it. Answering a
-    five-minute chart with daily bars and labelling it five-minute is worse than failing: a
-    failed render is recoverable, a wrong one that looks right is not.
+    - *No key.* A licensed source without one is dropped before any request is made, which
+      is the whole of what an unconfigured clone notices. `LICENSED_ONLY` goes the other
+      way and removes the scraped sources outright — see config.py for why a paid deploy
+      wants that.
+    - *Wrong interval.* Stooq serves daily bars and coarser, so intraday never falls
+      through to it — answering a five-minute chart with daily bars and labelling it
+      five-minute is the exact failure this rule exists for.
+    - *Too far back.* A plan with a history horizon answers a longer window with a short
+      frame rather than an error, so a MAX chart would come back as five years under a MAX
+      label. Dropping the source lets a deeper one below it answer instead; under
+      LICENSED_ONLY there is nothing below it and the render fails, which is the honest
+      outcome.
     """
-    order = SOURCES if config.TWELVEDATA_KEY else tuple(s for s in SOURCES
-                                                        if s != "twelvedata")
+    order = tuple(s for s in SOURCES if _keyed(s))
     if config.LICENSED_ONLY:
         order = tuple(s for s in order if s in LICENSED)
     if is_intraday(interval):
         order = tuple(s for s in order if s != "stooq")
-    return order
+    return tuple(s for s in order if _covers(s, start))
 
 
 # Which source answered for each ticker in the current render. One module-level record is
@@ -122,11 +169,12 @@ def _sources_for(interval):
 _SOURCES = {}
 
 # Sources that get named in the footer, and what to call them. Two different reasons to be
-# on this list: Twelve Data asks to be credited and is what a licensed deploy is actually
-# running on, and Stooq is named because reaching it means Yahoo was down — worth knowing
-# when the total return doesn't match what another chart says. Yahoo is on neither footing,
-# so it stays silent.
-SOURCE_NAMES = {"twelvedata": "Twelve Data", "stooq": "Stooq"}
+# on this list: a licensed feed asks to be credited and is what a paying deploy is actually
+# running on, and Stooq is named because reaching it means everything above it was down —
+# worth knowing when the total return doesn't match what another chart says. Yahoo is on
+# neither footing, so it stays silent.
+SOURCE_NAMES = {"fmp": "Financial Modeling Prep", "twelvedata": "Twelve Data",
+                "stooq": "Stooq"}
 
 # Quick-pick windows for the date selector, resolved against today. `short` is what fits on
 # a button, `label` is what it means; the UI reads both from /api/meta so adding a preset
@@ -189,6 +237,18 @@ def window(cfg):
     """
     return {"start": cfg["start"], "end": cfg.get("end"),
             "interval": cfg.get("interval", "1d"), "sessions": cfg.get("sessions")}
+
+
+def primary_source() -> str:
+    """Which feed a daily render will try first, named for a human.
+
+    For the startup banner. A key that never reached the process is otherwise invisible
+    until it shows up as the wrong name in the footer of a finished render.
+    """
+    order = _sources_for(DEFAULT_INTERVAL)
+    if not order:
+        return "no source configured"
+    return SOURCE_NAMES.get(order[0], order[0].title())
 
 
 def reset_sources():
@@ -275,7 +335,8 @@ def _drop_superseded(ticker, start, end, interval=DEFAULT_INTERVAL):
     """
     if not _is_open_ended(end):
         return
-    keep = {_cache_path(ticker, start, end, s, interval) for s in _sources_for(interval)}
+    keep = {_cache_path(ticker, start, end, s, interval)
+            for s in _sources_for(interval, start)}
     pattern = f"{ticker.upper()}_{_cache_key(ticker, start, end, interval)}.*.csv"
     for path in glob.glob(os.path.join(CACHE_DIR, pattern)):
         if path not in keep:
@@ -287,11 +348,100 @@ def _drop_superseded(ticker, start, end, interval=DEFAULT_INTERVAL):
 
 def _find_cached(ticker, start, end, interval=DEFAULT_INTERVAL):
     """Return (path, source) for a cached frame, whichever source wrote it."""
-    for source in _sources_for(interval):
+    for source in _sources_for(interval, start):
         path = _cache_path(ticker, start, end, source, interval)
         if os.path.exists(path):
             return path, source
     return None, None
+
+
+FMP_URL = "https://financialmodelingprep.com/stable"
+
+# Rolltape's interval names onto FMP's. Daily has its own endpoint; the rest hang off
+# /historical-chart/<step>, which is why this maps to a path fragment rather than a query
+# value the way the Twelve Data table does.
+FMP_INTERVALS = {"1m": "1min", "5m": "5min", "15m": "15min",
+                 "30m": "30min", "1h": "1hour"}
+
+
+def _fmp_rows(path, params):
+    """One FMP response as a list of row dicts.
+
+    Two shapes to cope with. The intraday endpoints answer with a bare array; the daily one
+    has historically wrapped it in {"symbol": ..., "historical": [...]}, and both spellings
+    are in the wild across their v3 and stable paths. Accepting either costs three lines and
+    saves a silent empty frame if the account is pointed at the other one.
+    """
+    url = f"{FMP_URL}/{path}?{urllib.parse.urlencode(params)}"
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8", "replace"))
+
+    if isinstance(payload, dict):
+        # Errors arrive as an object with a message rather than a non-200, same as Stooq
+        # answering a bad symbol with a 200 and the word "No data".
+        for key in ("Error Message", "error", "message"):
+            if payload.get(key):
+                message = str(payload[key])
+                if "limit" in message.lower():
+                    raise RuntimeError(f"rate limit reached — {message}")
+                raise ValueError(message)
+        payload = payload.get("historical") or payload.get("results") or []
+    if not isinstance(payload, list):
+        raise ValueError("unexpected response shape")
+    return payload
+
+
+def _fmp(ticker, start, end=None, interval=DEFAULT_INTERVAL):
+    """OHLCV from Financial Modeling Prep — the licensed feed.
+
+    One request per call: unlike Twelve Data there is no page cap to work around, because
+    the endpoints take `from`/`to` and answer the whole window.
+
+    What this cannot do is notice that the window is older than the plan allows. FMP
+    answers a too-long range with a short frame rather than an error, so a five-year
+    Starter plan would return five years under a MAX label. That check lives in
+    `_sources_for`, before the request — see config.FMP_HISTORY_YEARS.
+
+    Unverified and worth checking with a key in hand: how this feed adjusts for dividends
+    and splits. `_yahoo` asks for both, Stooq does its own thing, and the three disagreeing
+    changes the total return a chart narrates — which is the whole of roadmap item 7.
+    """
+    if not config.FMP_KEY:
+        raise RuntimeError("no API key — set ROLLTAPE_FMP_KEY")
+
+    params = {"symbol": ticker, "apikey": config.FMP_KEY,
+              "from": pd.Timestamp(start).strftime("%Y-%m-%d")}
+    if end:
+        params["to"] = pd.Timestamp(end).strftime("%Y-%m-%d")
+
+    if is_intraday(interval):
+        step = FMP_INTERVALS.get(interval)
+        if not step:
+            raise ValueError(f"interval {interval} is not on the FMP grid")
+        rows = _fmp_rows(f"historical-chart/{step}", params)
+    else:
+        rows = _fmp_rows("historical-price-eod/full", params)
+
+    if not rows:
+        raise ValueError("no rows returned")
+
+    df = pd.DataFrame(rows)
+    stamp = "date" if "date" in df else "datetime"
+    if stamp not in df:
+        raise ValueError("no date column in the response")
+    df.index = pd.to_datetime(df.pop(stamp))
+    # Volume is absent on some instruments rather than zero, and nothing here divides by
+    # it — dropping the row instead would throw away a perfectly good price.
+    if "volume" not in df:
+        df["volume"] = 0.0
+    df = df.rename(columns={c: c.capitalize() for c in df.columns})
+    for col in COLUMNS:
+        if col not in df:
+            raise ValueError(f"missing {col} in the response")
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Newest first, and the renderers expect the opposite.
+    return df[COLUMNS].dropna().sort_index()
 
 
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
@@ -476,15 +626,32 @@ def _usable(df, sessions):
     return df
 
 
+def _nothing_eligible(ticker, start, interval):
+    """Explain an empty source list, which is a configuration problem rather than a fetch.
+
+    Two ways to get here and they need different instructions, so the message says which
+    one happened rather than listing everything that could be wrong.
+    """
+    dropped = [s for s in SOURCES if _keyed(s) and not _covers(s, start)]
+    if dropped and config.LICENSED_ONLY:
+        return (f"No data for {ticker}: {SOURCE_NAMES.get(dropped[0], dropped[0])} only "
+                f"reaches back {config.FMP_HISTORY_YEARS} years and this chart starts at "
+                f"{start}. Pick a shorter range, or set ROLLTAPE_FMP_HISTORY_YEARS to "
+                "match a plan with deeper history.")
+    return (f"No data for {ticker}: no source is configured for {interval} bars. "
+            "Set ROLLTAPE_FMP_KEY, or clear ROLLTAPE_LICENSED_ONLY to allow the "
+            "fallback sources.")
+
+
 def fetch(ticker: str, start: str, end: str | None = None,
           interval: str = DEFAULT_INTERVAL, sessions: int | None = None) -> pd.DataFrame:
     """Return a DataFrame indexed by timestamp with Open/High/Low/Close/Volume.
 
-    Twelve Data first when a key is configured, then Yahoo, then Stooq. Each of the two
-    below the licensed feed exists because the one above it breaks: Yahoo whenever it moves
-    its endpoints, Twelve Data whenever a monthly quota runs out. A failed render is worse
-    than one drawn from a second-choice source — but see _sources_for for the two cases
-    where there is deliberately no second choice.
+    A licensed feed first when a key is configured, then Yahoo, then Stooq. Each source
+    below the last exists because the one above it breaks: Yahoo whenever it moves its
+    endpoints, a licensed feed whenever a monthly quota runs out. A failed render is worse
+    than one drawn from a second-choice source — but see _sources_for for the three cases
+    where a source is dropped rather than asked to approximate.
     """
     ticker = ticker.strip().upper()
     if not ticker:
@@ -498,9 +665,10 @@ def fetch(ticker: str, start: str, end: str | None = None,
             _SOURCES[ticker] = source
             return _usable(df, sessions)
 
-    fetchers = {"twelvedata": _twelvedata, "yahoo": _yahoo, "stooq": _stooq}
+    fetchers = {"fmp": _fmp, "twelvedata": _twelvedata,
+                "yahoo": _yahoo, "stooq": _stooq}
     problems = []
-    for source in _sources_for(interval):  # preference order, as in _find_cached
+    for source in _sources_for(interval, start):  # preference order, as in _find_cached
         try:
             df = fetchers[source](ticker, start, end, interval)
             trimmed = _usable(df, sessions)
@@ -515,10 +683,7 @@ def fetch(ticker: str, start: str, end: str | None = None,
         return trimmed
 
     if not problems:  # nothing was even eligible to try
-        raise ValueError(
-            f"No data for {ticker}: no source is configured for {interval} bars. "
-            "Set ROLLTAPE_TWELVEDATA_KEY, or clear ROLLTAPE_LICENSED_ONLY to allow the "
-            "fallback sources.")
+        raise ValueError(_nothing_eligible(ticker, start, interval))
 
     detail = "; ".join(problems)
     if is_intraday(interval):

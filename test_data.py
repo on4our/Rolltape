@@ -80,6 +80,163 @@ def _with_key(key="test-key"):
     return mock.patch.object(config, "TWELVEDATA_KEY", key)
 
 
+# A trimmed but faithful sample of an FMP daily response. Newest first, and the daily
+# endpoint has historically wrapped its rows in an object while the intraday ones return a
+# bare array — both spellings are covered below.
+FMP_DAILY_JSON = json.dumps({"symbol": "AAPL", "historical": [
+    {"date": "2024-01-08", "open": 182.09, "high": 185.60, "low": 181.50,
+     "close": 185.56, "volume": 59144500},
+    {"date": "2024-01-05", "open": 181.99, "high": 182.76, "low": 180.17,
+     "close": 181.18, "volume": 62303300},
+    {"date": "2024-01-04", "open": 182.15, "high": 183.09, "low": 180.88,
+     "close": 181.91, "volume": 71983600},
+]})
+
+FMP_INTRADAY_JSON = json.dumps([
+    {"date": "2024-01-08 09:35:00", "open": 182.4, "low": 182.0, "high": 182.6,
+     "close": 182.5, "volume": 120000},
+    {"date": "2024-01-08 09:30:00", "open": 182.1, "low": 181.9, "high": 182.5,
+     "close": 182.4, "volume": 250000},
+])
+
+
+def _with_fmp(key="test-key", years=5):
+    """Configure an FMP key and plan horizon for the length of a block."""
+    return mock.patch.multiple(config, FMP_KEY=key, FMP_HISTORY_YEARS=years)
+
+
+class FMPParsingTests(unittest.TestCase):
+    def test_daily_parses_to_the_shared_column_contract(self):
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_DAILY_JSON)):
+            df = data._fmp("AAPL", "2024-01-01")
+
+        self.assertEqual(list(df.columns), data.COLUMNS)
+        self.assertEqual(len(df), 3)
+        # Arrives newest first; every renderer expects the opposite.
+        self.assertEqual(str(df.index[0].date()), "2024-01-04")
+        self.assertAlmostEqual(df["Close"].iloc[-1], 185.56)
+
+    def test_a_bare_array_parses_the_same_as_a_wrapped_one(self):
+        # The intraday endpoints answer with a list rather than {"historical": [...]}.
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_INTRADAY_JSON)):
+            df = data._fmp("AAPL", "2024-01-08", interval="5m")
+
+        self.assertEqual(len(df), 2)
+        self.assertEqual(str(df.index[0]), "2024-01-08 09:30:00")
+
+    def test_intraday_goes_to_the_per_interval_endpoint(self):
+        with _with_fmp("sekrit"), mock.patch(
+                "urllib.request.urlopen",
+                _urlopen_returning(FMP_INTRADAY_JSON)) as urlopen:
+            data._fmp("AAPL", "2024-01-08", "2024-01-09", interval="15m")
+
+        url = urlopen.call_args[0][0]
+        self.assertIn("/historical-chart/15min?", url)  # the grid name, not Rolltape's
+        self.assertIn("apikey=sekrit", url)
+        self.assertIn("from=2024-01-08", url)
+        self.assertIn("to=2024-01-09", url)
+
+    def test_daily_goes_to_the_end_of_day_endpoint(self):
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_DAILY_JSON)) as urlopen:
+            data._fmp("AAPL", "2024-01-01")
+        self.assertIn("/historical-price-eod/full?", urlopen.call_args[0][0])
+
+    def test_an_error_body_arrives_with_a_200(self):
+        body = json.dumps({"Error Message": "Invalid API KEY."})
+        with _with_fmp(), mock.patch("urllib.request.urlopen", _urlopen_returning(body)):
+            with self.assertRaises(ValueError) as caught:
+                data._fmp("AAPL", "2024-01-01")
+        self.assertIn("Invalid API KEY", str(caught.exception))
+
+    def test_the_rate_limit_is_named_as_itself(self):
+        body = json.dumps({"Error Message": "Limit Reach. Please upgrade your plan."})
+        with _with_fmp(), mock.patch("urllib.request.urlopen", _urlopen_returning(body)):
+            with self.assertRaises(RuntimeError) as caught:
+                data._fmp("AAPL", "2024-01-01")
+        self.assertIn("rate limit", str(caught.exception))
+
+    def test_no_key_fails_before_the_request_is_made(self):
+        with mock.patch.object(config, "FMP_KEY", ""), \
+             mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("asked anyway")):
+            with self.assertRaises(RuntimeError):
+                data._fmp("AAPL", "2024-01-01")
+
+    def test_an_interval_off_the_grid_is_refused(self):
+        # Every interval the interface offers is on FMP's grid today, so this guards the
+        # next one added to INTERVALS without a matching entry here — which would otherwise
+        # fall through to the daily endpoint and label the result 5-minute.
+        thinned = {k: v for k, v in data.FMP_INTERVALS.items() if k != "5m"}
+        with _with_fmp(), mock.patch.object(data, "FMP_INTERVALS", thinned), \
+             mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("asked anyway")):
+            with self.assertRaises(ValueError):
+                data._fmp("AAPL", "2024-01-01", interval="5m")
+
+
+class PlanHorizonTests(unittest.TestCase):
+    """The Starter plan reaches back five years and says nothing when asked for more.
+
+    That is the dangerous shape: a MAX request comes back as a short frame rather than an
+    error, which would put five years of history under a MAX label and look entirely
+    correct. So the ceiling is enforced before the request rather than after it.
+    """
+
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        patcher = mock.patch.object(data, "CACHE_DIR", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        data.reset_sources()
+        self.addCleanup(data.reset_sources)
+
+    def _years_ago(self, n):
+        return (pd.Timestamp.today() - pd.Timedelta(days=int(365.25 * n))).strftime(
+            "%Y-%m-%d")
+
+    def test_a_window_inside_the_horizon_uses_the_licensed_feed(self):
+        with _with_fmp():
+            self.assertEqual(data._sources_for("1d", self._years_ago(2))[0], "fmp")
+
+    def test_a_window_past_the_horizon_drops_the_licensed_feed(self):
+        with _with_fmp():
+            order = data._sources_for("1d", self._years_ago(20))
+        self.assertNotIn("fmp", order)
+        # Yahoo and Stooq have deeper history, so the deep chart still draws — just not
+        # from the plan that cannot serve it.
+        self.assertEqual(order[0], "yahoo")
+
+    def test_a_deeper_plan_keeps_the_licensed_feed(self):
+        # Upgrading to the 30-year plan is meant to be an env var, not a code change.
+        with _with_fmp(years=30):
+            self.assertIn("fmp", data._sources_for("1d", self._years_ago(20)))
+
+    def test_a_max_chart_really_falls_through_rather_than_truncating(self):
+        frame = pd.read_csv(io.StringIO(STOOQ_CSV), parse_dates=["Date"], index_col="Date")
+        with _with_fmp(), \
+             mock.patch.object(data, "_fmp", side_effect=AssertionError("asked anyway")), \
+             mock.patch.object(data, "_yahoo", return_value=frame):
+            data.fetch("AAPL", "1970-01-01")
+
+        self.assertEqual(data.sources_used(), {"yahoo"})
+
+    def test_licensed_only_past_the_horizon_says_what_to_do_about_it(self):
+        # Nothing below the licensed feed to fall through to, so this has to fail — and
+        # the message has to name the horizon rather than reading as a missing key.
+        with _with_fmp(), mock.patch.object(config, "LICENSED_ONLY", True), \
+             mock.patch.object(data, "_fmp", side_effect=AssertionError("asked anyway")):
+            with self.assertRaises(ValueError) as caught:
+                data.fetch("AAPL", "1970-01-01")
+
+        message = str(caught.exception)
+        self.assertIn("5 years", message)
+        self.assertIn("ROLLTAPE_FMP_HISTORY_YEARS", message)
+
+
 class TwelveDataParsingTests(unittest.TestCase):
     def test_parses_to_the_shared_column_contract(self):
         with _with_key(), mock.patch("urllib.request.urlopen",
@@ -303,6 +460,9 @@ class FallbackTests(unittest.TestCase):
         # A fresh clone has no key. It must not spend a request finding that out, and the
         # error from a keyless call must not end up in a user-facing message.
         with mock.patch.object(config, "TWELVEDATA_KEY", ""), \
+             mock.patch.object(config, "FMP_KEY", ""), \
+             mock.patch.object(data, "_fmp",
+                               side_effect=AssertionError("called without a key")), \
              mock.patch.object(data, "_twelvedata",
                                side_effect=AssertionError("called without a key")), \
              mock.patch.object(data, "_yahoo", side_effect=RuntimeError("endpoint moved")), \
@@ -331,7 +491,7 @@ class FallbackTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 data.fetch("AAPL", "2024-01-01")
 
-        self.assertIn("ROLLTAPE_TWELVEDATA_KEY", str(caught.exception))
+        self.assertIn("ROLLTAPE_FMP_KEY", str(caught.exception))
 
 
 class CacheFreshnessTests(unittest.TestCase):

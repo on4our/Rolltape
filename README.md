@@ -19,8 +19,8 @@ leaner option: the bundled build adds about 77MB to the install.
 
 Prices come from a real feed and only from a real feed — there is no generated-data mode.
 Out of the box that means Yahoo with a Stooq fallback, which needs no account. Set
-`ROLLTAPE_TWELVEDATA_KEY` and Twelve Data answers first instead; see **Where the numbers
-come from** for why you would.
+`ROLLTAPE_FMP_KEY` and Financial Modeling Prep answers first instead; see **Where the
+numbers come from** for why you would, and for the one thing its entry plan can't do.
 
 ## Chart types
 
@@ -169,7 +169,7 @@ no plane to move over, so the controls disappear for those two.
 app.py          Flask server, render queue, job tracking
 render_job.py   Runs one render in a child process, and reports progress back
 renderers.py    All six chart types, themes, easing, camera moves, export
-data.py         Twelve Data, Yahoo and Stooq fetches, in that order, plus the disk cache
+data.py         FMP, Twelve Data, Yahoo and Stooq fetches, in order, plus the disk cache
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go
 jobs.py         The render job registry
@@ -191,52 +191,66 @@ re-asked immediately.
 
 ## Where the numbers come from
 
-Three sources, tried in order.
+Four sources, tried in order.
 
-1. **[Twelve Data](https://twelvedata.com)** — the licensed feed, used whenever
-   `ROLLTAPE_TWELVEDATA_KEY` is set. Skipped entirely when it isn't, so a fresh clone works
-   with no account.
-2. **Yahoo**, via yfinance.
-3. **[Stooq](https://stooq.com)** — free daily bars, no account, a completely independent
+1. **[Financial Modeling Prep](https://site.financialmodelingprep.com)** — the licensed
+   feed, used whenever `ROLLTAPE_FMP_KEY` is set.
+2. **[Twelve Data](https://twelvedata.com)** — the other licensed option, used whenever
+   `ROLLTAPE_TWELVEDATA_KEY` is set.
+3. **Yahoo**, via yfinance.
+4. **[Stooq](https://stooq.com)** — free daily bars, no account, a completely independent
    source.
 
-Each one below the last exists because the one above it breaks: Yahoo whenever they change
-their endpoints, Twelve Data whenever a monthly quota runs out. A failed render is worse
-than one drawn from second choice. If they all fail you get one error naming every cause.
+Each licensed source is inert without its key, so a fresh clone works with no account and
+which feeds are live is a matter of configuration rather than code. Each source below the
+last exists because the one above it breaks: Yahoo whenever they change their endpoints, a
+licensed feed whenever a monthly quota runs out. A failed render is worse than one drawn
+from second choice. If they all fail you get one error naming every cause.
 
 The exception is intraday. Stooq has daily bars and nothing finer, so it is never asked for
 5-minute data — answering with daily bars under a 5-minute label is worse than failing.
-Intraday comes from Twelve Data or Yahoo, or it fails.
 
-### Why Twelve Data
+### Why FMP
 
-It was picked over Tiingo, EOD Historical and Polygon for three reasons specific to this
-tool:
+- **Its interval grid is the one the interface already offers.**
+  1min/5min/15min/30min/1hour map straight onto Rolltape's.
+- **Its intraday history goes back years, not months.** This is the thing it does better
+  than anything else at the price: a 5-minute chart of a specific afternoon two years ago
+  is a render Twelve Data cannot serve at any tier.
+- **Plain REST/JSON**, which suits a codebase that is standard library plus four packages.
 
-- **Its interval grid is the one the interface already offers.** 1min/5min/15min/30min/1h
-  map straight onto Rolltape's, so intraday stops depending on a single source. Tiingo's
-  intraday is IEX-only, which is thin volume on anything but the largest names.
-- **Its paid plans cover commercial and display use.** A rendered chart in a video is
-  display use, which is exactly the thing the other option at this price — Tiingo's
-  individual tiers, free and paid alike — restricts to your own screen. External
-  *redistribution* still needs their add-on, but Rolltape publishes pictures, not feeds.
-- **It has no history ceiling at the entry price.** Polygon's $29 tier stops at five years
-  and 15-minute-delayed data, which would quietly break the 10Y and MAX presets.
+### What the Starter plan can't do
 
-$29/month at the time of writing, with a free tier (800 credits/day) that is enough to try
-it. It is a fixed cost rather than a per-user one — see CLAUDE.md on what that means for
-pricing.
+**Starter reaches back five years.** The 10Y and MAX presets ask for more, and FMP answers
+a too-long window with a short frame rather than an error — which would put five years of
+history under a MAX label and look entirely correct.
+
+Rolltape refuses to do that. `data.py` knows the plan's horizon and drops FMP for any
+window that reaches past it, so a MAX chart falls through to Yahoo and draws in full. The
+footer then names Yahoo rather than FMP, which is the honest answer. Under
+`ROLLTAPE_LICENSED_ONLY=1` there is nothing to fall through to and the render fails with a
+message naming the horizon.
+
+If you upgrade to a plan with deeper history, set `ROLLTAPE_FMP_HISTORY_YEARS` to match —
+that is the whole change, no code edit.
+
+**One thing to settle before charging anyone.** FMP's individual plans do not cover
+displaying data to end users or the public; that needs their Data Display and Licensing
+Agreement, quoted rather than listed. Every render Rolltape produces is a public display,
+so this applies to a YouTube upload as much as to a paid tier. Ask them before the first
+paying user. `ROLLTAPE_TWELVEDATA_KEY` is wired and tested as the alternative if the answer
+is unattractive — Twelve Data states display use is included in its $29 plan.
 
 **The footer tells you which source answered.** Yahoo says nothing, since that's the
-assumed source and there is nobody to credit. Twelve Data reads `Data: Twelve Data`, the
-fallback reads `Data: Stooq`, and a render that mixed them names both — one ticker off a
-different feed than the rest is exactly when a single label would be a lie.
+assumed source and there is nobody to credit. The others name themselves, and a render that
+mixed sources names all of them — one ticker off a different feed than the rest is exactly
+when a single label would be a lie.
 
 That matters because the sources adjust prices differently: yfinance is asked for split-
-*and* dividend-adjusted closes, Stooq adjusts on its own terms, and how Twelve Data does it
-has not been checked against the other two yet. The same ticker over the same window can
-show a different total return depending on which one answered. Check the footer before you
-narrate a number.
+*and* dividend-adjusted closes, Stooq adjusts on its own terms, and how the licensed feeds
+do it has not been checked against either. The same ticker over the same window can show a
+different total return depending on which one answered. Check the footer before you narrate
+a number.
 
 ### Paying customers
 
@@ -280,8 +294,8 @@ is POSTed as `{"email": ..., "source": ...}` and nothing touches the disk. A `40
 from the provider counts as success, because "already subscribed" is not a failure from
 the visitor's side.
 
-Putting it in public means putting real market data in public, so set
-`ROLLTAPE_TWELVEDATA_KEY` and `ROLLTAPE_LICENSED_ONLY=1` before pointing anyone at it. The
+Putting it in public means putting real market data in public, so set `ROLLTAPE_FMP_KEY`
+and `ROLLTAPE_LICENSED_ONLY=1` before pointing anyone at it. The
 showcase frames on the page are drawn by the real renderer from the real feed, which is
 the point of them.
 
@@ -301,7 +315,9 @@ The code is deployment-ready. These env vars all default to the local behaviour:
 |---|---|---|
 | `ROLLTAPE_OUT_DIR` | `./outputs` | Where MP4s are written |
 | `ROLLTAPE_CACHE_DIR` | `./.cache` | Where the price cache lives |
-| `ROLLTAPE_TWELVEDATA_KEY` | unset | Twelve Data API key; the licensed feed answers first when set |
+| `ROLLTAPE_FMP_KEY` | unset | Financial Modeling Prep API key; answers first when set |
+| `ROLLTAPE_FMP_HISTORY_YEARS` | `5` | How far back the FMP plan reaches — Starter is 5, Professional 30 |
+| `ROLLTAPE_TWELVEDATA_KEY` | unset | Twelve Data API key; the second licensed source |
 | `ROLLTAPE_LICENSED_ONLY` | off | Refuse the Yahoo/Stooq fallbacks — for a deploy serving customers |
 | `ROLLTAPE_LANDING` | off | Landing page at `/`, app at `/app` |
 | `ROLLTAPE_DEMO_URL` | `/app` | Where the landing page's buttons point |
@@ -339,10 +355,11 @@ queued and answered asynchronously, which a platform that freezes the instance t
 the response is sent cannot carry — and the function bundle only fit its size ceiling by
 about 3 MB, with yfinance dropped to get there.
 
-**Before anything ships commercially:** set `ROLLTAPE_TWELVEDATA_KEY` and
-`ROLLTAPE_LICENSED_ONLY=1`. yfinance scrapes Yahoo, and showing that data to paying users
-isn't permitted — the licensed feed is in place for exactly this, but the fallbacks are on
-by default and have to be turned off deliberately.
+**Before anything ships commercially:** set a licensed key and `ROLLTAPE_LICENSED_ONLY=1`.
+yfinance scrapes Yahoo, and showing that data to paying users isn't permitted — the
+licensed feeds are in place for exactly this, but the fallbacks are on by default and have
+to be turned off deliberately. See **What the Starter plan can't do** for the display
+licence question that is still open with FMP.
 
 ## Notes
 

@@ -24,13 +24,30 @@ CACHE_DIR = _path("ROLLTAPE_CACHE_DIR", ".cache")
 PRESETS_PATH = _path("ROLLTAPE_PRESETS", "presets.json")
 
 # --- the price feed --------------------------------------------------------
-# The licensed source. Set it and Twelve Data answers first; leave it unset and the app
-# falls back to the scraped sources exactly as it always did, which is what keeps a fresh
-# clone useful before anyone has signed up for anything.
+# The licensed sources, in the order data.SOURCES tries them. Set a key and that feed
+# answers; leave both unset and the app falls back to the scraped sources exactly as it
+# always did, which is what keeps a fresh clone useful before anyone has signed up for
+# anything.
 #
-# The render subprocess inherits this from the environment it is spawned into, so there is
+# The render subprocess inherits these from the environment it is spawned into, so there is
 # nothing to hand across the process boundary.
+FMP_KEY = (os.environ.get("ROLLTAPE_FMP_KEY") or "").strip()
 TWELVEDATA_KEY = (os.environ.get("ROLLTAPE_TWELVEDATA_KEY") or "").strip()
+
+
+def _int(env, default):
+    try:
+        return int(os.environ.get(env) or default)
+    except ValueError:
+        return default
+
+
+# How far back the FMP plan reaches. Starter is five years; Professional is thirty. This is
+# a plan property rather than an API one, so it cannot be discovered at runtime — a request
+# past the horizon comes back short rather than refused, which would put a five-year chart
+# under a MAX label. data.py drops the source instead, so set this to match the plan you
+# are actually paying for.
+FMP_HISTORY_YEARS = _int("ROLLTAPE_FMP_HISTORY_YEARS", 5)
 
 # Refuse the scraped sources entirely. yfinance scrapes Yahoo and Stooq's terms are no
 # better, so neither can be behind data shown to someone who paid for it — a deployment
