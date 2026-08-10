@@ -319,20 +319,31 @@ follows for the renderers. Three things are load-bearing rather than taste:
   vocabularies; the swatch dots are the only place a theme's colours appear in the chrome,
   and they arrive from `/api/meta` as data.
 
-**The rail collapses.** Every section of the left rail is a `<details class="group">` with
-its label and a digest of its current values in the `<summary>`. The split it encodes is
-between settings you touch per render — chart, data, motion, camera, which start open — and
-settings you pick once for a channel and never look at again: output, labels and the brand
-kit, which start closed. Sharing one scroll column had put the theme swatches two screens
-below the ticker field; collapsing the set-once half takes the rail from 2,690px to 1,670px
-on the default chart, and closing the rest fits the whole configuration on one screen.
-Three things hold:
+**Two rails, and both collapse.** The settings are split twice over, on two axes that don't
+line up — which is why neither split alone was enough.
+
+*Left or right* is what the chart is versus how it is presented. `#railLeft` holds chart
+type and data, `#railRight` holds motion, camera, output, labels and the brand kit, and the
+preview sits between them. One rail held all seven sections, and the half you weren't
+working in was always in the way of the half you were; two columns also mean a long Data
+section can no longer push the theme swatches off the bottom of the page. Adding a section
+means picking a rail — subject on the left, treatment on the right.
+
+*Open or closed* is per render versus per channel. Every section is a
+`<details class="group">` carrying its label and a digest of its current values in the
+`<summary>`; chart, data, motion and camera start open, and output, labels and the brand kit
+start closed because they are picked once for a channel and never looked at again.
+Collapsing that half took the single rail from 2,690px to 1,670px on the default chart, and
+splitting it across two takes the left rail to 1,155px against the right's 577px — the
+subject of the render is now within a screen of itself. Four things hold:
 
 - **A closed section still feeds `config()`**, which is exactly why every one of them
   carries a `.digest`. `<details>` keeps its children in the DOM, so a section with no
   digest is a setting that changes the render with nothing on screen saying what it is set
-  to. `SECTIONS` in the script is the list that fills them, and `RailSectionTests` in
-  `test_app.py` fails if a new section misses either half.
+  to. `SECTIONS` in the script is the list that fills them, and it is keyed by section id
+  rather than by rail, so moving a section between rails is a markup change and nothing
+  else. `RailSectionTests` in `test_app.py` fails if a new section misses either half, if
+  a rail ends up empty, or if a set-once section drifts back into the left rail.
 - Digests read from `state` where there is a choice, not from the DOM, so the summary
   cannot disagree with what the render will do. `slate()` refreshes them, and every control
   already routes through it — that is the one call site, not a listener per field.
@@ -340,6 +351,11 @@ Three things hold:
   rather than app state, and the alternative is re-expanding a channel's theme and footer
   on every reload, which is the scrolling this removed. Guard the access — it throws rather
   than no-ops in a few privacy modes.
+- **Three columns need the width for three columns.** `352px | 1fr | 320px` leaves a
+  usable preview down to about 1,280px; below 1,180px the right rail folds back under the
+  left one and both give up their own scroll, and below 940px the whole thing stacks with
+  the preview first. The fold-back query sits between the two — after the base rules it
+  overrides, before the narrow-screen one that has to stay last.
 
 All four templates carry the same palette, and each holds its own copy of the `:root` block
 because there is no build step to share one. That duplication is the deliberate cost of the

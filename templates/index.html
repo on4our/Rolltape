@@ -88,15 +88,21 @@ button,input,select,textarea{font:inherit;color:inherit}
 }
 .pricelink:hover{color:var(--indigo);border-bottom-color:var(--indigo)}
 
-.layout{display:grid;grid-template-columns:352px minmax(0,1fr);align-items:start}
+.layout{display:grid;grid-template-columns:352px minmax(0,1fr) 320px;align-items:start}
 
 
-/* ---- left rail ---------------------------------------------------- */
+/* ---- rails -------------------------------------------------------- */
+/* Two of them, and the split is what the chart is versus how it is presented: the left
+   rail is the subject — chart type and the data behind it — and the right is the
+   treatment, from how it moves to what it says along the bottom. One rail held both and
+   the half you were not working in was always in the way of the half you were. Each
+   scrolls in its own column, so a long Data section can no longer push the theme
+   swatches off the bottom of the page. */
 .rail{
   border-right:1px solid var(--line);background:var(--surface);
   height:calc(100vh - 56px);overflow-y:auto;position:sticky;top:56px;
 }
-@media (max-width:940px){.rail{height:auto;position:static;border-right:0;border-top:1px solid var(--line)}}
+.rail.right{border-right:0;border-left:1px solid var(--line)}
 
 .eyebrow{
   font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
@@ -380,6 +386,18 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
 .dl{font-size:13px;padding:7px 13px}
 .empty{color:var(--muted);font-size:13px;padding:34px;text-align:center}
 
+/* --- one column short: two rails and a preview worth looking at stop fitting side by
+       side well before the layout has to stack, and a 500px viewport is not a preview.
+       The presentation rail folds back under the left one and the page scrolls as a
+       whole, which is what it does on a phone anyway. Sits above the narrow-screen
+       query below, which has to stay last. --- */
+@media (max-width:1180px){
+  .layout{grid-template-columns:352px minmax(0,1fr)}
+  .rail{position:static;height:auto;overflow:visible}
+  .rail.right{grid-column:1;border-left:0;border-top:1px solid var(--line)}
+  .main{grid-column:2;grid-row:1 / span 2}
+}
+
 /* --- narrow screens: keep this last so it wins over the base rules --- */
 @media (max-width:940px){
   .layout{display:flex;flex-direction:column}
@@ -428,8 +446,10 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
 </div>
 
 <div class="layout">
-  <!-- ------------------------------------------------------------ rail -->
-  <aside class="rail">
+  <!-- --------------------------------------------------- rail: the chart -->
+  <!-- What is being drawn. Both sections start open: this is the half you touch on
+       every render. -->
+  <aside class="rail" id="railLeft">
     <details class="group" id="gChart" open>
       <summary><span class="caret"></span><span class="eyebrow">Chart type</span>
         <span class="digest" id="dChart"></span></summary>
@@ -539,7 +559,39 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
         </div>
       </div>
     </details>
+  </aside>
 
+  <!-- ------------------------------------------------------------ main -->
+  <main class="main">
+    <div class="stage">
+      <div class="stage-head"><span class="dot" id="stageDot"></span><span id="stageLabel">Preview</span></div>
+      <div class="frame" id="frame">
+        <div class="placeholder">Adjust the settings to build a preview.</div>
+      </div>
+      <div class="scrub">
+        <input type="range" id="scrub" min="5" max="100" value="75" aria-label="Preview position">
+        <span id="scrubLabel">75% through</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="render" id="renderBtn">Render video</button>
+      <span class="kbd">⌘/Ctrl + Enter</span>
+      <button class="ghost" id="saveFrame" type="button">Save this frame</button>
+      <button class="ghost" id="clearCache" type="button">Clear price cache</button>
+      <span class="submit-err" id="submitErr" hidden></span>
+    </div>
+
+    <div class="queue">
+      <div class="eyebrow" style="padding:0 0 10px">Renders</div>
+      <div id="jobs"><div class="empty">Nothing rendered yet.</div></div>
+    </div>
+  </main>
+
+  <!-- -------------------------------------------- rail: the presentation -->
+  <!-- How it looks and moves. Motion and Camera start open — they change per render the
+       way the chart itself does; the three below them are a channel's settings. -->
+  <aside class="rail right" id="railRight">
     <details class="group" id="gMotion" open>
       <summary><span class="caret"></span><span class="eyebrow">Motion</span>
         <span class="digest" id="dMotion"></span></summary>
@@ -671,33 +723,6 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
       </div>
     </details>
   </aside>
-
-  <!-- ------------------------------------------------------------ main -->
-  <main class="main">
-    <div class="stage">
-      <div class="stage-head"><span class="dot" id="stageDot"></span><span id="stageLabel">Preview</span></div>
-      <div class="frame" id="frame">
-        <div class="placeholder">Adjust the settings to build a preview.</div>
-      </div>
-      <div class="scrub">
-        <input type="range" id="scrub" min="5" max="100" value="75" aria-label="Preview position">
-        <span id="scrubLabel">75% through</span>
-      </div>
-    </div>
-
-    <div class="actions">
-      <button class="render" id="renderBtn">Render video</button>
-      <span class="kbd">⌘/Ctrl + Enter</span>
-      <button class="ghost" id="saveFrame" type="button">Save this frame</button>
-      <button class="ghost" id="clearCache" type="button">Clear price cache</button>
-      <span class="submit-err" id="submitErr" hidden></span>
-    </div>
-
-    <div class="queue">
-      <div class="eyebrow" style="padding:0 0 10px">Renders</div>
-      <div id="jobs"><div class="empty">Nothing rendered yet.</div></div>
-    </div>
-  </main>
 </div>
 
 <script>

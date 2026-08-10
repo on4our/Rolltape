@@ -124,25 +124,40 @@ class PricingPageTests(unittest.TestCase):
 
 
 class RailSectionTests(unittest.TestCase):
-    """The rail's collapsible sections, and the one thing that makes collapsing safe.
+    """The two rails' collapsible sections, and the things that make splitting them safe.
 
     A section that is closed still feeds config(), so a setting hidden without a digest
-    saying what it is set to is a setting nobody can see is wrong. Structure only — there
-    is no browser here, so this pins what the markup promises rather than what it does.
+    saying what it is set to is a setting nobody can see is wrong — and that holds
+    whichever rail the section ended up in. Structure only — there is no browser here, so
+    this pins what the markup promises rather than what it does.
     """
+
+    # The settings you only ever pick once for a channel. They are the reason the rail
+    # collapses, and now also the reason there are two of them.
+    SET_ONCE = ("gOutput", "gLabels", "gKit")
 
     @classmethod
     def setUpClass(cls):
         with open(os.path.join(HERE, "templates", "index.html")) as fh:
             cls.html = fh.read()
-        cls.rail = re.search(r'<aside class="rail">(.*?)</aside>', cls.html, re.S).group(1)
+        cls.rails = dict(re.findall(
+            r'<aside class="rail[^"]*" id="(\w+)">(.*?)</aside>', cls.html, re.S))
 
-    def sections(self):
-        return re.findall(r'<details class="group"[^>]*id="(g\w+)"', self.rail)
+    def sections(self, rail=None):
+        bodies = [self.rails[rail]] if rail else self.rails.values()
+        return [s for body in bodies
+                for s in re.findall(r'<details class="group"[^>]*id="(g\w+)"', body)]
+
+    def test_both_rails_are_found_and_hold_sections(self):
+        # Everything below reads the rails by name, so a renamed or dropped <aside> has to
+        # fail here rather than quietly reducing the rest of this class to no-ops.
+        self.assertEqual(sorted(self.rails), ["railLeft", "railRight"])
+        for rail in self.rails:
+            with self.subTest(rail=rail):
+                self.assertTrue(self.sections(rail))
 
     def test_every_section_carries_a_digest(self):
-        digests = set(re.findall(r'<span class="digest" id="(d\w+)"', self.rail))
-        self.assertTrue(self.sections())
+        digests = set(re.findall(r'<span class="digest" id="(d\w+)"', self.html))
         for sec in self.sections():
             with self.subTest(section=sec):
                 self.assertIn("d" + sec[1:], digests)
@@ -154,20 +169,31 @@ class RailSectionTests(unittest.TestCase):
         self.assertEqual(sorted(listed), sorted(self.sections()))
 
     def test_no_control_sits_outside_a_section(self):
-        # Everything in the rail has to be inside a disclosure. A stray control would be
-        # the one setting with nowhere to collapse to and no digest to describe it.
-        orphaned = re.sub(r"<details.*?</details>", "", self.rail, flags=re.S)
-        self.assertNotIn('class="ctrl', orphaned)
-        self.assertNotIn("<button", orphaned)
+        # Everything in a rail has to be inside a disclosure. A stray control would be the
+        # one setting with nowhere to collapse to and no digest to describe it.
+        for rail, body in self.rails.items():
+            with self.subTest(rail=rail):
+                orphaned = re.sub(r"<details.*?</details>", "", body, flags=re.S)
+                self.assertNotIn('class="ctrl', orphaned)
+                self.assertNotIn("<button", orphaned)
 
     def test_the_set_once_sections_start_closed(self):
-        # This is the whole point: output, labels and the brand kit are a channel's
-        # settings rather than a render's, and leaving them open is what made the rail
-        # three screens tall. <details> is open when the attribute is present.
-        for sec in ("gOutput", "gLabels", "gKit"):
+        # This is the whole point of the disclosures: output, labels and the brand kit are
+        # a channel's settings rather than a render's, and leaving them open is what made
+        # one rail three screens tall. <details> is open when the attribute is present.
+        for sec in self.SET_ONCE:
             with self.subTest(section=sec):
-                tag = re.search(rf'<details class="group" id="{sec}"[^>]*>', self.rail)
+                tag = re.search(rf'<details class="group" id="{sec}"[^>]*>', self.html)
                 self.assertNotIn(" open", tag.group(0))
+
+    def test_nothing_set_once_is_left_in_the_first_rail(self):
+        # The point of the split: the left rail is the chart itself, so everything you
+        # pick once and stop looking at belongs on the other side of the preview. A
+        # set-once section drifting back is the clutter this removed, returning.
+        left = self.sections("railLeft")
+        for sec in self.SET_ONCE:
+            with self.subTest(section=sec):
+                self.assertNotIn(sec, left)
 
 
 class ErrorPageTests(unittest.TestCase):
