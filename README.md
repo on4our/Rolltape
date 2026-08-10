@@ -17,8 +17,10 @@ ffmpeg does the encoding, and `pip install` brings its own copy — there is not
 to set up. If you already have ffmpeg on your PATH it gets used instead, which is the
 leaner option: the bundled build adds about 77MB to the install.
 
-To poke at the interface without hitting Yahoo, run `python app.py --demo`. That swaps
-in generated price data so every control still works offline.
+Prices come from a real feed and only from a real feed — there is no generated-data mode.
+Out of the box that means Yahoo with a Stooq fallback, which needs no account. Set
+`ROLLTAPE_TWELVEDATA_KEY` and Twelve Data answers first instead; see **Where the numbers
+come from** for why you would.
 
 ## Chart types
 
@@ -58,7 +60,7 @@ Daily by default. **Bar interval** also offers 1 minute, 5, 15, 30 and 1 hour, w
 what you want for a Fed afternoon or an earnings gap — the move is inside a single session,
 so a daily chart shows it as one candle.
 
-Yahoo only keeps intraday history for a while, and by a different amount per interval:
+Intraday history is kept for a while and then dropped, by a different amount per interval:
 about a week of 1-minute bars, two months of 5- to 30-minute, two years of hourly. A start
 date earlier than that is pulled forward to whatever exists rather than refused, and the
 subtitle names the range actually drawn.
@@ -67,10 +69,10 @@ Intraday charts are plotted by bar rather than by clock time, so the overnight h
 closed up and the ticks land on the session opens. Without that, a week of 5-minute bars
 would be about two thirds empty.
 
-**Intraday needs Yahoo.** Stooq serves daily bars and coarser, so unlike a daily render
-there is no fallback — if Yahoo is down, an intraday render fails rather than quietly
-handing you daily bars with a 5-minute label. It also needs yfinance installed; without it
-the intraday options are hidden rather than offered and broken.
+**Intraday never falls back to Stooq.** Stooq serves daily bars and coarser, so an
+intraday render fails rather than quietly handing you daily bars with a 5-minute label. It
+needs either a Twelve Data key or yfinance installed; with neither, the intraday options
+are hidden rather than offered and broken.
 
 ## Price axis and moving averages
 
@@ -167,7 +169,7 @@ no plane to move over, so the controls disappear for those two.
 app.py          Flask server, render queue, job tracking
 render_job.py   Runs one render in a child process, and reports progress back
 renderers.py    All six chart types, themes, easing, camera moves, export
-data.py         Yahoo fetch, Stooq fallback, disk cache, plus the demo generator
+data.py         Twelve Data, Yahoo and Stooq fetches, in that order, plus the disk cache
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go
 jobs.py         The render job registry
@@ -189,28 +191,63 @@ re-asked immediately.
 
 ## Where the numbers come from
 
-Yahoo first, via yfinance. Yahoo breaks periodically when they change their endpoints, so
-when that happens Rolltape falls back to [Stooq](https://stooq.com) — free daily bars, no
-account, a completely independent source. A failed render is worse than one drawn from
-second choice. If both fail you get one error naming both causes.
+Three sources, tried in order.
 
-The exception is the **1D** range. Stooq has daily bars and nothing finer, so there is no
-second source for intraday — those renders either come from Yahoo or fail.
+1. **[Twelve Data](https://twelvedata.com)** — the licensed feed, used whenever
+   `ROLLTAPE_TWELVEDATA_KEY` is set. Skipped entirely when it isn't, so a fresh clone works
+   with no account.
+2. **Yahoo**, via yfinance.
+3. **[Stooq](https://stooq.com)** — free daily bars, no account, a completely independent
+   source.
+
+Each one below the last exists because the one above it breaks: Yahoo whenever they change
+their endpoints, Twelve Data whenever a monthly quota runs out. A failed render is worse
+than one drawn from second choice. If they all fail you get one error naming every cause.
+
+The exception is intraday. Stooq has daily bars and nothing finer, so it is never asked for
+5-minute data — answering with daily bars under a 5-minute label is worse than failing.
+Intraday comes from Twelve Data or Yahoo, or it fails.
+
+### Why Twelve Data
+
+It was picked over Tiingo, EOD Historical and Polygon for three reasons specific to this
+tool:
+
+- **Its interval grid is the one the interface already offers.** 1min/5min/15min/30min/1h
+  map straight onto Rolltape's, so intraday stops depending on a single source. Tiingo's
+  intraday is IEX-only, which is thin volume on anything but the largest names.
+- **Its paid plans cover commercial and display use.** A rendered chart in a video is
+  display use, which is exactly the thing the other option at this price — Tiingo's
+  individual tiers, free and paid alike — restricts to your own screen. External
+  *redistribution* still needs their add-on, but Rolltape publishes pictures, not feeds.
+- **It has no history ceiling at the entry price.** Polygon's $29 tier stops at five years
+  and 15-minute-delayed data, which would quietly break the 10Y and MAX presets.
+
+$29/month at the time of writing, with a free tier (800 credits/day) that is enough to try
+it. It is a fixed cost rather than a per-user one — see CLAUDE.md on what that means for
+pricing.
 
 **The footer tells you which source answered.** Yahoo says nothing, since that's the
-assumed source. A chart built from the fallback reads `Data: Stooq`, and one built from
-`--demo` reads `Demo data` — which also stops generated prices reaching a video by accident.
+assumed source and there is nobody to credit. Twelve Data reads `Data: Twelve Data`, the
+fallback reads `Data: Stooq`, and a render that mixed them names both — one ticker off a
+different feed than the rest is exactly when a single label would be a lie.
 
-This matters because the two sources adjust prices differently: yfinance is asked for
-split- *and* dividend-adjusted closes, Stooq adjusts on its own terms. The same ticker over
-the same window can show a different total return depending on which one answered. Check the
-footer before you narrate a number.
+That matters because the sources adjust prices differently: yfinance is asked for split-
+*and* dividend-adjusted closes, Stooq adjusts on its own terms, and how Twelve Data does it
+has not been checked against the other two yet. The same ticker over the same window can
+show a different total return depending on which one answered. Check the footer before you
+narrate a number.
 
-Stooq is a reliability fallback for personal use, and a daily-bars one — see **Bar
-interval** for what that means when Yahoo is down. It does not change the licensing
-position for a paid tier — see CLAUDE.md.
+### Paying customers
 
-Run the tests with `python -m unittest`. They mock both sources, so they need no network.
+Set `ROLLTAPE_LICENSED_ONLY=1` and the scraped sources are removed from the order
+altogether: no key, or a licensed feed that is down, means a failed render rather than a
+chart quietly drawn from data that may not be shown to someone who paid for it. Off by
+default, because a laptop rendering for its owner is the case the fallbacks exist for.
+
+Run the tests with `python -m unittest`. They mock every source, so they need no network —
+and the generated prices they draw from live in `testsupport.py`, which nothing the app
+runs imports. There is no path from a running Rolltape to an invented number.
 
 ## The landing page
 
@@ -243,9 +280,10 @@ is POSTed as `{"email": ..., "source": ...}` and nothing touches the disk. A `40
 from the provider counts as success, because "already subscribed" is not a failure from
 the visitor's side.
 
-Running it in demo mode is the honest way to put it in public: `ROLLTAPE_DEMO=1` needs no
-market data, so there is no licensing question, and the page says on itself that the
-prices are generated.
+Putting it in public means putting real market data in public, so set
+`ROLLTAPE_TWELVEDATA_KEY` and `ROLLTAPE_LICENSED_ONLY=1` before pointing anyone at it. The
+showcase frames on the page are drawn by the real renderer from the real feed, which is
+the point of them.
 
 ## Deploying
 
@@ -263,7 +301,8 @@ The code is deployment-ready. These env vars all default to the local behaviour:
 |---|---|---|
 | `ROLLTAPE_OUT_DIR` | `./outputs` | Where MP4s are written |
 | `ROLLTAPE_CACHE_DIR` | `./.cache` | Where the price cache lives |
-| `ROLLTAPE_DEMO` | off | Same as `--demo`, for hosts with no CLI |
+| `ROLLTAPE_TWELVEDATA_KEY` | unset | Twelve Data API key; the licensed feed answers first when set |
+| `ROLLTAPE_LICENSED_ONLY` | off | Refuse the Yahoo/Stooq fallbacks — for a deploy serving customers |
 | `ROLLTAPE_LANDING` | off | Landing page at `/`, app at `/app` |
 | `ROLLTAPE_DEMO_URL` | `/app` | Where the landing page's buttons point |
 | `ROLLTAPE_SIGNUP_URL` | unset | List provider to POST signups to |
@@ -300,9 +339,10 @@ queued and answered asynchronously, which a platform that freezes the instance t
 the response is sent cannot carry — and the function bundle only fit its size ceiling by
 about 3 MB, with yfinance dropped to get there.
 
-**Still open before anything ships commercially:** yfinance scrapes Yahoo, and
-redistributing that data to paying users isn't permitted. A licensed feed has to replace it
-first — see CLAUDE.md.
+**Before anything ships commercially:** set `ROLLTAPE_TWELVEDATA_KEY` and
+`ROLLTAPE_LICENSED_ONLY=1`. yfinance scrapes Yahoo, and showing that data to paying users
+isn't permitted — the licensed feed is in place for exactly this, but the fallbacks are on
+by default and have to be turned off deliberately.
 
 ## Notes
 

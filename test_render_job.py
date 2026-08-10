@@ -5,8 +5,10 @@ the test that matters most here is the one timing a preview against an in-flight
 The rest covers the protocol between the two processes and what the user is told when a
 child dies without managing to explain itself.
 
-Everything runs on demo data. The end-to-end encode is skipped where there is no ffmpeg.
-Run with: python -m unittest
+The two tests that spawn a real child seed its disk cache first — there is no flag to hand
+a subprocess generated prices any more, and a pre-filled cache means the child renders
+offline through the ordinary cache-hit path rather than a test-only one. The end-to-end
+encode is skipped where there is no ffmpeg. Run with: python -m unittest
 """
 
 import os
@@ -21,8 +23,8 @@ from unittest import mock
 
 import app as appmod
 import config
-import data
 import render_job
+import testsupport
 
 BASE = {"chart": "line", "tickers": ["NVDA"], "start": "2024-01-01", "end": "2024-06-01",
         "duration": 0.5, "hold": 0.0, "quality": "draft"}
@@ -44,16 +46,27 @@ class ChildProcessTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
+        self.cache = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        # The child inherits the environment and reads its cache directory from it, which
+        # is the only channel there is between these two processes for this.
+        patch = mock.patch.dict(os.environ, {"ROLLTAPE_CACHE_DIR": self.cache})
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def out(self, name="clip.mp4"):
         return os.path.join(self.dir, name)
 
+    def seed(self, ticker):
+        """Fill the child's cache so its fetch never leaves the machine."""
+        testsupport.seed_cache(self.cache, ticker, BASE["start"], BASE["end"])
+
     @unittest.skipUnless(have_ffmpeg(), "needs ffmpeg to encode")
     def test_a_render_produces_a_file_and_reports_every_frame(self):
+        self.seed("NVDA")
         cfg = appmod.clean_config(BASE)
         seen = []
-        path = render_job.run(cfg, self.out(), progress=lambda i, n: seen.append((i, n)),
-                              demo=True)
+        path = render_job.run(cfg, self.out(), progress=lambda i, n: seen.append((i, n)))
 
         self.assertTrue(os.path.exists(path), "the child reported ok but wrote no file")
         self.assertGreater(os.path.getsize(path), 0)
@@ -66,20 +79,19 @@ class ChildProcessTests(unittest.TestCase):
         self.assertEqual([i for i, _ in seen], sorted(i for i, _ in seen))
 
     @unittest.skipUnless(have_ffmpeg(), "needs ffmpeg to encode")
-    def test_demo_mode_reaches_the_child(self):
-        # The flag lives in the parent's module state, so it has to be handed over
-        # explicitly. Without that a --demo run would quietly fetch real prices in the
-        # child, behind a UI insisting it is on generated data. The ticker is deliberately
-        # not a real symbol: if this ever went to the network it would fail rather than
-        # pass by luck.
+    def test_the_child_inherits_the_cache_and_never_reaches_the_network(self):
+        # The ticker is deliberately not a real symbol: every source would fail on it, so
+        # a child that ignored the inherited cache would fail the render rather than pass
+        # by luck. That makes this the test that the environment really does carry over.
+        self.seed("ZZQQ")
         cfg = appmod.clean_config({**BASE, "tickers": ["ZZQQ"]})
-        path = render_job.run(cfg, self.out(), demo=True)
+        path = render_job.run(cfg, self.out())
         self.assertGreater(os.path.getsize(path), 0)
 
     def test_a_bad_config_comes_back_as_a_readable_error(self):
         cfg = {**appmod.clean_config(BASE), "chart": "no-such-chart"}
         with self.assertRaises(render_job.RenderError) as caught:
-            render_job.run(cfg, self.out(), demo=True)
+            render_job.run(cfg, self.out())
         self.assertIn("no-such-chart", str(caught.exception))
 
     def test_a_child_that_dies_silently_still_explains_itself(self):
@@ -87,7 +99,7 @@ class ChildProcessTests(unittest.TestCase):
         with mock.patch.object(render_job.subprocess, "Popen", _fake_child(
                 lines=["Traceback (most recent call last):", "MemoryError"], code=1)):
             with self.assertRaises(render_job.RenderError) as caught:
-                render_job.run({}, self.out(), demo=True)
+                render_job.run({}, self.out())
         self.assertIn("status 1", str(caught.exception))
         self.assertIn("MemoryError", str(caught.exception))
 
@@ -95,7 +107,7 @@ class ChildProcessTests(unittest.TestCase):
         with mock.patch.object(render_job.subprocess, "Popen",
                                _fake_child(lines=[], code=0)):
             with self.assertRaises(render_job.RenderError):
-                render_job.run({}, self.out(), demo=True)
+                render_job.run({}, self.out())
 
     def test_stray_output_does_not_break_the_protocol(self):
         # Anything in the child can print. The progress stream has to survive it.
@@ -106,8 +118,7 @@ class ChildProcessTests(unittest.TestCase):
                        'not json either',
                        '{"progress": 2, "total": 2}',
                        '{"ok": true}'], code=0)):
-            render_job.run({}, self.out(), progress=lambda i, n: seen.append((i, n)),
-                           demo=True)
+            render_job.run({}, self.out(), progress=lambda i, n: seen.append((i, n)))
         self.assertEqual(seen, [(1, 2), (2, 2)])
 
 
@@ -135,9 +146,7 @@ class PreviewStaysLiveTests(unittest.TestCase):
     """
 
     def setUp(self):
-        data.set_demo(True)
-        self.addCleanup(data.set_demo, False)
-        self.addCleanup(data.reset_sources)
+        testsupport.patch_fetch(self)
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
         patch = mock.patch.object(config, "OUT_DIR", self.dir)
@@ -157,7 +166,7 @@ class PreviewStaysLiveTests(unittest.TestCase):
     def test_a_preview_is_answered_while_a_render_is_in_flight(self):
         release = threading.Event()
 
-        def slow_render(cfg, out_path, progress=None, demo=False):
+        def slow_render(cfg, out_path, progress=None):
             if progress:
                 progress(1, 2)
             release.wait(15)

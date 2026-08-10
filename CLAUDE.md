@@ -12,8 +12,10 @@ need the user to fiddle in After Effects afterwards, it isn't done.
 ```bash
 pip install -r requirements.txt
 python app.py                    # http://127.0.0.1:5000
-python app.py --demo             # generated data, no network needed
 python app.py --host 0.0.0.0     # reachable from phone on the same wifi
+
+ROLLTAPE_TWELVEDATA_KEY=...      # the licensed feed answers first
+ROLLTAPE_LICENSED_ONLY=1         # and the scraped fallbacks are refused entirely
 ```
 
 Everything is pip, ffmpeg included — `imageio-ffmpeg` ships a static build as the
@@ -25,13 +27,14 @@ fallback. An ffmpeg already on PATH still wins when there is one.
 app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
 renderers.py    Six chart types + themes + easing + camera + ffmpeg export
-data.py         Yahoo fetch (yfinance), Stooq fallback, CSV disk cache, demo generator
+data.py         Twelve Data (licensed), Yahoo (yfinance), Stooq — in that order, CSV cache
 config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
 presets.py      Named brand kits, saved to one JSON file
 examples.py     The three configs the landing page draws as its showcase
 signups.py      Email capture — a list provider when configured, a file otherwise
+testsupport.py  Generated prices for the suite. Nothing the app runs imports it
 templates/      The app, the landing page, the pricing page and an error page — inline
                 CSS and JS
                 each, no build step
@@ -111,17 +114,29 @@ python -m unittest              # all 178, about 25 seconds
 python -m unittest test_camera  # one module
 ```
 
-No network and no ffmpeg. Yahoo is forced to fail and Stooq answers from a recorded CSV
-sample, everything else runs on the demo generator, and the two end-to-end encode tests
-skip themselves when there is no ffmpeg to call. So the suite is fast enough to run on
-every change, and there is no excuse for not having run it.
+No network and no ffmpeg. Each source is forced to fail so the one below it runs, Stooq and
+Twelve Data answer from recorded response samples, everything else draws from
+`testsupport.py`, and the two end-to-end encode tests skip themselves when there is no
+ffmpeg to call. So the suite is fast enough to run on every change, and there is no excuse
+for not having run it.
+
+**There is no generated-data mode in the app**, and reintroducing one would be a mistake: a
+chart of invented prices is indistinguishable from a real one three steps later in a video
+editor. The generator lives in `testsupport.py`, which nothing the app runs imports, and
+tests reach it two ways — `patch_fetch(case)` in-process, and `seed_cache(...)` for the two
+tests that spawn a real render subprocess. The second is the interesting one: rather than a
+flag handed across the process boundary, the child's disk cache is filled in advance and
+the ordinary cache hit in `data.fetch` does the rest, so the test exercises a production
+path instead of a test-only one.
 
 - `test_app.py` — `clean_config()`, every input the interface can send; the pricing page's
   numbers against `docs/pricing.md`; and the error page's HTML-versus-JSON split.
-- `test_data.py` — the Yahoo/Stooq fallback, range presets, cache freshness, attribution.
+- `test_data.py` — the three-source fallback order, Twelve Data parsing and paging, range
+  presets, cache freshness, attribution.
 - `test_render.py` — the export path: backgrounds, date labelling, stills, every theme.
 - `test_camera.py` — the planned limits behind each move.
-- `test_render_job.py` — the two-process protocol, and preview latency under load.
+- `test_render_job.py` — the two-process protocol, the inherited cache, and preview latency
+  under load.
 - `test_presets.py` — brand kit persistence and the title template.
 - `test_landing.py` — the landing page, the showcase stills and email capture.
 
@@ -156,6 +171,24 @@ what an older API caller sends) uses the posted dates instead. Presets deliberat
 today's bar. Renderers ask for their window with `datasrc.window(cfg)` rather than reading
 `cfg["start"]` directly, so another knob doesn't mean editing six call sites. Adding a
 preset is one entry in `RANGES`; the UI builds its buttons from `/api/meta`.
+
+**Price sources.** `SOURCES` in `data.py` is the preference order and `_sources_for()` is
+the only place it gets narrowed — by whether there's a key, by `LICENSED_ONLY`, and by
+whether the source can serve the interval. Everything else (`_find_cached`,
+`_drop_superseded`, the fetch loop) reads that one function, so a fourth source is an entry
+in `SOURCES`, a fetcher with the shared `(ticker, start, end, interval)` signature, an entry
+in the `fetchers` dict, and nothing else.
+
+Two properties hold across all of them. **A source that can't serve the request is dropped,
+never approximated** — Stooq is out for intraday because answering a five-minute chart with
+daily bars and labelling it five-minute is worse than failing; a failed render is
+recoverable and a wrong one that looks right is not. And **the footer names whichever
+sources actually answered**, all of them when a render mixed sources, because a comparison
+chart pulling one ticker from a fallback is exactly when a single label would be a lie.
+Yahoo is the one that stays silent: nobody to credit, and nothing a viewer wouldn't already
+assume.
+
+There is no generated-price source and there must not be one — see Tests.
 
 **Date labels follow the span.** `_axis_fmt()` picks the tick format from how much time is
 on screen and `_range_label()` does the same for subtitles. A window shorter than a couple
@@ -304,12 +337,21 @@ draining the queue is still what bounds CPU, not the lock.
   1080p60 clip — and needs enough memory that a small container host may OOM-kill it. That
   now costs you the one render rather than the server, and the job reports the memory hint
   instead of a signal number. `final` uses `medium` for the same reason.
-- yfinance breaks periodically when Yahoo changes their endpoints. Daily renders survive
-  it — `data.py` falls through to Stooq and the footer names the source. Intraday does not:
-  Stooq serves daily bars and coarser, so there is nothing to fall through to.
-- Intraday is therefore also the one feature that needs yfinance installed rather than
-  merely working. `/api/meta` reports `intraday: false` when it is missing and the
-  interface drops the option rather than offering one that always fails.
+- yfinance breaks periodically when Yahoo changes their endpoints. Daily renders survive it
+  — `data.py` falls through to Stooq and the footer names the source. Intraday survives it
+  only with a Twelve Data key; Stooq serves daily bars and coarser, so without one there is
+  nothing to fall through to.
+- Intraday therefore needs a Twelve Data key or yfinance installed. `/api/meta` reports
+  `intraday: false` when there is neither, and the interface drops the option rather than
+  offering one that always fails.
+- How Twelve Data adjusts for dividends and splits has not been compared against the other
+  two. It is the same class of discrepancy the README already warns about for Yahoo versus
+  Stooq, and the same thing roadmap item 7 is about — but it is unmeasured rather than
+  merely unexposed, so check it before narrating a total return off a licensed render.
+- The Twelve Data paging loop is capped at `TWELVEDATA_MAX_PAGES`. That ceiling is a guard
+  against a paging bug becoming an unbounded request loop against a metered API, not a real
+  limit — but a `max` render on a symbol with two centuries of history would silently start
+  at the cap rather than at the listing.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
 - Cancelling only works on a queued job. Killing an in-flight render is now a matter of
@@ -350,9 +392,10 @@ Near term, in rough priority order.
 Done since this list was last rewritten: the Stooq fallback, renders out of process,
 intraday intervals, date-range presets, camera moves, log price axes with moving
 averages, the encoder preset (`final` moved from `slow` to `medium`, with an
-Auto/Faster/Slower override in the UI), brand kits, and the landing page with email
+Auto/Faster/Slower override in the UI), brand kits, the landing page with email
 capture — step 3 of docs/acquisition.md's sequencing, which leaves the demo instance
-above it as a deploy rather than a code change.
+above it as a deploy rather than a code change — and the licensed price feed, which was
+the one hard blocker in front of charging anybody.
 
 ### Cinematography — transitions
 
@@ -393,12 +436,18 @@ carry, and the $40 cinematography tier above is pencilled against it rather than
 `docs/acquisition.md` covers how anyone arrives; neither is enforced anywhere in the code.
 Beyond the tiers, the last piece is an API endpoint that accepts a config and returns an
 MP4.
-**Before any of that ships, the data source must be replaced with a licensed feed** —
-yfinance scrapes Yahoo and redistributing that data to paying users is not permitted.
-Tiingo, Twelve Data, EOD Historical and Polygon all license end-of-day US equities in the
-$30-100/month range. That is a fixed cost rather than a per-user one, so roughly one
-cinematography subscriber covers the feed and everything past that is compute and margin —
-but it has to be covered before the first paying user, not after.
+**The licensed feed this used to be blocked on has shipped.** Twelve Data is in `data.py`
+and answers first whenever `ROLLTAPE_TWELVEDATA_KEY` is set; it was chosen over Tiingo, EOD
+Historical and Polygon because its interval grid matches the one the interface offers, its
+paid plans cover display use, and it has no history ceiling at the entry price — see the
+README for the full argument. $29/month, a fixed cost rather than a per-user one, so
+roughly one cinematography subscriber covers it and everything past that is compute and
+margin.
+
+What is *not* automatic: the scraped sources are still in the order below it, because a
+local install should keep working without an account. A deploy that takes money must set
+`ROLLTAPE_LICENSED_ONLY=1`, which removes them — otherwise a quota exhausted mid-month
+falls through to yfinance and puts the licensing question straight back.
 
 ## Style
 

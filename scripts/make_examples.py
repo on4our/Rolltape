@@ -3,7 +3,6 @@
 
     python3 scripts/make_examples.py            # the three stills
     python3 scripts/make_examples.py --clips    # and an MP4 of each
-    python3 scripts/make_examples.py --demo     # generated prices, no network
 
 The page draws a missing frame on request and caches it, so this is not required —
 it just moves the cost off the first visitor. On a cold container that visitor
@@ -37,14 +36,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--clips", action="store_true",
                     help="also encode each example as a video")
-    ap.add_argument("--demo", action="store_true",
-                    help="generated prices instead of a live fetch")
     ap.add_argument("--force", action="store_true",
                     help="redraw stills that are already cached")
     args = ap.parse_args()
-
-    if args.demo:
-        datasrc.set_demo(True)
 
     os.makedirs(config.EXAMPLES_DIR, exist_ok=True)
     failed = 0
@@ -85,9 +79,9 @@ def main():
         print(f"  {example_id:<10} clip  {size:>6.1f} MB  {time.time() - started:>5.1f}s"
               f"  {out}")
 
-    if datasrc.is_demo():
-        print("\nGenerated prices — these frames are stamped 'Demo data' and are not "
-              "real market history.")
+    note = datasrc.attribution()
+    if note:
+        print(f"\n{note} — the frames are stamped to say so.")
     return 1 if failed else 0
 
 

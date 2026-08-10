@@ -1,22 +1,39 @@
-"""Price data: Yahoo first, Stooq when Yahoo breaks, cached to disk, plus a demo mode."""
+"""Price data: a licensed feed first, the scraped sources behind it, cached to disk.
+
+Three sources, in preference order. Twelve Data is licensed, covers the same intraday grid
+the interface offers, and is the only one of the three whose terms permit showing the data
+to anyone but yourself — it answers first whenever a key is configured. Yahoo and Stooq
+stay behind it as fallbacks so a clone with no key still renders, and so a provider outage
+costs a render rather than the afternoon.
+
+There is deliberately no generated-data mode. A chart drawn from invented prices looks
+exactly like a real one three steps later in a video editor, and no flag is worth that.
+The test suite gets its offline prices from `testsupport.py`, which the app never imports.
+"""
 
 import glob
 import hashlib
 import io
+import json
 import os
+import urllib.parse
 import urllib.request
 
-import numpy as np
 import pandas as pd
 
 import config
 
 CACHE_DIR = config.CACHE_DIR
-_DEMO = False
 
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
-SOURCES = ("yahoo", "stooq")
+# Preference order. Twelve Data drops out with no key, Stooq drops out for intraday, and
+# `_sources_for` is where both of those happen.
+SOURCES = ("twelvedata", "yahoo", "stooq")
+
+# The ones whose terms cover showing the data to someone other than the person who fetched
+# it. config.LICENSED_ONLY narrows the order to these.
+LICENSED = ("twelvedata",)
 
 # Yahoo keeps intraday history for a while and then drops it, by a different amount per
 # interval — minute bars for a week, five-minute for two months. A chart asking for more
@@ -46,19 +63,25 @@ def max_lookback_days(interval):
     return _spec(interval)["days"]
 
 
-def intraday_available() -> bool:
-    """Intraday needs Yahoo, and Yahoo needs yfinance to be installed.
-
-    Stooq covers a daily chart when yfinance is missing, so the app still runs without it
-    and only this one feature goes. Better to tell the interface up front than to let
-    someone build a 5-minute chart and hit a failed render at the end of it.
-    """
+def _yfinance_installed() -> bool:
     import importlib.util
 
     try:
         return importlib.util.find_spec("yfinance") is not None
     except (ImportError, ValueError):  # a half-installed package shouldn't 500 /api/meta
         return False
+
+
+def intraday_available() -> bool:
+    """Intraday needs a source that serves it — Twelve Data, or Yahoo via yfinance.
+
+    Stooq covers a daily chart when neither is there, so the app still runs and only this
+    one feature goes. Better to tell the interface up front than to let someone build a
+    5-minute chart and hit a failed render at the end of it.
+    """
+    if config.TWELVEDATA_KEY:
+        return True
+    return _yfinance_installed() and not config.LICENSED_ONLY
 
 
 def periods_per_year(interval) -> float:
@@ -74,12 +97,23 @@ def periods_per_year(interval) -> float:
 
 
 def _sources_for(interval):
-    """Stooq serves daily bars and coarser, so intraday is Yahoo or nothing.
+    """The sources that can answer this request, in preference order.
 
-    Falling through would answer a five-minute chart with daily bars and label it
-    five-minute. A failed render is recoverable; a wrong one that looks right is not.
+    Twelve Data leads when there is a key and drops out when there isn't, which is the
+    whole of what an unconfigured clone notices. `LICENSED_ONLY` goes further and removes
+    the scraped sources outright — see config.py for why a paid deploy wants that.
+
+    Stooq serves daily bars and coarser, so intraday never falls through to it. Answering a
+    five-minute chart with daily bars and labelling it five-minute is worse than failing: a
+    failed render is recoverable, a wrong one that looks right is not.
     """
-    return SOURCES if not is_intraday(interval) else ("yahoo",)
+    order = SOURCES if config.TWELVEDATA_KEY else tuple(s for s in SOURCES
+                                                        if s != "twelvedata")
+    if config.LICENSED_ONLY:
+        order = tuple(s for s in order if s in LICENSED)
+    if is_intraday(interval):
+        order = tuple(s for s in order if s != "stooq")
+    return order
 
 
 # Which source answered for each ticker in the current render. One module-level record is
@@ -87,12 +121,12 @@ def _sources_for(interval):
 # previews left in the server are serialised by app.py's DRAW_LOCK.
 _SOURCES = {}
 
-SOURCE_LABELS = {"stooq": "Data: Stooq", "demo": "Demo data"}
-
-# Regular US trading hours. Only the demo generator needs these — a real feed decides its
-# own session — but they have to be right or an offline intraday preview looks wrong.
-SESSION_OPEN = (9, 30)
-SESSION_CLOSE = (16, 0)
+# Sources that get named in the footer, and what to call them. Two different reasons to be
+# on this list: Twelve Data asks to be credited and is what a licensed deploy is actually
+# running on, and Stooq is named because reaching it means Yahoo was down — worth knowing
+# when the total return doesn't match what another chart says. Yahoo is on neither footing,
+# so it stays silent.
+SOURCE_NAMES = {"twelvedata": "Twelve Data", "stooq": "Stooq"}
 
 # Quick-pick windows for the date selector, resolved against today. `short` is what fits on
 # a button, `label` is what it means; the UI reads both from /api/meta so adding a preset
@@ -157,15 +191,6 @@ def window(cfg):
             "interval": cfg.get("interval", "1d"), "sessions": cfg.get("sessions")}
 
 
-def set_demo(flag: bool):
-    global _DEMO
-    _DEMO = bool(flag)
-
-
-def is_demo() -> bool:
-    return _DEMO
-
-
 def reset_sources():
     _SOURCES.clear()
 
@@ -178,13 +203,13 @@ def sources_used():
 def attribution():
     """Footer note for the current render, or None when everything came from Yahoo.
 
-    Yahoo is the assumed default, so it stays silent — a note only appears when the data
-    isn't what the viewer would assume, which is exactly when it matters.
+    A render that drew from more than one source names them all. One ticker off a different
+    feed than the rest is exactly the case where a single label would be a lie, and a
+    comparison chart is where that happens.
     """
-    for key in ("demo", "stooq"):  # demo wins; it's the more surprising of the two
-        if key in sources_used():
-            return SOURCE_LABELS[key]
-    return None
+    used = sources_used()
+    named = [name for key, name in SOURCE_NAMES.items() if key in used]
+    return "Data: " + ", ".join(named) if named else None
 
 
 def _now():
@@ -269,50 +294,113 @@ def _find_cached(ticker, start, end, interval=DEFAULT_INTERVAL):
     return None, None
 
 
-def _session_index(start, end, step):
-    """Cash-hours timestamps at `step` spacing.
+TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 
-    The overnight holes are the point: demo intraday has to have the same shape as the real
-    thing, or it won't exercise the axis handling whose whole job is closing them.
+# Rolltape's interval names onto Twelve Data's. The two grids agree on every step the
+# interface offers, which is most of why this provider was chosen: intraday stops being a
+# feature only one source can serve.
+TWELVEDATA_INTERVALS = {"1d": "1day", "1m": "1min", "5m": "5min",
+                        "15m": "15min", "30m": "30min", "1h": "1h"}
+
+# The endpoint truncates a response to `outputsize`, capped at 5000. A `max` daily range is
+# roughly three times that, so long windows arrive in pages.
+TWELVEDATA_PAGE = 5000
+
+# A page that comes back full means there is probably more behind it. The ceiling is a
+# guard against a paging bug turning into an unbounded request loop against a metered API,
+# not a real limit — 12 pages is 60,000 bars, well past two centuries of daily closes.
+TWELVEDATA_MAX_PAGES = 12
+
+
+def _twelvedata_page(params):
+    """One page of bars, newest first. Returns the raw row dicts."""
+    url = f"{TWELVEDATA_URL}?{urllib.parse.urlencode(params)}"
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8", "replace"))
+
+    # Failures arrive as HTTP 200 with a status field, so the response code proves nothing
+    # and the body has to be read either way. The rate limit is worth naming separately:
+    # on the free tier it is the error anyone actually hits, and "wait a minute" is a
+    # different instruction from "check the symbol".
+    if not isinstance(payload, dict):
+        raise ValueError("unexpected response shape")
+    if payload.get("status") == "error":
+        message = payload.get("message") or "request rejected"
+        if payload.get("code") == 429:
+            raise RuntimeError(f"rate limit reached — {message}")
+        raise ValueError(message)
+    return payload.get("values") or []
+
+
+def _twelvedata_frame(rows):
+    """Row dicts of strings into the shared OHLCV contract."""
+    df = pd.DataFrame(rows)
+    df.index = pd.to_datetime(df.pop("datetime"))
+    # Volume is absent for some instruments rather than zero. Nothing here divides by it,
+    # and dropping the row instead would throw away a perfectly good price.
+    if "volume" not in df:
+        df["volume"] = 0.0
+    df = df.rename(columns={c: c.capitalize() for c in df.columns})
+    for col in COLUMNS:
+        if col not in df:
+            raise ValueError(f"missing {col} in the response")
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df[COLUMNS]
+
+
+def _twelvedata(ticker, start, end=None, interval=DEFAULT_INTERVAL):
+    """OHLCV from Twelve Data — the licensed feed, and the preferred source.
+
+    Paged newest-first on purpose. With a range that overflows `outputsize` the only
+    well-defined reading of a truncated response is "the most recent N"; asking oldest-first
+    and keeping what arrives would end a `max` chart two decades short and look fine doing
+    it. Each page then asks for everything before the oldest bar the last one returned.
+
+    Unverified and worth checking with a key in hand: how this feed adjusts for dividends
+    and splits. `_yahoo` asks for both, Stooq does its own thing, and the three disagreeing
+    changes the total return a chart narrates — which is the whole of roadmap item 7. Until
+    someone has compared them, the footer naming the source is what covers it.
     """
-    open_at = pd.Timedelta(hours=SESSION_OPEN[0], minutes=SESSION_OPEN[1])
-    close_at = pd.Timedelta(hours=SESSION_CLOSE[0], minutes=SESSION_CLOSE[1])
-    # Bars are labelled by the time they open, so the last one starts before the close.
-    parts = [pd.date_range(d + open_at, d + close_at, freq=step, inclusive="left")
-             for d in pd.bdate_range(start, end)]
-    return parts[0].append(parts[1:]) if parts else pd.DatetimeIndex([])
+    if not config.TWELVEDATA_KEY:
+        raise RuntimeError("no API key — set ROLLTAPE_TWELVEDATA_KEY")
+    grid = TWELVEDATA_INTERVALS.get(interval)
+    if not grid:
+        raise ValueError(f"interval {interval} is not on the Twelve Data grid")
 
+    start_ts = pd.Timestamp(start)
+    cursor = pd.Timestamp(end) if end else None
+    pages = []
 
-def _synthetic(ticker, start, end, interval=DEFAULT_INTERVAL):
-    """Deterministic fake OHLCV so the tool is testable without network."""
-    seed = int(hashlib.md5(ticker.upper().encode()).hexdigest()[:8], 16)
-    rng = np.random.default_rng(seed)
-    step = _spec(interval)["step"]
-    idx = _session_index(start, end, step) if step else pd.bdate_range(start, end)
-    n = len(idx)
-    if n < 2:
-        raise ValueError("Date range is too short.")
+    for _ in range(TWELVEDATA_MAX_PAGES):
+        params = {"symbol": ticker, "interval": grid, "apikey": config.TWELVEDATA_KEY,
+                  "start_date": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                  "outputsize": TWELVEDATA_PAGE, "order": "DESC", "format": "JSON",
+                  # Exchange-local wall clock, which is what _yahoo also keeps: a bar
+                  # should read 09:30 at the opening bell wherever the render runs.
+                  "timezone": "Exchange"}
+        if cursor is not None:
+            params["end_date"] = cursor.strftime("%Y-%m-%d %H:%M:%S")
 
-    drift = rng.normal(0.0007, 0.0007)
-    vol = rng.uniform(0.011, 0.028)
-    if step:
-        # These are per-day figures. A bar covering a fraction of a session moves by a
-        # fraction of that, or 390 five-minute bars compound into nonsense.
-        per_session = max(int(pd.Timedelta("6h30min") / pd.Timedelta(step)), 1)
-        drift /= per_session
-        vol /= np.sqrt(per_session)
-    close = (20 + seed % 400) * np.exp(np.cumsum(rng.normal(drift, vol, n)))
+        rows = _twelvedata_page(params)
+        if not rows:
+            break
+        page = _twelvedata_frame(rows)
+        pages.append(page)
+        if len(page) < TWELVEDATA_PAGE:
+            break
+        # One second earlier, so the oldest bar of this page isn't served again as the
+        # newest of the next. `end_date` is inclusive.
+        cursor = page.index.min() - pd.Timedelta(seconds=1)
+        if cursor <= start_ts:
+            break
 
-    prev = np.concatenate([[close[0]], close[:-1]])
-    open_ = prev * (1 + rng.normal(0, vol * 0.3, n))
-    hi = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, vol * 0.5, n)))
-    lo = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, vol * 0.5, n)))
-    vol_shares = rng.lognormal(15.5, 0.4, n)
+    if not pages:
+        raise ValueError("no rows returned")
 
-    return pd.DataFrame(
-        {"Open": open_, "High": hi, "Low": lo, "Close": close, "Volume": vol_shares},
-        index=idx,
-    )
+    df = pd.concat(pages).dropna()
+    # Pages overlap at their seams when a bar lands on the boundary, and they arrive
+    # newest-first while every renderer expects the opposite.
+    return df[~df.index.duplicated()].sort_index()
 
 
 def _stooq_symbol(ticker):
@@ -392,18 +480,15 @@ def fetch(ticker: str, start: str, end: str | None = None,
           interval: str = DEFAULT_INTERVAL, sessions: int | None = None) -> pd.DataFrame:
     """Return a DataFrame indexed by timestamp with Open/High/Low/Close/Volume.
 
-    For daily bars: Yahoo first, Stooq second. Yahoo breaks whenever it changes its
-    endpoints, and a failed render is worse than one drawn from a second-choice source.
-    For intraday there is no second choice — see _sources_for.
+    Twelve Data first when a key is configured, then Yahoo, then Stooq. Each of the two
+    below the licensed feed exists because the one above it breaks: Yahoo whenever it moves
+    its endpoints, Twelve Data whenever a monthly quota runs out. A failed render is worse
+    than one drawn from a second-choice source — but see _sources_for for the two cases
+    where there is deliberately no second choice.
     """
     ticker = ticker.strip().upper()
     if not ticker:
         raise ValueError("Empty ticker.")
-
-    if _DEMO:
-        _SOURCES[ticker] = "demo"
-        end = end or pd.Timestamp.today().normalize()
-        return _usable(_synthetic(ticker, start, end, interval), sessions)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     cached, source = _find_cached(ticker, start, end, interval)
@@ -413,7 +498,7 @@ def fetch(ticker: str, start: str, end: str | None = None,
             _SOURCES[ticker] = source
             return _usable(df, sessions)
 
-    fetchers = {"yahoo": _yahoo, "stooq": _stooq}
+    fetchers = {"twelvedata": _twelvedata, "yahoo": _yahoo, "stooq": _stooq}
     problems = []
     for source in _sources_for(interval):  # preference order, as in _find_cached
         try:
@@ -429,9 +514,15 @@ def fetch(ticker: str, start: str, end: str | None = None,
         _SOURCES[ticker] = source
         return trimmed
 
+    if not problems:  # nothing was even eligible to try
+        raise ValueError(
+            f"No data for {ticker}: no source is configured for {interval} bars. "
+            "Set ROLLTAPE_TWELVEDATA_KEY, or clear ROLLTAPE_LICENSED_ONLY to allow the "
+            "fallback sources.")
+
     detail = "; ".join(problems)
     if is_intraday(interval):
-        detail += ". Intraday is Yahoo-only — Stooq serves daily bars and coarser"
+        detail += ". Intraday needs Twelve Data or Yahoo — Stooq serves daily and coarser"
     raise ValueError(f"No data for {ticker} ({detail}).")
 
 

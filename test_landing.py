@@ -17,10 +17,10 @@ from unittest import mock
 
 import app
 import config
-import data
 import examples as showcase
 import renderers
 import signups
+import testsupport
 
 
 class RoutingTests(unittest.TestCase):
@@ -75,16 +75,12 @@ class LandingContentTests(unittest.TestCase):
             body = self.client.get("/landing").data.decode()
         self.assertIn("https://demo.example.com", body)
 
-    def test_demo_mode_is_disclosed(self):
-        with mock.patch.object(data, "is_demo", return_value=True):
-            body = self.client.get("/landing").data.decode()
-        self.assertIn("Demo data", body)
-        self.assertIn("generated, not real", body)
-
-    def test_nothing_claims_demo_data_on_a_live_instance(self):
-        with mock.patch.object(data, "is_demo", return_value=False):
-            body = self.client.get("/landing").data.decode()
-        self.assertNotIn("Demo data", body)
+    def test_the_page_never_offers_to_show_generated_prices(self):
+        # The landing page used to disclose a generated-data instance. There is no such
+        # instance any more — the app has no path to invented prices at all — so the
+        # disclosure would now be describing something that cannot happen.
+        self.assertNotIn("Demo data", self.body)
+        self.assertNotIn("generated, not real", self.body)
 
 
 class ExampleStillTests(unittest.TestCase):
@@ -94,12 +90,10 @@ class ExampleStillTests(unittest.TestCase):
         patcher = mock.patch.object(config, "EXAMPLES_DIR", self.dir)
         patcher.start()
         self.addCleanup(patcher.stop)
-        # Generated prices, so the tests that really draw need no network. set_demo()
-        # rather than a patched is_demo(): the fetch reads the module flag, not the
-        # accessor, so patching the accessor would leave it calling Yahoo.
-        was_demo = data.is_demo()
-        data.set_demo(True)
-        self.addCleanup(data.set_demo, was_demo)
+        # Generated prices, so the tests that really draw need no network. This patches
+        # data.fetch itself, which is the seam the renderers go through — anything shallower
+        # would leave the showcase stills calling out to a real feed.
+        testsupport.patch_fetch(self)
 
     def test_an_unknown_example_is_a_404(self):
         self.assertEqual(self.client.get("/examples/nope.png").status_code, 404)

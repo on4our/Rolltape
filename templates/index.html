@@ -77,7 +77,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .slate button:hover{color:var(--indigo);border-bottom-color:var(--indigo)}
 .slate button:focus-visible{outline:2px solid var(--indigo);outline-offset:2px}
 
-/* Only shown on a demo instance, where the visitor is someone deciding whether to buy.
+/* Only shown on a public instance, where the visitor is someone deciding whether to buy.
    A local install belongs to someone who already has it, so it stays out of their way. */
 .pricelink{
   font-size:13px;color:var(--muted);text-decoration:none;
@@ -331,7 +331,6 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
 
 <div class="topbar">
   <div class="wordmark">Roll<span>·</span>tape</div>
-  <div class="pill warn" id="demoPill" hidden>Demo data</div>
   <div class="slate" id="slate">
     <button type="button" id="resBtn">—</button> ·
     <button type="button" id="fpsBtn">—</button> ·
@@ -590,8 +589,7 @@ const CUSTOM = "custom";
 fetch("/api/meta").then(r=>r.json()).then(m=>{
   state.meta = m;
   applyTier();
-  $("#demoPill").hidden = !m.demo;
-  $("#pricingLink").hidden = !m.demo;
+  $("#pricingLink").hidden = !m.public;
   $("#modes").innerHTML = m.charts.map(c=>`
     <button class="mode" data-id="${c.id}" aria-pressed="${c.id===state.chart}">
       <div class="mode-name">${c.label}</div>

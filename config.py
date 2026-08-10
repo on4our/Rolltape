@@ -23,9 +23,21 @@ CACHE_DIR = _path("ROLLTAPE_CACHE_DIR", ".cache")
 # Brand kits are the one bit of state meant to outlive a restart. See presets.py.
 PRESETS_PATH = _path("ROLLTAPE_PRESETS", "presets.json")
 
-# --demo still works and wins over this. The env var is for hosts with no CLI, and it is
-# also how a render subprocess inherits demo mode from the server that spawned it.
-DEMO = _flag("ROLLTAPE_DEMO")
+# --- the price feed --------------------------------------------------------
+# The licensed source. Set it and Twelve Data answers first; leave it unset and the app
+# falls back to the scraped sources exactly as it always did, which is what keeps a fresh
+# clone useful before anyone has signed up for anything.
+#
+# The render subprocess inherits this from the environment it is spawned into, so there is
+# nothing to hand across the process boundary.
+TWELVEDATA_KEY = (os.environ.get("ROLLTAPE_TWELVEDATA_KEY") or "").strip()
+
+# Refuse the scraped sources entirely. yfinance scrapes Yahoo and Stooq's terms are no
+# better, so neither can be behind data shown to someone who paid for it — a deployment
+# that takes money sets this, and a missing key then fails the render instead of quietly
+# reaching for Yahoo and putting the licence question back. Off by default: a laptop
+# rendering for its owner is the case the fallbacks exist for.
+LICENSED_ONLY = _flag("ROLLTAPE_LICENSED_ONLY")
 
 # --- the public face -------------------------------------------------------
 # Off by default, so a local run still gets the app on "/" and never sees a marketing
