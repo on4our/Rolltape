@@ -827,5 +827,193 @@ class FooterTests(unittest.TestCase):
         self.assertIsNone(data.attribution())
 
 
+# A trimmed but faithful sample of each FMP event endpoint. Both splits inside one response
+# so the window trim has something to remove, and a dividend from outside it for the same
+# reason — these endpoints answer with a count rather than a range.
+FMP_SPLITS_JSON = json.dumps([
+    {"symbol": "NVDA", "date": "2024-06-10", "numerator": 10, "denominator": 1},
+    {"symbol": "NVDA", "date": "2021-07-20", "numerator": 4, "denominator": 1},
+])
+
+FMP_DIVIDENDS_JSON = json.dumps([
+    {"symbol": "NVDA", "date": "2024-06-11", "dividend": 0.01, "adjDividend": 0.01},
+    {"symbol": "NVDA", "date": "2023-03-08", "dividend": 0.04, "adjDividend": 0.004},
+])
+
+FMP_EARNINGS_JSON = json.dumps([
+    {"symbol": "NVDA", "date": "2024-05-22", "epsActual": 6.12, "epsEstimated": 5.59},
+    {"symbol": "NVDA", "date": "2024-02-21", "epsActual": 5.16, "epsEstimated": 4.64},
+])
+
+# Twelve Data keys its rows under the endpoint name rather than "values", and states a split
+# as the two factors rather than one ratio.
+TWELVEDATA_SPLITS_JSON = json.dumps({"splits": [
+    {"date": "2024-06-10", "from_factor": 1, "to_factor": 10},
+]})
+
+TWELVEDATA_DIVIDENDS_JSON = json.dumps({"dividends": [
+    {"ex_date": "2024-06-11", "amount": 0.01},
+]})
+
+
+class CorporateEventTests(unittest.TestCase):
+    """The dated events the timeline chart marks by itself.
+
+    Same no-network rule as everything else here: the endpoints answer from recorded
+    samples, and yfinance is never installed far enough to be reached. What these are
+    really about is the two rules that make an automatic callout trustworthy — a kind
+    arrives whole from one source or not at all, and a lookup that fails costs the marks
+    rather than the render.
+    """
+
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        patcher = mock.patch.object(data, "CACHE_DIR", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.cache, True)
+
+    def test_fmp_splits_carry_their_ratio(self):
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_SPLITS_JSON)):
+            rows = data.events("NVDA", "2024-01-01", "2024-12-31", ["splits"])
+        self.assertEqual(rows, [{"date": "2024-06-10", "kind": "splits",
+                                 "label": "10-for-1 split"}])
+
+    def test_fmp_dividends_carry_their_amount(self):
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_DIVIDENDS_JSON)):
+            rows = data.events("NVDA", "2024-01-01", "2024-12-31", ["dividends"])
+        self.assertEqual([r["label"] for r in rows], ["Dividend $0.01"])
+
+    def test_an_earnings_row_is_labelled_as_itself(self):
+        # Deliberately not "Q2 earnings": the reporting date is in the quarter after the
+        # one being reported, and a fiscal year that doesn't follow the calendar makes the
+        # arithmetic wrong in a way nobody would check. The date carries the meaning.
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_EARNINGS_JSON)):
+            rows = data.events("NVDA", "2024-01-01", "2024-12-31", ["earnings"])
+        self.assertEqual([r["label"] for r in rows], ["Earnings", "Earnings"])
+        self.assertEqual([r["date"] for r in rows], ["2024-02-21", "2024-05-22"])
+
+    def test_events_outside_the_window_are_dropped(self):
+        # FMP answers with a count rather than a range, so the trim is local — and a 2021
+        # split drawn onto a 2024 chart would land on the first bar of it.
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_SPLITS_JSON)):
+            rows = data.events("NVDA", "2024-01-01", "2024-12-31", ["splits"])
+        self.assertEqual(len(rows), 1)
+
+    def test_twelvedata_keys_its_rows_under_the_endpoint_name(self):
+        with _with_key(), mock.patch.object(config, "FMP_KEY", ""), \
+             mock.patch("urllib.request.urlopen",
+                        _urlopen_returning(TWELVEDATA_SPLITS_JSON)):
+            rows = data.events("NVDA", "2024-01-01", "2024-12-31", ["splits"])
+        self.assertEqual([r["label"] for r in rows], ["10-for-1 split"])
+
+    def test_twelvedata_dividends_read_the_ex_date(self):
+        with _with_key(), mock.patch.object(config, "FMP_KEY", ""), \
+             mock.patch("urllib.request.urlopen",
+                        _urlopen_returning(TWELVEDATA_DIVIDENDS_JSON)):
+            rows = data.events("NVDA", "2024-01-01", "2024-12-31", ["dividends"])
+        self.assertEqual(rows, [{"date": "2024-06-11", "kind": "dividends",
+                                 "label": "Dividend $0.01"}])
+
+    def test_a_kind_is_never_assembled_from_two_sources(self):
+        """A source that fails is passed over entirely rather than contributed from.
+
+        Half of FMP's splits plus half of Twelve Data's would be a set that is complete
+        from neither and looks authoritative anyway. That is the same failure as labelling
+        daily bars five-minute, in a place nobody would think to check.
+        """
+        with _with_fmp(), _with_key(), \
+             mock.patch.object(data, "_fmp_events", side_effect=ValueError("down")), \
+             mock.patch.object(data, "_twelvedata_events",
+                               return_value=[{"date": "2024-06-10", "kind": "splits",
+                                              "label": "10-for-1 split"}]):
+            rows = data.events("NVDA", "2024-01-01", "2024-12-31", ["splits"])
+        self.assertEqual([r["label"] for r in rows], ["10-for-1 split"])
+
+    def test_an_empty_answer_is_an_answer(self):
+        # A company that has never split has no splits. Falling through to a second source
+        # would spend another call to be told the same thing.
+        with _with_fmp(), _with_key(), \
+             mock.patch.object(data, "_fmp_events", return_value=[]), \
+             mock.patch.object(data, "_twelvedata_events",
+                               side_effect=AssertionError("asked anyway")):
+            self.assertEqual(data.events("NVDA", "2024-01-01", "2024-12-31", ["splits"]), [])
+
+    def test_every_source_failing_costs_the_marks_and_not_the_render(self):
+        # The opposite of what fetch() does, and deliberate: a chart without its prices is
+        # nothing, but a chart whose earnings lookup timed out is the chart that was asked
+        # for, missing an overlay.
+        with _with_fmp(), \
+             mock.patch.object(data, "_fmp_events", side_effect=ValueError("down")), \
+             mock.patch.object(data, "_yahoo_events", side_effect=ValueError("down")):
+            self.assertEqual(data.events("NVDA", "2024-01-01", "2024-12-31",
+                                         ["splits", "earnings"]), [])
+
+    def test_stooq_is_never_asked_for_events(self):
+        # It is a price CSV and publishes none of this, so it drops out the same way it
+        # drops out for intraday.
+        self.assertNotIn("stooq", data._event_sources("2024-01-01"))
+
+    def test_the_plan_horizon_applies_to_events_too(self):
+        # A five-year plan is no better at reaching ten years back for an earnings date
+        # than it is for a price, and it comes up short the same silent way.
+        old = (pd.Timestamp.today() - pd.Timedelta(days=int(365.25 * 20))).strftime(
+            "%Y-%m-%d")
+        with _with_fmp():
+            self.assertNotIn("fmp", data._event_sources(old))
+            self.assertIn("fmp", data._event_sources("2024-01-01"))
+
+    def test_asking_for_nothing_makes_no_request(self):
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     side_effect=AssertionError("asked anyway")):
+            self.assertEqual(data.events("NVDA", "2024-01-01", "2024-12-31", []), [])
+
+    def test_an_unknown_kind_is_ignored_rather_than_fetched(self):
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     side_effect=AssertionError("asked anyway")):
+            self.assertEqual(data.events("NVDA", "2024-01-01", "2024-12-31",
+                                         ["buybacks"]), [])
+
+    def test_a_second_call_comes_off_the_cache(self):
+        # Every preview redraws the chart, so without this a keystroke would spend a call
+        # against a metered API.
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_SPLITS_JSON)):
+            first = data.events("NVDA", "2024-01-01", "2024-12-31", ["splits"])
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     side_effect=AssertionError("asked again")):
+            self.assertEqual(data.events("NVDA", "2024-01-01", "2024-12-31", ["splits"]),
+                             first)
+
+    def test_the_event_cache_does_not_collide_with_the_price_cache(self):
+        """`_drop_superseded` globs the price cache and must not sweep these up.
+
+        It deletes every file matching one range's key, so an events file landing inside
+        that pattern would be retired as a stale price frame — refetched on every render,
+        against a metered API, with nothing to show for it.
+        """
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_SPLITS_JSON)):
+            data.events("NVDA", "2024-01-01", None, ["splits"])
+        before = os.listdir(self.cache)
+        data._drop_superseded("NVDA", "2024-01-01", None)
+        self.assertEqual(sorted(os.listdir(self.cache)), sorted(before))
+        self.assertTrue(any(f.endswith(".events.json") for f in before))
+
+    def test_a_malformed_row_is_skipped_rather_than_drawn(self):
+        body = json.dumps([
+            {"date": "2024-06-10", "numerator": 10, "denominator": 1},
+            {"date": None, "numerator": 2, "denominator": 1},        # no date
+            {"date": "2024-07-01"},                                   # no ratio
+        ])
+        with _with_fmp(), mock.patch("urllib.request.urlopen", _urlopen_returning(body)):
+            rows = data.events("NVDA", "2024-01-01", "2024-12-31", ["splits"])
+        self.assertEqual([r["date"] for r in rows], ["2024-06-10"])
+
+
 if __name__ == "__main__":
     unittest.main()

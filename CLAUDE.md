@@ -29,7 +29,8 @@ app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
 renderers.py    Six chart types + themes + easing + camera + ffmpeg export
 data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, CSV cache,
-                and the symbol search behind the ticker field
+                the corporate events the timeline marks by itself, and the symbol search
+                behind the ticker field
 config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
@@ -112,7 +113,7 @@ missing from it is silently untested rather than failing.
 ## Tests
 
 ```bash
-python -m unittest              # all 262, about 20 seconds
+python -m unittest              # all 302, about 20 seconds
 python -m unittest test_camera  # one module
 ```
 
@@ -134,8 +135,9 @@ path instead of a test-only one.
 - `test_app.py` — `clean_config()`, every input the interface can send; the pricing page's
   numbers against `docs/pricing.md`; and the error page's HTML-versus-JSON split.
 - `test_data.py` — the four-source fallback order, FMP and Twelve Data parsing, the plan
-  horizon, range presets, cache freshness, attribution.
-- `test_render.py` — the export path: backgrounds, date labelling, stills, every theme.
+  horizon, range presets, cache freshness, attribution, and the corporate-event lookup.
+- `test_render.py` — the export path: backgrounds, date labelling, stills, every theme, and
+  the timeline's callout layout.
 - `test_camera.py` — the planned limits behind each move.
 - `test_render_job.py` — the two-process protocol, the inherited cache, and preview latency
   under load.
@@ -195,6 +197,29 @@ recoverable and a wrong one that looks right is not:
   enforced client-side because the API gives no signal, so a plan upgrade means changing
   the env var or the ceiling silently stays wrong in the safe direction.
 
+**Corporate events fail soft, and never come half from one source.** `events()` is the
+lookup behind the timeline's automatic callouts — earnings, splits and dividends, declared
+in `EVENT_KINDS`. It reuses the price order through `_event_sources()` rather than beside
+it, so the key checks, `LICENSED_ONLY` and the plan horizon all still apply; Stooq drops out
+because it is a price CSV and publishes none of this. Two rules hold, and they pull in
+opposite directions from `fetch` on purpose:
+
+- *A kind arrives whole from one source or not at all.* A source that raises is passed over
+  entirely rather than contributed from. Half of one feed's earnings dates plus half of
+  another's is a set complete from neither that looks authoritative anyway — the same class
+  of failure as labelling daily bars five-minute, somewhere nobody would check. An empty
+  answer is a real answer: a company that never split has no splits.
+- *A failed lookup costs the marks, not the render.* The opposite of what `fetch` does, and
+  the reason is the same one: a chart without its prices is nothing, but a chart whose
+  earnings lookup timed out is the chart that was asked for, missing an overlay. Failing the
+  job over it would trade a recoverable outcome for one that isn't. `EVENT_TIMEOUT` is
+  shorter than a price fetch's for the same reason the search's is shorter still — this runs
+  inside `/api/preview`, on `DRAW_LOCK`.
+
+Events cache to disk beside the prices but outside `_drop_superseded`'s glob, which matches
+on `SYMBOL_` and would otherwise retire them as stale price frames — hence the dot in
+`_events_path`. A test pins that.
+
 **The footer names whichever sources actually answered**, all of them when a render mixed
 sources, because a comparison chart pulling one ticker from a fallback is exactly when a
 single label would be a lie. Yahoo is the one that stays silent: nobody to credit, and
@@ -234,6 +259,33 @@ clip isn't swallowed by it, and closed over the last quarter so the final frame 
 chart a lagged and an unlagged render both end on. `none` is the default and reproduces
 the pre-lag output exactly. A renderer opts in by drawing its averages from that second
 array rather than from `cut`; drawing them from `cut` is how they keep pace.
+
+**Callouts.** `plan_callouts()` gives every timeline callout a row and a text anchor before
+the first frame, and `timeline_notes()` is what feeds it — the looked-up events merged with
+the typed ones, a typed callout on the same bar replacing the event it lands on. Planned
+rather than accumulated, for the reason the camera is: `still=` asks for frame 200 without
+drawing the 199 before it, and a layout that re-solved itself as the camera moved would also
+make labels jump rows mid-shot. Three things are load-bearing:
+
+- **Nothing is dropped; only the text thins.** Every event keeps its dot and stem, and a
+  label that has nowhere to go is simply not written. A chart showing four of a year's eight
+  earnings dates would read as the complete set — and since every one of those labels says
+  the same word, losing some of the text loses no information at all.
+- **The collision test is a rectangle, not a column.** A row is a lift above each callout's
+  *own* point rather than a shared height, so two labels one row apart whose prices differ
+  by that same lift land on exactly the same line. A horizontal-only check misses precisely
+  the overlap that shows up on a real chart.
+- **The frame is sized before the layout, never from it.** The timeline pads its top when it
+  has callouts at all, because they lift off their own points and the top row would land
+  outside the frame otherwise. Deriving that padding from how the rows came out would be
+  circular — the layout is solved against the frame. A timeline with no callouts keeps
+  exactly the framing it always had, and a test pins that.
+
+Label widths are estimated from character counts rather than measured, because measuring
+needs a draw and this settles before the first frame. `_CHAR_W` over-estimates deliberately:
+too wide costs a label that would have fitted, too narrow costs an overlap. `CALLOUT_RANK`
+decides who wins a contested spot — typed, then split, then dividend, then earnings, which
+is specific-before-repeated.
 
 **Motion.** `ease()` maps normalised time to progress; `_plan()` maps frame index to a
 position along a densely-interpolated series. Series are upsampled to ~2x the frame count
@@ -438,7 +490,7 @@ draining the queue is still what bounds CPU, not the lock.
   rather than a rewrite.
 - Neither licensed feed's dividend and split adjustment has been compared against Yahoo or
   Stooq. Same class of discrepancy the README warns about for Yahoo versus Stooq, and the
-  same thing roadmap item 7 is about — but unmeasured rather than merely unexposed, so
+  same thing roadmap item 6 is about — but unmeasured rather than merely unexposed, so
   check it before narrating a total return off a licensed render.
 - The Twelve Data paging loop is capped at `TWELVEDATA_MAX_PAGES`. That ceiling is a guard
   against a paging bug becoming an unbounded request loop against a metered API, not a real
@@ -466,6 +518,23 @@ draining the queue is still what bounds CPU, not the lock.
 - Charts with moving averages cache separately from the same chart without them, because
   the run-up fetch changes the start date and so the cache key. Harmless, just surprising
   if you're watching `.cache/`.
+- **The event parsers are written to documented response shapes, not to captured ones.**
+  Every other fetcher in `data.py` was built with a real response in front of it; these
+  three were not, which is why `_pick` accepts several spellings per field and a row that
+  can't be read is skipped rather than raised over. The failure mode is therefore quiet —
+  an endpoint that renamed a field gives an empty set, which is indistinguishable from a
+  company that has never split. Worth one look at a live response per provider before
+  anyone leans on these.
+- **A dividend label is the cash amount, unadjusted.** `_dividend_label` prints what the
+  feed returned, and FMP carries `adjDividend` alongside `dividend` for exactly the reason
+  the README warns about elsewhere — a pre-split chart marked with post-split amounts is
+  the same class of discrepancy as roadmap item 6, one layer down.
+- Auto callouts are on the timeline chart only. The line chart has the same shape and could
+  carry them, but it also has the live price readout in the same corner the labels lift
+  into, so it wants a layout decision rather than a registry entry.
+- The three kinds are fetched one request each, on the render *and* on the preview that
+  precedes it. The disk cache means that's once per window rather than per keystroke, but
+  a first preview with all three on is three round trips before a frame is drawn.
 - Moving averages are only on the line, candlestick and timeline charts. Comparison and
   race draw several tickers already, and averages on top would be unreadable.
 
@@ -483,10 +552,8 @@ Near term, in rough priority order.
    known rough edge for where the time really goes.
 4. Reload a past render's config from the queue. Jobs already carry their `cfg`; the UI
    just can't reach it, so "same chart, but AMD" means retyping everything.
-5. Auto-annotations on the timeline chart — earnings dates and splits from the data
-   source, rather than typing every callout by hand.
-6. Benchmark overlay: draw SPY muted behind any single-ticker chart.
-7. Adjusted vs raw closes as an explicit choice. `auto_adjust=True` is hardcoded in
+5. Benchmark overlay: draw SPY muted behind any single-ticker chart.
+6. Adjusted vs raw closes as an explicit choice. `auto_adjust=True` is hardcoded in
    `_yahoo`, and Yahoo and Stooq adjust differently enough to change the total return
    being narrated — see the note in the README.
 
@@ -496,8 +563,10 @@ averages, the encoder preset (`final` moved from `slow` to `medium`, with an
 Auto/Faster/Slower override in the UI), brand kits, the landing page with email
 capture — step 3 of docs/acquisition.md's sequencing, which leaves the demo instance
 above it as a deploy rather than a code change — the licensed price feed, which was the
-one hard blocker in front of charging anybody, and symbol suggestions in the ticker field
-with `/api/series` behind them.
+one hard blocker in front of charging anybody, symbol suggestions in the ticker field
+with `/api/series` behind them, and the timeline's automatic callouts: earnings, splits and
+dividends looked up per kind through `data.events()`, laid out by `plan_callouts()`, and
+merged with the typed ones rather than replacing them.
 
 ### Cinematography — transitions
 

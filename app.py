@@ -163,6 +163,27 @@ def ma_periods(raw):
     return sorted(out)[:3]
 
 
+def event_kinds(raw):
+    """Which corporate events the timeline marks by itself.
+
+    A typo raises rather than being dropped the way `ma_periods` drops one. These arrive
+    from a fixed set of checkboxes rather than a free-text field, so a name that isn't one
+    of them is a caller's mistake — and the failure it would otherwise cause is silent:
+    marks that never appear, on a chart that renders fine, with nothing saying why.
+    """
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    out = []
+    for v in raw or []:
+        kind = str(v).strip().lower()
+        if kind not in datasrc.EVENT_KINDS:
+            allowed = ", ".join(datasrc.EVENT_KINDS)
+            raise ValueError(f"Auto callouts must be one of: {allowed}.")
+        if kind not in out:
+            out.append(kind)
+    return [k for k in datasrc.EVENT_KINDS if k in out]
+
+
 def clean_config(raw):
     chart = raw.get("chart", "line")
     spec = renderers.CHARTS.get(chart)
@@ -251,6 +272,10 @@ def clean_config(raw):
         "metric": raw.get("metric", "return"),
         "rows": raw.get("rows") or [],
         "annotations": raw.get("annotations") or [],
+        # Off by default, for the reason the camera is locked and the average lag is none:
+        # a config written before this existed renders exactly as it always did, and the
+        # marks are something you go and ask for. Typed callouts are unaffected either way.
+        "auto_annotations": event_kinds(raw.get("auto_annotations")),
         "unit": raw.get("unit", ""),
         "decimals": int(raw.get("decimals", 1) or 1),
         "transparent": bool(raw.get("transparent", False)),
@@ -420,6 +445,8 @@ def meta():
                    for k, v in datasrc.RANGES.items()],
         "cameras": [{"id": k, "label": v["label"], "desc": v["desc"]}
                     for k, v in renderers.CAMERAS.items()],
+        "event_kinds": [{"id": k, "label": v["label"], "desc": v["desc"]}
+                        for k, v in datasrc.EVENT_KINDS.items()],
         "travels": list(renderers.TRAVELS),
         "ma_lags": list(renderers.MA_LAGS),
         "sizes": {a: {str(r): list(s) for r, s in rs.items()}

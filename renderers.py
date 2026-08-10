@@ -1364,6 +1364,146 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
 # ---------------------------------------------------------------------------
 # 5. Annotated timeline
 # ---------------------------------------------------------------------------
+# Which callouts get first claim on the space. A typed one outranks everything: it is the
+# thing the feed couldn't know, and it is why someone opened the field. Below it, a label
+# that says something specific beats one that repeats — every earnings mark on a chart reads
+# "Earnings", so an earnings label is the one worth losing when two collide.
+CALLOUT_RANK = {"manual": 0, "splits": 1, "dividends": 2, "earnings": 3}
+
+CALLOUT_ROWS = 3       # heights a label can stack into before it goes unlabelled
+CALLOUT_BASE = 0.115   # the first row, as a share of the frame height above its point
+CALLOUT_STEP = 0.105   # and the gap up to the next
+CALLOUT_TICK = 0.045   # stem length for a mark that didn't get a label
+# A character's width as a share of the font size. Measured across the labels these charts
+# actually carry, the real figure runs 0.41–0.51 for anything long enough to collide, so
+# this over-estimates on purpose: too wide costs one label that would have fitted, too
+# narrow costs an overlap. Short labels are the other way (a two-character one measures
+# 0.67) but a shortfall of 0.003 of the axis disappears inside the gap below.
+_CHAR_W = 0.55
+_CALLOUT_GAP = 0.014   # clear space between two labels, as a share of the axis width
+
+
+def plan_callouts(notes, xlim, ylim, log, ctx, fontsize, rect):
+    """Give each callout a row and a text anchor, or no label when there is no room.
+
+    Sets `row`, `ha` and `frac` on each note in place, `row=None` meaning the mark is drawn
+    without its text. **Nothing is ever dropped** — the dot and stem go on every event, and
+    only the label thins out. That distinction is what makes the auto-annotations honest: a
+    chart showing four of a year's eight earnings dates would read as the complete set, and
+    since every one of those labels says the same word, losing some of the text loses no
+    information at all.
+
+    The test is against a rectangle rather than a column, because a row is a lift above each
+    callout's *own* point rather than a shared height. Two labels a row apart whose prices
+    differ by that same lift land on exactly the same line — which is what a purely
+    horizontal check misses, and it is the collision that actually shows up on a chart.
+
+    Planned once against the resting frame rather than per frame, for the same reason the
+    camera is: `still=` asks for frame 200 without drawing the 199 before it. A layout that
+    re-solved itself as the camera changed the visible span would also make labels jump rows
+    mid-move, which reads as a bug rather than as a camera.
+
+    Label widths are estimated from character counts rather than measured, because measuring
+    needs a draw and this has to settle before the first frame. `ctx.s` cancels out of the
+    arithmetic — a 720p draft puts the same share of the frame under a label as a 1080p
+    final does, which is the whole job of the scale factor.
+    """
+    x0, x1 = xlim
+    y0, y1 = ylim
+    span = (x1 - x0) or 1.0
+    axis_w = ctx.w / ctx.dpi * 72.0 * rect[2]
+    axis_h = ctx.h / ctx.dpi * 72.0 * rect[3]
+    line_h = 1.3 * fontsize / axis_h
+
+    def height(v):
+        """Where a price sits in the resting frame — 0 at the bottom edge, 1 at the top."""
+        if log:
+            return float(np.log(v / y0) / (np.log(y1 / y0) or 1.0))
+        return float((v - y0) / ((y1 - y0) or 1.0))
+
+    placed = []
+    for note in sorted(notes, key=lambda n: (CALLOUT_RANK.get(n["kind"], 9), n["x"])):
+        pos = (note["x"] - x0) / span
+        w = _CHAR_W * fontsize * len(note["label"]) / axis_w + _CALLOUT_GAP
+        # Anchored away from whichever edge it would otherwise cross, so the first and last
+        # callout on a chart stay inside the frame instead of running off it.
+        if pos - w / 2 < 0:
+            note["ha"], lo = "left", pos
+        elif pos + w / 2 > 1:
+            note["ha"], lo = "right", pos - w
+        else:
+            note["ha"], lo = "center", pos - w / 2
+
+        base = height(note["y"])
+        note["row"] = None
+        for r in range(CALLOUT_ROWS):
+            bottom = base + CALLOUT_BASE + CALLOUT_STEP * r
+            # Rows only go up, so the first one that leaves the frame rules out the rest.
+            # A callout sitting at the top of the range keeps row zero and nothing above it.
+            if bottom + line_h > 1.0:
+                break
+            box = (lo, lo + w, bottom, bottom + line_h)
+            if any(not (box[1] <= o[0] or box[0] >= o[1]
+                        or box[3] <= o[2] or box[2] >= o[3]) for o in placed):
+                continue
+            placed.append(box)
+            note["row"] = r
+            break
+        note["frac"] = (CALLOUT_TICK if note["row"] is None
+                        else CALLOUT_BASE + CALLOUT_STEP * note["row"])
+    return notes
+
+
+def _note_x(date, df, x, intraday):
+    """Where a date lands on the axis, or None when it isn't on this chart.
+
+    On a positional axis a callout has to land on the bar it refers to, so the timestamp
+    resolves to the nearest one rather than to a coordinate.
+    """
+    try:
+        ts = pd.Timestamp(date)
+    except (ValueError, TypeError):
+        return None
+    if pd.isna(ts):
+        return None
+    d = (float(df.index.get_indexer([ts], method="nearest")[0]) if intraday
+         else mdates.date2num(ts.to_pydatetime()))
+    return d if x[0] <= d <= x[-1] else None
+
+
+def timeline_notes(cfg, df, x, y, intraday):
+    """Every callout the chart will carry — looked up and typed — resolved onto the axis.
+
+    The auto events are fetched first and a typed callout on the same bar replaces one,
+    rather than landing on top of it. Two labels on one date is the one collision the layout
+    cannot solve, and the field exists to say what the feed can't, so the typed one wins.
+
+    A failed lookup costs the marks and nothing else: `datasrc.events` swallows it and this
+    still returns whatever was typed. The alternative is failing a render over an overlay,
+    which trades a recoverable outcome for one that isn't.
+    """
+    win = datasrc.window(cfg)
+    found = datasrc.events(cfg["tickers"][0], win["start"], win.get("end"),
+                           cfg.get("auto_annotations") or [])
+
+    notes = {}
+    for row in found:
+        d = _note_x(row["date"], df, x, intraday)
+        if d is not None:
+            notes[d] = {"x": d, "label": row["label"], "kind": row["kind"]}
+    for a in cfg.get("annotations", []):
+        label = str(a.get("label", "")).strip()
+        if not a.get("date") or not label:
+            continue
+        d = _note_x(a["date"], df, x, intraday)
+        if d is not None:
+            notes[d] = {"x": d, "label": label, "kind": "manual"}
+
+    for note in notes.values():
+        note["y"] = float(np.interp(note["x"], x, y))
+    return sorted(notes.values(), key=lambda n: n["x"])
+
+
 def render_timeline(cfg, ctx, out, progress=None, still=None):
     tk = cfg["tickers"][0]
     intraday = _intraday(cfg)
@@ -1372,21 +1512,7 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     x = _x_values(df.index, intraday)
     y = df["Close"].to_numpy(float)
 
-    notes = []
-    for a in cfg.get("annotations", []):
-        if not a.get("date") or not str(a.get("label", "")).strip():
-            continue
-        try:
-            ts = pd.Timestamp(a["date"])
-            # On a positional axis a callout has to land on the bar it refers to, so the
-            # timestamp is resolved to the nearest one rather than to a coordinate.
-            d = (float(df.index.get_indexer([ts], method="nearest")[0]) if intraday
-                 else mdates.date2num(ts.to_pydatetime()))
-        except Exception:  # noqa: BLE001
-            continue
-        if x[0] <= d <= x[-1]:
-            notes.append((d, str(a["label"]).strip()))
-    notes.sort()
+    notes = timeline_notes(cfg, df, x, y, intraday)
 
     dense_n = max(int(cfg["duration"] * ctx.fps) * 2, 2000)
     xd, yd = _densify(x, y, dense_n)
@@ -1408,14 +1534,22 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
             cfg.get("subtitle")
             or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%{_scale_note(log)}",
             cfg.get("footer"))
-    ax = fig.add_axes(_plot_area(ctx, True))
+    rect = _plot_area(ctx, True)
+    ax = fig.add_axes(rect)
     _style_axes(ax, ctx, y_fmt=_money_axis(y.min(), y.max()), x_dates=not intraday,
                 log=log)
 
+    # A chart carrying callouts makes room for them, because they lift off their own points
+    # and the top row would otherwise land outside the frame. Keyed off whether there are
+    # any rather than off how they end up stacked: the layout is solved *against* this
+    # frame, so sizing the frame from the layout would be circular — and a timeline with no
+    # callouts keeps exactly the framing it has always had.
+    note_size = 15 * ctx.s
     pad = (y.max() - y.min()) * 0.18
+    rest_y = (y.min() - pad * 0.6, y.max() + pad * (1.45 if notes else 1.0))
+    plan_callouts(notes, (x[0], x[-1]), rest_y, log, ctx, note_size, rect)
     cam = Camera(cfg, ctx, x=xd, lo=yd, hi=yd, head=head_track(xd, cut, hold),
-                 n_frames=n_frames, hold_frames=hold,
-                 rest_y=(y.min() - pad * 0.6, y.max() + pad), log=log)
+                 n_frames=n_frames, hold_frames=hold, rest_y=rest_y, log=log)
     cam.apply(ax, 0)
     if intraday:
         _position_ticks(ax, ctx, df.index, ax.get_xlim())
@@ -1441,19 +1575,23 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     fill = [None]
 
     marks = []
-    for k, (d, lab) in enumerate(notes):
-        yv = float(np.interp(d, x, y))
-        row = k % 2  # alternate heights so neighbouring notes don't collide
+    for note in notes:
+        # Both from the note rather than re-derived: the planner solved the layout against
+        # this exact price, so a second interpolation here is a second chance to disagree.
+        d, yv = note["x"], note["y"]
         vl = ax.plot([d, d], [yv, yv], color=t["muted"], lw=1.2 * ctx.s,
                      ls=(0, (3, 3)), alpha=0, zorder=3)[0]
         dot = ax.plot([d], [yv], "o", color=t["text"], markersize=6 * ctx.s,
                       alpha=0, zorder=5)[0]
-        txt = ax.text(d, yv, lab, color=t["text"], fontsize=15 * ctx.s,
-                      ha="center", va="bottom", alpha=0, zorder=6)
+        # An unlabelled mark still gets its dot and a short stem. It is the one on a date
+        # too crowded to write on, not one the chart decided to leave out.
+        txt = (ax.text(d, yv, note["label"], color=t["text"], fontsize=note_size,
+                       ha=note["ha"], va="bottom", alpha=0, zorder=6)
+               if note["row"] is not None else None)
         # Frame at which the reveal head first crosses this date.
         trigger = int(np.searchsorted(cut, np.searchsorted(xd, d)))
-        marks.append({"x": d, "y": yv, "row": row, "vl": vl, "dot": dot, "txt": txt,
-                      "trigger": trigger})
+        marks.append({"x": d, "y": yv, "frac": note["frac"], "vl": vl, "dot": dot,
+                      "txt": txt, "trigger": trigger})
 
     fade_frames = max(int(0.28 * ctx.fps), 6)
 
@@ -1479,13 +1617,14 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
             if i < m["trigger"]:
                 continue
             a = float(ease("out", min((i - m["trigger"]) / fade_frames, 1.0)))
-            frac = 0.14 + 0.13 * m["row"]
-            ly = lift_to(m["y"], frac, i)
-            m["vl"].set_data([m["x"], m["x"]], [m["y"], ly])
+            frac = m["frac"]
+            m["vl"].set_data([m["x"], m["x"]], [m["y"], lift_to(m["y"], frac, i)])
             m["vl"].set_alpha(a * 0.9)
             m["dot"].set_alpha(a)
-            m["txt"].set_alpha(a)
-            m["txt"].set_position((m["x"], lift_to(m["y"], frac - 0.03 * (1 - a), i)))
+            if m["txt"] is not None:
+                m["txt"].set_alpha(a)
+                m["txt"].set_position((m["x"],
+                                       lift_to(m["y"], frac - 0.03 * (1 - a), i)))
         if cam.moving:
             # A date axis re-formats; a positional one re-labels. Same job either way —
             # the camera changed the visible span underneath the ticks.

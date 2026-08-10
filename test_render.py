@@ -512,5 +512,250 @@ class MaPeriodTests(unittest.TestCase):
         self.assertEqual(appmod.ma_periods(None), [])
 
 
+# Three years of quarterly reporting, a dividend a week after each, and the split — which
+# is deliberately more than any frame can label. The interesting cases all live at that
+# density, because two callouts on a wide chart would pass any layout at all.
+def _dense_events():
+    rows = []
+    for year in (2022, 2023, 2024):
+        for month, day in ((2, 21), (5, 22), (8, 23), (11, 20)):
+            rows.append({"date": f"{year}-{month:02d}-{day:02d}", "kind": "earnings",
+                         "label": "Earnings"})
+            rows.append({"date": f"{year}-{month:02d}-{day + 6:02d}", "kind": "dividends",
+                         "label": "Dividend $0.04"})
+    rows.append({"date": "2024-06-10", "kind": "splits", "label": "10-for-1 split"})
+    return rows
+
+
+class TimelineCalloutTests(GeneratedDataCase):
+    """Where the timeline's callouts land, and what happens when too many want one spot.
+
+    The properties rather than the pictures: that no two labels overlap, that a mark is
+    never silently dropped to make room, and that a chart which asks for none of this is
+    the chart it always was.
+    """
+
+    def setUp(self):
+        super().setUp()
+        testsupport.patch_events(self, _dense_events())
+
+    def cfg(self, **kw):
+        return appmod.clean_config({"chart": "timeline", "tickers": ["NVDA"],
+                                    "start": "2022-01-01", "end": "2024-12-31",
+                                    "duration": 1.0, "hold": 0.2, **kw})
+
+    def measure(self, at=1.0, aspect="16:9", **kw):
+        """Everything these tests read off one frame, with the figure closed again.
+
+        Measured in a single pass rather than by handing the figure back: pyplot keeps
+        every figure alive until something closes it, and the sweep below draws six.
+        """
+        cfg = self.cfg(**kw)
+        ctx = renderers.make_ctx(cfg["theme"], aspect, "final")
+        fig = renderers.CHARTS["timeline"]["fn"](cfg, ctx, None, still=at)
+        try:
+            r = fig.canvas.get_renderer()
+            ax = fig.axes[0]
+            # Faded-in callout text, which is what is on screen — not a title or a tick.
+            labels = [(t.get_text(), t.get_position()[1], t.get_window_extent(renderer=r))
+                      for t in ax.texts if t.get_text() and (t.get_alpha() or 0) > 0.05]
+            return {
+                "labels": labels,
+                "boxes": [box for _, _, box in labels],
+                # One dashed leader per callout, and nothing else here is dashed.
+                "stems": sum(1 for ln in ax.lines if ln.get_linestyle() == "--"),
+                "area": ax.get_window_extent(renderer=r),
+                "ylim": ax.get_ylim(),
+            }
+        finally:
+            renderers.plt.close(fig)
+
+    def test_no_two_callout_labels_overlap(self):
+        """The one that matters. Two labels on the same pixels is the whole failure mode.
+
+        A row is a lift above each callout's *own* point rather than a shared height, so
+        two labels one row apart whose prices differ by that lift land on the same line —
+        which is why the check is a rectangle and not a column, and why this sweeps the
+        aspects: a vertical frame has about a third of the width to fit them into.
+        """
+        for aspect in ("16:9", "9:16", "1:1"):
+            for at in (0.5, 1.0):
+                with self.subTest(aspect=aspect, at=at):
+                    boxes = self.measure(
+                        at=at, aspect=aspect,
+                        auto_annotations=["earnings", "splits", "dividends"])["boxes"]
+                    self.assertGreater(len(boxes), 3, "nothing was labelled at all")
+                    for i, a in enumerate(boxes):
+                        for b in boxes[i + 1:]:
+                            self.assertFalse(a.overlaps(b),
+                                             f"{a.bounds} overlaps {b.bounds}")
+
+    def test_a_crowded_date_loses_its_label_and_keeps_its_mark(self):
+        """Nothing is dropped — only the text thins out.
+
+        A chart showing four of a year's eight earnings dates would read as the complete
+        set. Since every one of those labels says the same word, losing some of the text
+        loses no information; losing a mark would lose the date itself.
+        """
+        kinds = ["earnings", "splits", "dividends"]
+        cfg = self.cfg(auto_annotations=kinds)
+        notes = renderers.timeline_notes(cfg, *self._frame(cfg), False)
+        drawn = self.measure(auto_annotations=kinds)
+        self.assertEqual(drawn["stems"], len(notes))
+        self.assertLess(len(drawn["labels"]), len(notes))
+
+    def _frame(self, cfg):
+        """The (df, x, y) a timeline render works from, for calling the planner directly."""
+        df, _ = renderers._fetch_with_ma(cfg["tickers"][0], cfg, [])
+        x = renderers._x_values(df.index, False)
+        return df, x, df["Close"].to_numpy(float)
+
+    def notes_for(self, **kw):
+        cfg = self.cfg(**kw)
+        return renderers.timeline_notes(cfg, *self._frame(cfg), False)
+
+    def test_a_typed_callout_replaces_the_looked_up_one_on_its_day(self):
+        # Two labels on one date is the collision the layout cannot solve, and the typed
+        # one is the thing the feed couldn't have known.
+        notes = self.notes_for(
+            auto_annotations=["splits"],
+            annotations=[{"date": "2024-06-10", "label": "Retail piles in"}])
+        self.assertEqual([n["label"] for n in notes], ["Retail piles in"])
+
+    def test_a_typed_callout_survives_alongside_the_looked_up_ones(self):
+        notes = self.notes_for(
+            auto_annotations=["splits"],
+            annotations=[{"date": "2023-05-25", "label": "AI narrative begins"}])
+        self.assertEqual(sorted(n["label"] for n in notes),
+                         ["10-for-1 split", "AI narrative begins"])
+
+    def test_an_event_outside_the_drawn_window_never_reaches_the_axis(self):
+        # The lookup is given the chart's window, but a moving average widens the frame
+        # behind it — so the drawn index is what decides, not the requested start.
+        notes = self.notes_for(start="2024-01-01", auto_annotations=["earnings"])
+        first = renderers.mdates.date2num(pd.Timestamp("2024-01-01").to_pydatetime())
+        self.assertTrue(notes)
+        self.assertTrue(all(n["x"] >= first for n in notes))
+
+    def test_off_by_default(self):
+        # Same contract as a locked camera and no average lag: a config written before this
+        # existed renders exactly as it always did.
+        self.assertEqual(self.cfg()["auto_annotations"], [])
+        self.assertEqual(self.notes_for(), [])
+
+    def test_a_timeline_with_no_callouts_keeps_its_old_framing(self):
+        # The headroom only appears when there is something to lift into it, so a chart
+        # that asks for no callouts is framed exactly as it was before they existed.
+        plain = self.measure()["ylim"]
+        rng = self._frame(self.cfg())[2]
+        pad = (rng.max() - rng.min()) * 0.18
+        self.assertAlmostEqual(plain[1], rng.max() + pad, places=4)
+        marked = self.measure(auto_annotations=["earnings"])["ylim"]
+        self.assertGreater(marked[1], plain[1])
+
+    def test_every_label_stays_inside_the_axes(self):
+        # A label anchored centre at the first or last bar hangs off the edge of the frame,
+        # which is why the planner picks the anchor rather than always centring.
+        for aspect in ("16:9", "9:16"):
+            with self.subTest(aspect=aspect):
+                drawn = self.measure(
+                    aspect=aspect, auto_annotations=["earnings", "splits", "dividends"])
+                area = drawn["area"]
+                for text, _, box in drawn["labels"]:
+                    self.assertGreaterEqual(round(box.x0), round(area.x0) - 1, text)
+                    self.assertLessEqual(round(box.x1), round(area.x1) + 1, text)
+
+    def test_callouts_arrive_as_the_reveal_reaches_them_and_never_leave(self):
+        """`still=` jumps to a frame without drawing the ones before it.
+
+        So the set on screen has to be decided by the frame index alone: it grows as the
+        head crosses each date and never loses one already landed. A layout that settled
+        as it went would hand the thumbnail export a different chart than the render, which
+        is the same property the camera is planned for.
+
+        Keyed on the callout's own x, because every earnings label says the same word.
+        """
+        def on_screen(at):
+            drawn = self.measure(at=at, auto_annotations=["earnings", "splits"])
+            return {round(box.x0 + box.width / 2) for _, _, box in drawn["labels"]}
+
+        early, late = on_screen(0.35), on_screen(1.0)
+        self.assertTrue(early)
+        self.assertLess(len(early), len(late))
+        self.assertEqual(on_screen(0.35), early)  # and the same frame twice agrees
+
+    def test_a_callout_the_head_has_not_reached_is_not_drawn_yet(self):
+        # The mark lands when the line arrives at it, so an early frame carries none of
+        # the dates still ahead of the reveal.
+        self.assertEqual(self.measure(at=0.02,
+                                      auto_annotations=["splits"])["labels"], [])
+
+
+class PlanCalloutTests(unittest.TestCase):
+    """The planner on its own, where a case can be built exactly rather than drawn."""
+
+    def plan(self, notes, ylim=(0.0, 100.0), log=False):
+        ctx = renderers.make_ctx("midnight", "16:9", "final")
+        return renderers.plan_callouts(notes, (0.0, 100.0), ylim, log, ctx, 15.0,
+                                       renderers._plot_area(ctx, True))
+
+    def note(self, x, y, label, kind="earnings"):
+        return {"x": x, "y": y, "label": label, "kind": kind}
+
+    def test_two_notes_on_the_same_spot_take_different_rows(self):
+        notes = self.plan([self.note(50, 50, "Earnings"), self.note(51, 50, "Earnings")])
+        self.assertEqual({n["row"] for n in notes}, {0, 1})
+
+    def test_a_note_at_the_top_of_the_data_still_gets_its_label(self):
+        # The renderer pads the frame above the highest close precisely so the bottom row
+        # fits there. 81 is where that padding puts it in a 0-100 frame, and a callout on
+        # the peak of the chart is the one nobody would accept losing.
+        self.assertEqual(self.plan([self.note(50, 81, "Earnings")])[0]["row"], 0)
+
+    def test_a_label_with_no_room_at_all_is_dropped_rather_than_pushed_off_frame(self):
+        # Rows only go up, so the first that leaves the frame rules out the rest. Text
+        # rendered outside the axes is worse than a mark that goes unlabelled.
+        self.assertIsNone(self.plan([self.note(50, 99.5, "Earnings")])[0]["row"])
+
+    def test_a_typed_callout_outranks_a_looked_up_one_for_the_space(self):
+        # Both want the same spot and only one can have the bottom row. The typed one is
+        # the thing that isn't repeated eight times across the chart.
+        notes = self.plan([self.note(50, 50, "Earnings", "earnings"),
+                           self.note(50.4, 50, "The squeeze begins", "manual")])
+        rows = {n["kind"]: n["row"] for n in notes}
+        self.assertEqual(rows["manual"], 0)
+        self.assertNotEqual(rows["earnings"], 0)
+
+    def test_a_split_outranks_an_earnings_label(self):
+        # "Earnings" is on the chart eight times over and says the same thing each time;
+        # a split ratio appears once and is the reason the price halved.
+        notes = self.plan([self.note(50, 50, "Earnings", "earnings"),
+                           self.note(50.4, 50, "10-for-1 split", "splits")])
+        self.assertEqual({n["kind"]: n["row"] for n in notes}["splits"], 0)
+
+    def test_labels_at_the_edges_are_anchored_inwards(self):
+        notes = self.plan([self.note(0, 50, "First bar"), self.note(100, 50, "Last bar")])
+        self.assertEqual([n["ha"] for n in notes], ["left", "right"])
+        self.assertEqual(self.plan([self.note(50, 50, "Middle")])[0]["ha"], "center")
+
+    def test_an_unlabelled_mark_keeps_a_short_stem(self):
+        # It is a date too crowded to write on, not one the chart left out, so it still
+        # reads as a mark rather than as a truncated callout. Four on one spot against
+        # three rows, so the fourth is guaranteed to miss out.
+        notes = self.plan([self.note(50 + i * 0.4, 50, "Earnings") for i in range(4)])
+        placed = [n for n in notes if n["row"] is not None]
+        dropped = [n for n in notes if n["row"] is None]
+        self.assertEqual(len(placed), renderers.CALLOUT_ROWS)
+        self.assertEqual([n["frac"] for n in dropped], [renderers.CALLOUT_TICK])
+        self.assertTrue(all(n["frac"] > renderers.CALLOUT_TICK for n in placed))
+
+    def test_a_log_frame_measures_height_multiplicatively(self):
+        # A fixed offset in price is a different visual distance at each end of a log axis,
+        # so a note near the bottom of a wide log range has plenty of room above it even
+        # though its price is a large fraction of the top.
+        notes = self.plan([self.note(50, 20, "Earnings")], ylim=(1.0, 1000.0), log=True)
+        self.assertEqual(notes[0]["row"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

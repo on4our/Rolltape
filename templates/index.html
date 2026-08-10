@@ -532,10 +532,20 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
         </div>
 
         <div class="field" data-for="timeline">
-          <label>Callouts</label>
+          <label>Auto callouts</label>
+          <!-- The same segmented track as the easing and quality controls, but each button
+               is its own toggle rather than one of a set — these combine, and the shape is
+               already the vocabulary for "pick from a short row". -->
+          <div class="seg" id="autoNotes" role="group" aria-label="Auto callouts"></div>
+          <div class="hint">Dates the price source already knows. Off by default.</div>
+        </div>
+
+        <div class="field" data-for="timeline">
+          <label>Your own callouts</label>
           <div id="notes"></div>
           <button class="addbtn" id="addNote" type="button">+ Add callout</button>
-          <div class="hint">Date and label, e.g. 2024-06-12 / Q2 earnings</div>
+          <div class="hint">Date and label, e.g. 2024-06-12 / Q2 earnings.
+            One on the same day as an automatic mark replaces it.</div>
         </div>
       </div>
     </details>
@@ -710,7 +720,7 @@ const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight", range:"1y",
   aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0, preset:"auto",
   camera:"locked", travel:"standard", cameraY:"track", log:0, maLag:"none",
-  meta:null, maxTickers:1, kits:{}
+  autoNotes:[], meta:null, maxTickers:1, kits:{}
 };
 const CUSTOM = "custom";
 
@@ -733,6 +743,19 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
     `<button data-v="${v}" aria-pressed="${v===state.maLag}">${
       v==="none" ? "Off" : v[0].toUpperCase()+v.slice(1)}</button>`).join("");
   applyCamera();
+  // Built from data.EVENT_KINDS the same way the chart list is built from CHARTS, so a
+  // fourth kind needs no edit here. Each button is independent — they combine.
+  $("#autoNotes").innerHTML = m.event_kinds.map(k=>
+    `<button data-v="${k.id}" aria-pressed="false" title="${esc(k.desc)}">${
+      esc(k.label)}</button>`).join("");
+  $("#autoNotes").addEventListener("click", e=>{
+    const b = e.target.closest("button"); if(!b) return;
+    const on = b.getAttribute("aria-pressed") !== "true";
+    b.setAttribute("aria-pressed", on);
+    state.autoNotes = [...$("#autoNotes").children]
+      .filter(x=>x.getAttribute("aria-pressed")==="true").map(x=>x.dataset.v);
+    schedule();
+  });
   $("#themes").innerHTML = m.themes.map(t=>`
     <button class="swatch" data-id="${t.id}" aria-pressed="${t.id===state.theme}">
       <span class="swatch-dots">${t.swatch.map(c=>`<i style="background:${c}"></i>`).join("")}</span>
@@ -781,7 +804,11 @@ const named = (list, id) => ((state.meta[list] || []).find(x => x.id === id) || 
 const SECTIONS = [
   ["gChart",  () => named("charts", state.chart)],
   ["gData",   () => [$("#tickers").value.trim(),
-                     state.range === CUSTOM ? "Custom dates" : named("ranges", state.range)]
+                     state.range === CUSTOM ? "Custom dates" : named("ranges", state.range),
+                     state.chart === "timeline" && state.autoNotes.length
+                       ? state.autoNotes.map(k => named("event_kinds", k).toLowerCase())
+                           .join(" + ")
+                       : null]
                     .filter(Boolean).join(" · ")],
   ["gMotion", () => `${+$("#duration").value}s + ${+$("#hold").value}s · ` +
                     segLabel("#easingSeg").toLowerCase()],
@@ -1240,6 +1267,7 @@ function config(){
     metric: $("#metric").value,
     rows: manual ? collect($("#rows"), "label", "value").map(r=>({label:r.label, value:+r.value})) : [],
     annotations: state.chart==="timeline" ? collect($("#notes"), "date", "label") : [],
+    auto_annotations: state.chart==="timeline" ? state.autoNotes : [],
     unit: $("#unit").value, decimals: +$("#decimals").value,
     transparent: !!state.transparent,
     log_scale: !!state.log,
