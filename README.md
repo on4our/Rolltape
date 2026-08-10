@@ -37,6 +37,27 @@ Bar comparison can pull total return, max drawdown, annualised volatility or lat
 close — or switch it to **My own numbers** and type revenue, margins, whatever you're
 narrating.
 
+## Typing a ticker
+
+Start typing and suggestions drop down under the field — symbol, company, exchange. Arrow
+keys move through them, Enter or Tab takes one, Escape puts the list away, and a click does
+the obvious thing. On a multi-ticker chart it completes only the symbol your cursor is in,
+so adding a fourth name to a comparison won't disturb the first three.
+
+It searches company names as well as symbols, which is the point: `bitcoin` finds
+`BTC-USD` and `S&P 500` finds `^GSPC`, and neither is a ticker anyone types from memory.
+
+Underneath, each symbol shows what actually came back for the range you picked — last
+close, the move over the window, how many bars, and the source if it wasn't Yahoo. That
+lands well before the preview finishes drawing, so a fat-fingered symbol or an empty range
+shows up straight away instead of at the end of a render. Change the range and the numbers
+follow it.
+
+Two things worth knowing. Suggestions come from Yahoo's search with a built-in list of
+common symbols underneath, so the field still works offline, under `--demo`, and when Yahoo
+is having a bad day — you may just have to type an unusual symbol in full. And a symbol
+that doesn't resolve says so on its own line; the others still load.
+
 ## Date range
 
 One row of buttons: **1D, 1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y, 10Y, MAX**. Pick one and the
@@ -175,7 +196,8 @@ no plane to move over, so the controls disappear for those two.
 app.py          Flask server, render queue, job tracking
 render_job.py   Runs one render in a child process, and reports progress back
 renderers.py    All six chart types, themes, easing, camera moves, export
-data.py         FMP, Twelve Data, Yahoo and Stooq fetches, in order, plus the disk cache
+data.py         FMP, Twelve Data, Yahoo and Stooq fetches, in order, the disk cache,
+                and the symbol search
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go
 jobs.py         The render job registry
@@ -270,6 +292,24 @@ Set `ROLLTAPE_LICENSED_ONLY=1` and the scraped sources are removed from the orde
 altogether: no key, or a licensed feed that is down, means a failed render rather than a
 chart quietly drawn from data that may not be shown to someone who paid for it. Off by
 default, because a laptop rendering for its owner is the case the fallbacks exist for.
+
+The suggestion field is the one place with no fallback worth the name. None of the price
+sources publishes a symbol search, so when Yahoo's is down the dropdown falls back to a
+built-in list of common symbols. Anything outside it has to be typed in full — it still
+charts, it just stops suggesting itself.
+
+If you'd rather drive it yourself than use the field, both halves are plain HTTP:
+
+```bash
+curl 'http://127.0.0.1:5000/api/search?q=nvid'
+curl -X POST http://127.0.0.1:5000/api/series \
+     -H 'content-type: application/json' \
+     -d '{"chart":"compare","tickers":["NVDA","AMD"],"range":"1y"}'
+```
+
+`/api/series` takes the same body as a render and hands back the closes and a summary per
+ticker instead of a video, so it's also the quickest way to check what a config resolves to
+before queueing a 90-second encode. Add `?points=N` to cap how many closes come back.
 
 Run the tests with `python -m unittest`. They mock every source, so they need no network —
 and the generated prices they draw from live in `testsupport.py`, which nothing the app

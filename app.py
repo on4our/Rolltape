@@ -441,6 +441,96 @@ def meta():
     })
 
 
+SEARCH_LIMIT = 8
+MAX_SEARCH_LIMIT = 20
+
+# The readout wants a headline and a sparkline, not every bar: a MAX range of daily closes
+# is fourteen thousand rows, and the video is where the OHLC belongs. So the closes come
+# back thinned to a bounded number of points while the summary figures are computed from
+# the whole frame — thinning must not be able to move the number printed on screen.
+SERIES_POINTS = 240
+MAX_SERIES_POINTS = 2000
+
+
+def _bounded(raw, default, low, high):
+    """A query-string integer inside its limits, or the default when it isn't one."""
+    try:
+        return min(max(int(raw), low), high)
+    except (TypeError, ValueError):
+        return default
+
+
+@app.get("/api/search")
+def search():
+    """Symbol suggestions for the ticker field.
+
+    Never an error status. Someone is mid-word, so junk and an empty box both mean "no
+    suggestions yet" rather than a fault — a typeahead that turns red halfway through a
+    symbol is worse than one that finds nothing.
+    """
+    query = request.args.get("q", "")
+    limit = _bounded(request.args.get("limit"), SEARCH_LIMIT, 1, MAX_SEARCH_LIMIT)
+    return jsonify({"query": query.strip(), "results": datasrc.search(query, limit)})
+
+
+def _series_payload(df, cap):
+    close = df["Close"].astype(float)
+    n = len(close)
+    first, last = float(close.iloc[0]), float(close.iloc[-1])
+    keep = list(range(0, n, max(-(-n // cap), 1)))
+    # The last bar is the one the headline quotes, so it survives whatever the stride lands
+    # on — a sparkline stopping short of the final close disagrees with the price beside it.
+    if keep[-1] != n - 1:
+        keep.append(n - 1)
+    return {
+        "bars": n,
+        "first": round(first, 4),
+        "last": round(last, 4),
+        "change": round(last - first, 4),
+        "change_pct": round((last / first - 1) * 100, 2) if first else None,
+        "high": round(float(df["High"].max()), 4),
+        "low": round(float(df["Low"].min()), 4),
+        "from": close.index[0].isoformat(),
+        "to": close.index[-1].isoformat(),
+        "points": [[close.index[i].isoformat(), round(float(close.iloc[i]), 4)]
+                   for i in keep],
+    }
+
+
+@app.post("/api/series")
+def series():
+    """The numbers behind the chart, for the window the config resolves to.
+
+    Same body as /api/preview, so the range preset, the interval and the ticker limit are
+    the ones the render will use rather than a second set that can quietly disagree with
+    them. This is also the cheap half of a preview: it answers with the data a chart would
+    be drawn from without drawing anything, which is what makes it usable on every
+    keystroke in the ticker field.
+
+    A ticker that doesn't resolve gets its own row rather than failing the request. With
+    six symbols on a comparison chart, one bad one shouldn't blank the other five.
+    """
+    try:
+        cfg = clean_config(request.get_json(force=True))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+
+    cap = _bounded(request.args.get("points"), SERIES_POINTS, 2, MAX_SERIES_POINTS)
+    win = datasrc.window(cfg)
+    out = []
+    for ticker in cfg["tickers"]:
+        try:
+            df = datasrc.fetch(ticker, **win)
+        except Exception as exc:  # noqa: BLE001
+            out.append({"symbol": ticker, "error": str(exc)})
+            continue
+        out.append({"symbol": ticker, "source": datasrc.source_for(ticker),
+                    **_series_payload(df, cap)})
+
+    return jsonify({"range": cfg["range"], "start": cfg["start"], "end": cfg["end"],
+                    "interval": cfg["interval"], "series": out})
+
+
 @app.post("/api/preview")
 def preview():
     try:

@@ -28,7 +28,8 @@ fallback. An ffmpeg already on PATH still wins when there is one.
 app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
 renderers.py    Six chart types + themes + easing + camera + ffmpeg export
-data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, CSV cache
+data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, CSV cache,
+                and the symbol search behind the ticker field
 config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
@@ -111,7 +112,7 @@ missing from it is silently untested rather than failing.
 ## Tests
 
 ```bash
-python -m unittest              # all 211, about 20 seconds
+python -m unittest              # all 220, about 25 seconds
 python -m unittest test_camera  # one module
 ```
 
@@ -140,6 +141,7 @@ path instead of a test-only one.
   under load.
 - `test_presets.py` — brand kit persistence and the title template.
 - `test_landing.py` — the landing page, the showcase stills and email capture.
+- `test_tickers.py` — the symbol lookup and the series endpoint behind the ticker field.
 
 Two things the suite is built around, both worth preserving:
 
@@ -268,6 +270,36 @@ frame identical to a locked one. `locked` is the default and reproduces the pre-
 framing exactly, which is why adding this changed no existing output — `extent` and
 `rest_y` are how a renderer tells the camera what its own resting frame was. Charts built
 from ranked rows (`bars`, `race`) have no plane to move over and never construct one.
+
+**The ticker field.** Two endpoints sit behind it and they answer different questions.
+
+`/api/search` is the typeahead. `data.search()` merges a built-in symbol list with Yahoo's
+search endpoint and ranks exact symbol over prefix over substring over a name-only match —
+someone typing MU means Micron, not every company with those letters in its name. It never
+answers with an error status: mid-word junk means "no suggestions yet", and a field that
+turns red halfway through a symbol is worse than one that finds nothing. The built-in list
+is a floor rather than a universe — it is what answers offline, under `--demo`, and before
+a round trip could have finished — and Yahoo finds everything past it. That call is plain
+urllib rather than yfinance on purpose, so the lookup still works on an install where
+Stooq is drawing the charts. A failed lookup is swallowed and never cached; caching it
+would keep the field degraded long after Yahoo came back.
+
+`/api/series` is the other half: the numbers a chart would be drawn from, without drawing
+it. It takes the same body as `/api/preview`, so the range preset, the interval and the
+per-chart ticker limit are the ones the render will use rather than a second set that can
+quietly disagree. It touches no Figure, which is what keeps it off `DRAW_LOCK` and
+answerable on a keystroke — a test asserts that. Two properties worth keeping: the summary
+figures are computed from the whole frame and the closes thinned to a bounded number of
+points *afterwards*, so the point cap can never move the number printed on screen; and a
+ticker that doesn't resolve gets its own row rather than failing the request, because one
+typo among six symbols shouldn't blank the other five.
+
+On the client, the suggestion list works on the comma-separated token the caret is inside,
+never the whole field — typing the third symbol of a comparison chart must not offer to
+overwrite the first two. The readout refetches from one call inside `schedule()` that
+compares only the part of the config deciding the window, rather than a listener on each of
+the five controls that can change it; that is what stops a sixth being added later without
+this noticing.
 
 **Interface styling.** The chrome follows Stripe: a light ground with white cards, navy
 text, indigo for the one thing you are meant to press. Every colour, shadow and focus ring
@@ -410,6 +442,15 @@ draining the queue is still what bounds CPU, not the lock.
   against a paging bug becoming an unbounded request loop against a metered API, not a real
   limit — but a `max` render on a symbol with two centuries of history would silently start
   at the cap rather than at the listing.
+- **Symbol search has no fallback feed.** None of the price sources publishes a search
+  endpoint worth calling, so when Yahoo's is down the suggestions narrow to `LOCAL_SYMBOLS`
+  and anything outside that list has to be typed in full. The chart still draws — only the
+  suggestion goes missing — but it is the one part of the field with a single source behind
+  it.
+- `LOCAL_SYMBOLS` is a hand-maintained snapshot. A delisting or a ticker change keeps
+  suggesting itself until someone edits the tuple, which is the price of having the field
+  answer offline and on the first keystroke. Yahoo is the authority for everything past it,
+  so the list stays short rather than trying to be a directory.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
 - Cancelling only works on a queued job. Killing an in-flight render is now a matter of
@@ -452,8 +493,9 @@ intraday intervals, date-range presets, camera moves, log price axes with moving
 averages, the encoder preset (`final` moved from `slow` to `medium`, with an
 Auto/Faster/Slower override in the UI), brand kits, the landing page with email
 capture — step 3 of docs/acquisition.md's sequencing, which leaves the demo instance
-above it as a deploy rather than a code change — and the licensed price feed, which was
-the one hard blocker in front of charging anybody.
+above it as a deploy rather than a code change — the licensed price feed, which was the
+one hard blocker in front of charging anybody, and symbol suggestions in the ticker field
+with `/api/series` behind them.
 
 ### Cinematography — transitions
 

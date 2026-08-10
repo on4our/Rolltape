@@ -14,6 +14,10 @@ refused — so the ceiling is enforced in `_sources_for` before the request is m
 There is deliberately no generated-data mode. A chart drawn from invented prices looks
 exactly like a real one three steps later in a video editor, and no flag is worth that.
 The test suite gets its offline prices from `testsupport.py`, which the app never imports.
+
+Also the symbol lookup behind the ticker field — see search() at the bottom. That is a
+different service from the price download and fails independently of it, which is why it
+keeps its own built-in fallback rather than sharing the source order above.
 """
 
 import glob
@@ -23,6 +27,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 
 import pandas as pd
 
@@ -258,6 +263,17 @@ def reset_sources():
 def sources_used():
     """Distinct sources that answered since the last reset."""
     return set(_SOURCES.values())
+
+
+def source_for(ticker):
+    """Which source last answered for one symbol, or None if it hasn't been asked.
+
+    attribution() answers for a whole render; this answers per ticker, which is what a
+    readout listing six symbols separately needs. Reading one key rather than resetting
+    the record also keeps it usable from a request handler, where a reset would race with
+    whatever else the server is drawing.
+    """
+    return _SOURCES.get(str(ticker).strip().upper())
 
 
 def attribution():
@@ -708,3 +724,214 @@ def clear_cache():
     if os.path.isdir(CACHE_DIR):
         for f in os.listdir(CACHE_DIR):
             os.remove(os.path.join(CACHE_DIR, f))
+
+
+# ---------------------------------------------------------------------------
+# Symbol search
+# ---------------------------------------------------------------------------
+# Yahoo's search endpoint, which is a separate service from the price download and needs
+# neither yfinance nor a key. Plain urllib on purpose: this has to keep working on an
+# install where yfinance is missing, since Stooq can still draw the chart it finds.
+SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+
+# Yahoo answers a bare urllib request with a 429. It isn't rate limiting — it wants a
+# browser-shaped User-Agent — so this is the one header that matters.
+SEARCH_UA = "Mozilla/5.0 (compatible; Rolltape/1.0; +https://github.com/on4our/rolltape)"
+
+# A typeahead is not a render. Someone is mid-word and will type another letter before
+# this comes back, so a lookup that hangs is worse than one that gives up and lets the
+# built-in list answer alone.
+SEARCH_TIMEOUT = 6
+
+# The floor under the suggestion field, not a universe. Three reasons it is worth carrying
+# rather than leaning on Yahoo for everything: demo mode must not touch the network, the
+# search endpoint breaks on the same schedule the download one does, and the first
+# keystroke should land before a round trip could have finished. Yahoo is still what finds
+# everything past this list — anything here that gets delisted keeps suggesting itself, so
+# it stays short and stays to names a chart actually gets pointed at.
+LOCAL_SYMBOLS = (
+    # US large caps
+    ("AAPL", "Apple", "equity"), ("MSFT", "Microsoft", "equity"),
+    ("NVDA", "NVIDIA", "equity"), ("GOOGL", "Alphabet Class A", "equity"),
+    ("GOOG", "Alphabet Class C", "equity"), ("AMZN", "Amazon", "equity"),
+    ("META", "Meta Platforms", "equity"), ("TSLA", "Tesla", "equity"),
+    ("AVGO", "Broadcom", "equity"), ("BRK-B", "Berkshire Hathaway Class B", "equity"),
+    ("LLY", "Eli Lilly", "equity"), ("JPM", "JPMorgan Chase", "equity"),
+    ("V", "Visa", "equity"), ("MA", "Mastercard", "equity"),
+    ("UNH", "UnitedHealth", "equity"), ("XOM", "Exxon Mobil", "equity"),
+    ("COST", "Costco", "equity"), ("WMT", "Walmart", "equity"),
+    ("PG", "Procter & Gamble", "equity"), ("JNJ", "Johnson & Johnson", "equity"),
+    ("HD", "Home Depot", "equity"), ("ORCL", "Oracle", "equity"),
+    ("ABBV", "AbbVie", "equity"), ("NFLX", "Netflix", "equity"),
+    ("BAC", "Bank of America", "equity"), ("KO", "Coca-Cola", "equity"),
+    ("CRM", "Salesforce", "equity"), ("CVX", "Chevron", "equity"),
+    ("PEP", "PepsiCo", "equity"), ("ADBE", "Adobe", "equity"),
+    ("MRK", "Merck", "equity"), ("CSCO", "Cisco", "equity"),
+    ("MCD", "McDonald's", "equity"), ("WFC", "Wells Fargo", "equity"),
+    ("GE", "GE Aerospace", "equity"), ("IBM", "IBM", "equity"),
+    ("NOW", "ServiceNow", "equity"), ("DIS", "Walt Disney", "equity"),
+    ("CAT", "Caterpillar", "equity"), ("INTU", "Intuit", "equity"),
+    ("VZ", "Verizon", "equity"), ("T", "AT&T", "equity"),
+    ("AMGN", "Amgen", "equity"), ("PFE", "Pfizer", "equity"),
+    ("GS", "Goldman Sachs", "equity"), ("MS", "Morgan Stanley", "equity"),
+    ("BLK", "BlackRock", "equity"), ("SPGI", "S&P Global", "equity"),
+    ("BA", "Boeing", "equity"), ("LMT", "Lockheed Martin", "equity"),
+    ("NKE", "Nike", "equity"), ("SBUX", "Starbucks", "equity"),
+    ("TGT", "Target", "equity"), ("LOW", "Lowe's", "equity"),
+    ("UBER", "Uber", "equity"), ("BKNG", "Booking Holdings", "equity"),
+    ("ISRG", "Intuitive Surgical", "equity"), ("F", "Ford", "equity"),
+    ("GM", "General Motors", "equity"),
+    # Semiconductors and hardware — the sector a chart channel returns to most
+    ("AMD", "Advanced Micro Devices", "equity"), ("INTC", "Intel", "equity"),
+    ("MU", "Micron Technology", "equity"), ("QCOM", "Qualcomm", "equity"),
+    ("TXN", "Texas Instruments", "equity"), ("AMAT", "Applied Materials", "equity"),
+    ("LRCX", "Lam Research", "equity"), ("KLAC", "KLA Corporation", "equity"),
+    ("ADI", "Analog Devices", "equity"), ("MRVL", "Marvell Technology", "equity"),
+    ("ARM", "Arm Holdings", "equity"), ("SMCI", "Super Micro Computer", "equity"),
+    ("DELL", "Dell Technologies", "equity"), ("TSM", "Taiwan Semiconductor", "equity"),
+    ("ASML", "ASML Holding", "equity"),
+    # Software, fintech and the retail favourites
+    ("PLTR", "Palantir Technologies", "equity"), ("CRWD", "CrowdStrike", "equity"),
+    ("PANW", "Palo Alto Networks", "equity"), ("SNOW", "Snowflake", "equity"),
+    ("DDOG", "Datadog", "equity"), ("NET", "Cloudflare", "equity"),
+    ("MDB", "MongoDB", "equity"), ("TEAM", "Atlassian", "equity"),
+    ("WDAY", "Workday", "equity"), ("SHOP", "Shopify", "equity"),
+    ("PYPL", "PayPal", "equity"), ("COIN", "Coinbase", "equity"),
+    ("HOOD", "Robinhood Markets", "equity"), ("SOFI", "SoFi Technologies", "equity"),
+    ("ABNB", "Airbnb", "equity"), ("DASH", "DoorDash", "equity"),
+    ("SPOT", "Spotify", "equity"), ("RBLX", "Roblox", "equity"),
+    ("SNAP", "Snap", "equity"), ("PINS", "Pinterest", "equity"),
+    ("RIVN", "Rivian Automotive", "equity"), ("LCID", "Lucid Group", "equity"),
+    ("GME", "GameStop", "equity"), ("BABA", "Alibaba", "equity"),
+    ("NVO", "Novo Nordisk", "equity"), ("SAP", "SAP SE", "equity"),
+    # Funds
+    ("SPY", "SPDR S&P 500 ETF Trust", "etf"), ("VOO", "Vanguard S&P 500 ETF", "etf"),
+    ("QQQ", "Invesco QQQ Trust", "etf"), ("IWM", "iShares Russell 2000 ETF", "etf"),
+    ("DIA", "SPDR Dow Jones Industrial Average ETF", "etf"),
+    ("VTI", "Vanguard Total Stock Market ETF", "etf"),
+    ("SCHD", "Schwab US Dividend Equity ETF", "etf"),
+    ("ARKK", "ARK Innovation ETF", "etf"), ("SMH", "VanEck Semiconductor ETF", "etf"),
+    ("XLK", "Technology Select Sector SPDR", "etf"),
+    ("XLE", "Energy Select Sector SPDR", "etf"),
+    ("XLF", "Financial Select Sector SPDR", "etf"),
+    ("GLD", "SPDR Gold Shares", "etf"), ("SLV", "iShares Silver Trust", "etf"),
+    ("TLT", "iShares 20+ Year Treasury Bond ETF", "etf"),
+    ("IBIT", "iShares Bitcoin Trust", "etf"),
+    # Indices and crypto, which take Yahoo's own symbol shapes
+    ("^GSPC", "S&P 500", "index"), ("^DJI", "Dow Jones Industrial Average", "index"),
+    ("^IXIC", "Nasdaq Composite", "index"), ("^RUT", "Russell 2000", "index"),
+    ("^VIX", "CBOE Volatility Index", "index"),
+    ("BTC-USD", "Bitcoin USD", "cryptocurrency"),
+    ("ETH-USD", "Ethereum USD", "cryptocurrency"),
+    ("SOL-USD", "Solana USD", "cryptocurrency"),
+    ("DOGE-USD", "Dogecoin USD", "cryptocurrency"),
+)
+
+# Typing is bursty, and backspacing asks a question that was already answered. Bounded by
+# hand rather than lru_cache because only a successful answer is worth keeping: caching a
+# failed lookup would leave the field degraded long after Yahoo came back.
+SEARCH_CACHE_SIZE = 64
+_SEARCH_CACHE = OrderedDict()
+
+
+def clear_search_cache():
+    _SEARCH_CACHE.clear()
+
+
+def _local_search(q):
+    return [{"symbol": sym, "name": name, "type": kind, "exchange": ""}
+            for sym, name, kind in LOCAL_SYMBOLS
+            if q in sym or q in name.upper()]
+
+
+def _yahoo_search(q, limit):
+    params = urllib.parse.urlencode({"q": q, "quotesCount": limit, "newsCount": 0,
+                                     "listsCount": 0, "enableFuzzyQuery": "false"})
+    req = urllib.request.Request(f"{SEARCH_URL}?{params}",
+                                 headers={"User-Agent": SEARCH_UA})
+    with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT) as resp:
+        payload = json.loads(resp.read().decode("utf-8", "replace"))
+
+    out = []
+    for row in payload.get("quotes") or []:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        # Search also answers with private companies and research entries that have no
+        # price series behind them at all. isYahooFinance is what tells those apart, and a
+        # suggestion that can't be charted is worse than one suggestion fewer.
+        if not symbol or not row.get("isYahooFinance"):
+            continue
+        out.append({
+            "symbol": symbol,
+            "name": str(row.get("shortname") or row.get("longname") or "").strip(),
+            "type": str(row.get("quoteType") or "").strip().lower(),
+            "exchange": str(row.get("exchDisp") or row.get("exchange") or "").strip(),
+        })
+    return out
+
+
+def _yahoo_search_cached(q, limit):
+    key = (q, limit)
+    if key in _SEARCH_CACHE:
+        _SEARCH_CACHE.move_to_end(key)
+        return _SEARCH_CACHE[key]
+    hits = _yahoo_search(q, limit)  # a failure propagates, and so is never cached
+    _SEARCH_CACHE[key] = hits
+    while len(_SEARCH_CACHE) > SEARCH_CACHE_SIZE:
+        _SEARCH_CACHE.popitem(last=False)
+    return hits
+
+
+def _merge_hits(groups):
+    """One row per symbol. First mention sets the order; later ones fill in its blanks.
+
+    A symbol in both the built-in list and Yahoo's answer should appear once, keeping the
+    position the built-in list gave it while picking up the exchange only Yahoo knows.
+    """
+    out = {}
+    for group in groups:
+        for hit in group:
+            row = out.setdefault(hit["symbol"], dict(hit))
+            for field, value in hit.items():
+                if value and not row.get(field):
+                    row[field] = value
+    return list(out.values())
+
+
+def _match_rank(hit, q):
+    """Exact symbol, then symbol prefix, then symbol substring, then a name-only match.
+
+    Someone typing MU wants Micron, not every company with "mu" in its name, and the sort
+    is stable — so within a rank the built-in list still comes before Yahoo's ordering.
+    """
+    sym = hit["symbol"]
+    if sym == q:
+        return 0
+    if sym.startswith(q):
+        return 1
+    return 2 if q in sym else 3
+
+
+def search(query, limit=8):
+    """Symbol suggestions for a partial ticker or company name.
+
+    The built-in list answers first and always: it costs nothing, it works offline, and it
+    holds the symbols this tool actually gets pointed at. Yahoo finds everything else and
+    is allowed to fail — a dead lookup should quietly narrow the suggestions, never break
+    the field someone is in the middle of typing into. Demo mode skips it entirely, the
+    same way the price fetch does, so --demo still never reaches the network.
+    """
+    q = str(query or "").strip().upper()
+    if not q:
+        return []
+    limit = max(int(limit), 1)
+
+    groups = [_local_search(q)]
+    if not _DEMO:
+        try:
+            groups.append(_yahoo_search_cached(q, limit))
+        except Exception:  # noqa: BLE001 - deliberate; see the docstring
+            pass
+
+    hits = _merge_hits(groups)
+    hits.sort(key=lambda hit: _match_rank(hit, q))
+    return hits[:limit]
