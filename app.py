@@ -219,6 +219,9 @@ def clean_config(raw):
                      "Camera travel")
     camera_y = _one_of(raw.get("camera_y"), renderers.CAMERA_Y, "track",
                        "Camera vertical")
+    # Same reasoning for the averages: they arrived with the price line before there was a
+    # lag to ask for, and "none" is that render.
+    ma_lag = _one_of(raw.get("ma_lag"), renderers.MA_LAG, "none", "Average lag")
 
     cfg = {
         "chart": chart,
@@ -255,6 +258,7 @@ def clean_config(raw):
         "transparent": bool(raw.get("transparent", False)),
         "log_scale": bool(raw.get("log_scale", False)),
         "ma": ma_periods(raw.get("ma")),
+        "ma_lag": ma_lag,
     }
     return cfg
 
@@ -421,6 +425,7 @@ def meta():
         "cameras": [{"id": k, "label": v["label"], "desc": v["desc"]}
                     for k, v in renderers.CAMERAS.items()],
         "travels": list(renderers.TRAVELS),
+        "ma_lags": list(renderers.MA_LAGS),
         "sizes": {a: {str(r): list(s) for r, s in rs.items()}
                   for a, rs in renderers.SIZES.items()},
         "resolutions": list(renderers.RESOLUTIONS),

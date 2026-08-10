@@ -273,18 +273,38 @@ class LogScaleTests(DemoDataCase):
                                         f"{lo}-{hi} got {len(inside)} ticks")
 
 
+MA_CHARTS = ("line", "candles", "timeline")
+
+
 class MovingAverageTests(DemoDataCase):
-    def figure(self, chart, **kw):
+    def figure(self, chart, at=0.9, **kw):
         cfg = self.cfg(chart, **kw)
         ctx = renderers.make_ctx("midnight", "16:9", "draft")
-        return renderers.CHARTS[chart]["fn"](cfg, ctx, None, still=0.9)
+        return renderers.CHARTS[chart]["fn"](cfg, ctx, None, still=at)
 
     def ma_artists(self, ax):
         return [ln for ln in ax.get_lines()
                 if (ln.get_label() or "").endswith("-day MA")]
 
+    def ma_head(self, fig):
+        """How far along the averages have been drawn."""
+        return max(float(ln.get_xdata()[-1])
+                   for ln in self.ma_artists(fig.axes[0]))
+
+    def price_head(self, fig):
+        """How far along everything that isn't an average has been drawn.
+
+        Line2D covers the price line, its glow and the head marker; the collections cover
+        the candles and their volume bars, where the count of paths is the reveal. A lag
+        that moved either is holding back the reveal rather than the averages.
+        """
+        ax = fig.axes[0]
+        mas = {id(ln) for ln in self.ma_artists(ax)}
+        return ([float(ln.get_xdata()[-1]) for ln in ax.get_lines() if id(ln) not in mas],
+                [len(c.get_paths()) for c in fig.axes[0].collections])
+
     def test_averages_are_drawn_and_keyed(self):
-        for chart in ("line", "candles", "timeline"):
+        for chart in MA_CHARTS:
             with self.subTest(chart=chart):
                 ax = self.figure(chart, ma="50, 200").axes[0]
                 lines = self.ma_artists(ax)
@@ -366,6 +386,106 @@ class MovingAverageTests(DemoDataCase):
         self.assertTrue(np.isnan(dense[0]))
         self.assertTrue(np.isfinite(dense[-1]))
         self.assertFalse(np.isnan(dense[np.isfinite(dense)]).any())
+
+    def test_the_averages_trail_the_price_line_without_holding_it_back(self):
+        for chart in MA_CHARTS:
+            with self.subTest(chart=chart):
+                plain = self.figure(chart, at=0.5, ma="50")
+                lagged = self.figure(chart, at=0.5, ma="50", ma_lag="bold")
+                self.assertLess(self.ma_head(lagged), self.ma_head(plain),
+                                "the average kept pace with the price line")
+                self.assertEqual(self.price_head(lagged), self.price_head(plain),
+                                 "the lag held back the reveal, not just the averages")
+
+    def test_the_last_frame_is_the_same_chart_either_way(self):
+        # The gap has to be closed by the end: a clip ending on a short average reads as a
+        # render that failed to finish, and that frame is the one that becomes a thumbnail.
+        for chart in MA_CHARTS:
+            with self.subTest(chart=chart):
+                base = draw(self.cfg(chart, ma="50"), at=1.0)
+                lagged = draw(self.cfg(chart, ma="50", ma_lag="bold"), at=1.0)
+                self.assertTrue(np.array_equal(base, lagged),
+                                "the averages had not caught up by the final frame")
+
+    def test_a_lag_with_nothing_to_lag_changes_nothing(self):
+        # The interface hides the control when the averages field is empty, but an API
+        # caller can still send it — inert beats half-applied.
+        base = draw(self.cfg("line"))
+        self.assertTrue(np.array_equal(base, draw(self.cfg("line", ma_lag="bold"))))
+
+
+class MaLagPlanTests(unittest.TestCase):
+    """The lag is a few lines of arithmetic over the reveal's own frame-to-index map, so
+    everything that matters about it can be checked without drawing anything."""
+
+    def track(self, lag, n_frames=60, fps=30, dense=1200, easing="out"):
+        """A reveal's frame-to-index map, and the averages' one over the same frames."""
+        cut = renderers._plan(n_frames / fps, 0.0, fps, easing, dense)[2]
+        return cut, renderers.ma_track({"ma_lag": lag}, cut, n_frames, fps)
+
+    def test_no_lag_is_the_reveal_itself(self):
+        # What keeps "none" the default: an existing config draws exactly as it did.
+        cut, track = self.track("none")
+        self.assertIs(track, cut)
+        self.assertIs(renderers.ma_track({}, cut, len(cut), 30), cut)
+
+    def test_the_averages_never_run_ahead_of_the_price_or_backwards(self):
+        for lag in renderers.MA_LAGS:
+            with self.subTest(lag=lag):
+                cut, track = self.track(lag)
+                self.assertTrue((track <= cut).all(), "the average overtook the price")
+                self.assertTrue((np.diff(track) >= 0).all(), "the average un-drew itself")
+                self.assertEqual(track[-1], cut[-1], "it never caught up")
+
+    def test_a_bigger_setting_is_a_bigger_gap(self):
+        gaps = []
+        for lag in renderers.MA_LAGS:
+            cut, track = self.track(lag)
+            gaps.append(int(cut[20] - track[20]))
+        self.assertEqual(gaps, sorted(gaps))
+        self.assertEqual(gaps[0], 0)
+        self.assertGreater(gaps[-1], 0)
+
+    def test_the_lag_runs_on_the_clock_not_on_the_frame_rate(self):
+        # 60fps is twice the frames, not twice the lag: the same second of the clip has to
+        # show the averages the same distance behind the price line.
+        dense = 1200
+        for lag in ("subtle", "standard", "bold"):
+            with self.subTest(lag=lag):
+                _, slow = self.track(lag, n_frames=60, fps=30, dense=dense,
+                                     easing="linear")
+                _, fast = self.track(lag, n_frames=120, fps=60, dense=dense,
+                                     easing="linear")
+                for i in range(0, 60, 5):
+                    self.assertLess(abs(int(slow[i]) - int(fast[i * 2])), dense * 0.02)
+
+    def test_a_short_reveal_caps_the_lag(self):
+        # Half a second behind on a one-second reveal stops reading as a trailing average
+        # and starts reading as a second, shorter one, so the delay is capped against the
+        # reveal as well as set in seconds. On a long one the setting is the whole story.
+        short = {"n_frames": 20, "fps": 20}    # one second of reveal
+        long_ = {"n_frames": 240, "fps": 20}   # twelve
+        self.assertTrue(np.array_equal(self.track("standard", **short)[1],
+                                       self.track("bold", **short)[1]),
+                        "a one-second reveal let the lag past its cap")
+        self.assertFalse(np.array_equal(self.track("standard", **long_)[1],
+                                        self.track("bold", **long_)[1]))
+
+
+class MaLagConfigTests(unittest.TestCase):
+    def base(self, **kw):
+        return appmod.clean_config({"chart": "line", "tickers": ["NVDA"], **kw})
+
+    def test_the_lag_is_off_unless_it_is_asked_for(self):
+        self.assertEqual(self.base()["ma_lag"], "none")
+
+    def test_a_lag_that_does_not_exist_is_rejected_by_name(self):
+        with self.assertRaises(ValueError) as caught:
+            self.base(ma_lag="enormous")
+        self.assertIn("must be one of", str(caught.exception))
+
+    def test_a_lag_survives_the_shape_the_browser_sends_it_in(self):
+        self.assertEqual(self.base(ma_lag="  Subtle ")["ma_lag"], "subtle")
 
 
 class MaPeriodTests(unittest.TestCase):
