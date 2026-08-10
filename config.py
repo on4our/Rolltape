@@ -34,6 +34,14 @@ PRESETS_PATH = _path("ROLLTAPE_PRESETS", "presets.json")
 FMP_KEY = (os.environ.get("ROLLTAPE_FMP_KEY") or "").strip()
 TWELVEDATA_KEY = (os.environ.get("ROLLTAPE_TWELVEDATA_KEY") or "").strip()
 
+# --- economic data ---------------------------------------------------------
+# FRED, the St. Louis Fed's series database. Not an alternative to the feeds above and
+# never a fallback for one: it answers for CPI and the unemployment rate, which none of
+# them carries, and they answer for tickers, which it doesn't. Without this key the
+# economic symbols simply aren't offered — every price chart works exactly as before.
+# The key is free from fred.stlouisfed.org/docs/api/api_key.html.
+FRED_KEY = (os.environ.get("ROLLTAPE_FRED_KEY") or "").strip()
+
 
 def _int(env, default):
     try:

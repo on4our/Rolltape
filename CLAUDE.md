@@ -17,6 +17,7 @@ python app.py --host 0.0.0.0     # reachable from phone on the same wifi
 ROLLTAPE_FMP_KEY=...             # the licensed feed answers first
 ROLLTAPE_FMP_HISTORY_YEARS=5     # Starter's ceiling; 30 on Professional
 ROLLTAPE_LICENSED_ONLY=1         # and the scraped fallbacks are refused entirely
+ROLLTAPE_FRED_KEY=...            # and the ticker field also takes economic series
 ```
 
 Everything is pip, ffmpeg included — `imageio-ffmpeg` ships a static build as the
@@ -28,8 +29,9 @@ fallback. An ffmpeg already on PATH still wins when there is one.
 app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
 renderers.py    Six chart types + themes + easing + camera + ffmpeg export
-data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, CSV cache,
-                and the symbol search behind the ticker field
+data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, FRED off to
+                one side for economic series, CSV cache, and the symbol search behind the
+                ticker field
 config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
@@ -112,12 +114,12 @@ missing from it is silently untested rather than failing.
 ## Tests
 
 ```bash
-python -m unittest              # all 262, about 20 seconds
+python -m unittest              # all 326, about 20 seconds
 python -m unittest test_camera  # one module
 ```
 
 No network and no ffmpeg. Each source is forced to fail so the one below it runs, Stooq,
-FMP and Twelve Data answer from recorded response samples, everything else draws from
+FMP, Twelve Data and FRED answer from recorded response samples, everything else draws from
 `testsupport.py`, and the two end-to-end encode tests skip themselves when there is no
 ffmpeg to call. So the suite is fast enough to run on every change, and there is no excuse
 for not having run it.
@@ -142,6 +144,11 @@ path instead of a test-only one.
 - `test_presets.py` — brand kit persistence and the title template.
 - `test_landing.py` — the landing page, the showcase stills and email capture.
 - `test_tickers.py` — the symbol lookup and the series endpoint behind the ticker field.
+- `test_economic.py` — every place a FRED symbol has to behave differently from a ticker:
+  the routing, the three refusals, the units, and the labelling. The generator in
+  `testsupport.synthetic_economic` draws flat OHLC deliberately — a range there would be
+  testing a frame the app can never produce, and would quietly pass the candlestick path
+  that exists to be refused.
 
 Two things the suite is built around, both worth preserving:
 
@@ -181,6 +188,16 @@ fetch loop) reads that one function, so another source is an entry in `SOURCES`,
 with the shared `(ticker, start, end, interval)` signature, an entry in the `fetchers` dict,
 an entry in `SOURCE_KEYS` if it needs one, and nothing else.
 
+**The symbol picks the catalogue, then the catalogue gets narrowed.** `_sources_for()` takes
+the ticker as well as the window, and its first act is choosing between `SOURCES` and
+`ECONOMIC_SOURCES` on the `FRED:` prefix. That ordering is the point: the two kinds are not
+ranked against each other and never fall through into each other, because no price feed
+publishes CPI and FRED publishes no tickers. A fallback only makes sense between sources
+that could both answer the same question. Everything after the choice — the key check,
+`LICENSED_ONLY`, `DAILY_ONLY`, the plan horizon — applies to whichever list was picked, so a
+new economic source is an entry in `ECONOMIC_SOURCES` and the same four hooks a price source
+needs.
+
 **A source that can't serve the request is dropped, never asked to approximate it.** There
 are three ways to be dropped and they exist for the same reason — a failed render is
 recoverable and a wrong one that looks right is not:
@@ -199,6 +216,44 @@ recoverable and a wrong one that looks right is not:
 sources, because a comparison chart pulling one ticker from a fallback is exactly when a
 single label would be a lie. Yahoo is the one that stays silent: nobody to credit, and
 nothing a viewer wouldn't already assume.
+
+**Economic series.** A `FRED:`-prefixed symbol is one number per period rather than a price,
+and `data._fred` returns it in the shared OHLCV shape with open, high, low and close all
+equal to the observation. That is not a convenience — it is what the data is, since there is
+no intra-period range to know — but it means the frame *looks* like a bar to anything that
+doesn't check. Four things follow, and they are the whole convention:
+
+- **Three pairings are refused, in `clean_config()`.** Candlesticks, because a chart of flat
+  dashes reads as a market where nothing moved rather than as the wrong chart type; intraday
+  ranges, because FRED publishes daily at best; and the bar chart's volatility metric,
+  because `sqrt(252)` counts market sessions and a monthly series would come out about eight
+  times too large. Same rule as a source that can't serve a request: refused, never
+  approximated. `render_candles` repeats its own refusal for a renderer called directly.
+- **Nothing is printed in a unit the series didn't declare.** `_unit_style()` in
+  `renderers.py` reads FRED's prose units and handles the two that change how a number is
+  drawn — percent and dollars — and returns a bare number for everything else. An unknown
+  unit and a metadata lookup that failed land in the same place on purpose: a chart must
+  never put a dollar sign on something nobody said was dollars. `_econ()` returning None is
+  what routes an ordinary ticker back to `_money`, so a price chart is unchanged.
+- **A rate moves in points, not percent.** `_headline()` reports `+0.5 pts` for a series
+  denominated in percent and `+3.0%` for everything else. Unemployment 4.0 → 4.5 called
+  "+12.5%" is the class of number a video gets corrected on.
+- **Per-period means the series' own period.** `_econ_period()` reads the frequency off the
+  metadata, so a `12` on monthly CPI is a 12-*month* average and `_fetch_with_ma()` warms it
+  with a year of lead rather than twelve days. This is the same rule as "anything per-year is
+  per-bar", one level further out: the interval says "daily" and the series says otherwise.
+
+`economic_meta()` is where all four get their answers, and it **fails soft to the bare series
+id**. A title is worth a request and is not worth a render. It caches to disk as well as in
+memory because every render is a fresh process and would otherwise re-request on each job.
+
+**The `FRED:` prefix does two jobs.** It is the namespace — a bare `GDP` or `T` could
+plausibly be a ticker or a series, and guessing is how the wrong instrument gets drawn under
+the right label — and it is the gesture that switches which service `search()` asks. A plain
+query goes to Yahoo plus the built-in `LOCAL_SERIES` list, so typing "inflation" finds CPI
+without spending a second round trip on every keystroke of every ticker anyone types. A
+prefixed one goes to FRED's own search instead and reaches all 800,000 series. A bare `FRED:`
+lists the built-in set, which is what makes the namespace discoverable by typing it.
 
 There is no generated-price source and there must not be one — see Tests.
 
@@ -468,6 +523,27 @@ draining the queue is still what bounds CPU, not the lock.
   if you're watching `.cache/`.
 - Moving averages are only on the line, candlestick and timeline charts. Comparison and
   race draw several tickers already, and averages on top would be unreadable.
+- **Rising is drawn green on an economic series too, and for unemployment or inflation that
+  reads as good news.** The up/down colours say direction, which is all they say on a price
+  chart — but a price going up and the jobless rate going up are not the same sentiment, and
+  the colour is the first thing a viewer reads. Fixing it means knowing which way is "good"
+  per series, which is nowhere in FRED's metadata and would be a guess. Typing a subtitle is
+  the workaround; a per-series polarity flag is the real fix if this ever matters enough.
+- **Most of FRED is federal statistics and free of copyright, but not all of it.** Some
+  series are redistributed from private providers under their own terms, and the `FRED:`
+  search reaches those as readily as the rest. `LOCAL_SERIES` is all official statistics;
+  anything found past it is unvetted, and its FRED page names the source's terms. This is
+  the same unresolved shape as FMP's display licence, one level less pressing because the
+  default set is clean.
+- **Economic series have no fallback at all.** One source, no second opinion — when FRED is
+  down or the key is wrong, an economic render fails and there is nothing below it. That is
+  correct rather than unfortunate (nothing else publishes these numbers), but it is a
+  different failure profile from a price chart, which has three sources under it.
+- A series' metadata is cached to disk indefinitely and never revalidated. Titles and units
+  effectively never change, but a series that gets rebased — a new index year — keeps the old
+  unit string in its subtitle until `.cache/` is cleared.
+- `LOCAL_SERIES` is hand-maintained for the same reason `LOCAL_SYMBOLS` is, and carries the
+  same cost: a discontinued series keeps suggesting itself until someone edits the tuple.
 
 ## Roadmap
 
@@ -496,8 +572,8 @@ averages, the encoder preset (`final` moved from `slow` to `medium`, with an
 Auto/Faster/Slower override in the UI), brand kits, the landing page with email
 capture — step 3 of docs/acquisition.md's sequencing, which leaves the demo instance
 above it as a deploy rather than a code change — the licensed price feed, which was the
-one hard blocker in front of charging anybody, and symbol suggestions in the ticker field
-with `/api/series` behind them.
+one hard blocker in front of charging anybody, symbol suggestions in the ticker field
+with `/api/series` behind them, and economic series from FRED behind that same field.
 
 ### Cinematography — transitions
 

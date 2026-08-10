@@ -11,6 +11,13 @@ The one thing FMP's entry plan cannot do is reach past five years. That is a pla
 rather than an API one and it fails quietly — a MAX request comes back short rather than
 refused — so the ceiling is enforced in `_sources_for` before the request is made.
 
+**FRED is a fifth source and it is not in that order at all.** A symbol is either a ticker
+or an economic series, decided by the `FRED:` prefix, and each kind has exactly one set of
+sources that can answer it — no price feed carries the unemployment rate and FRED carries
+no tickers. So `_sources_for` picks the list from the symbol before it applies the same
+three drop rules to it, and a fallback between the two kinds never happens because there
+is nothing to fall back to. See the economic section below.
+
 There is deliberately no generated-data mode. A chart drawn from invented prices looks
 exactly like a real one three steps later in a video editor, and no flag is worth that.
 The test suite gets its offline prices from `testsupport.py`, which the app never imports.
@@ -25,6 +32,8 @@ import hashlib
 import io
 import json
 import os
+import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
@@ -37,18 +46,66 @@ CACHE_DIR = config.CACHE_DIR
 
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
-# Preference order. Each licensed source drops out without its key, Stooq drops out for
-# intraday, and a source drops out for a window older than it can serve — `_sources_for` is
-# where all three of those happen.
+# Preference order for a ticker. Each licensed source drops out without its key, the
+# daily-only ones drop out for intraday, and a source drops out for a window older than it
+# can serve — `_sources_for` is where all three of those happen.
 SOURCES = ("fmp", "twelvedata", "yahoo", "stooq")
 
-# The ones whose terms cover showing the data to someone other than the person who fetched
-# it. config.LICENSED_ONLY narrows the order to these.
-LICENSED = ("fmp", "twelvedata")
+# And for an economic series. A separate list rather than an entry appended to the one
+# above, because these two never mix: no price feed publishes CPI and FRED publishes no
+# tickers, so a symbol that one list can't serve is not a symbol the other should be asked
+# about. One source in it today; the shape is what lets a second join without a special
+# case, the same way SOURCES gained Twelve Data.
+ECONOMIC_SOURCES = ("fred",)
 
-# Which config key turns each licensed source on. A source whose key is blank is dropped
+# The ones whose terms cover showing the data to someone other than the person who fetched
+# it. config.LICENSED_ONLY narrows the order to these. FRED is on this list because it is a
+# documented API used with a registered key rather than a scrape — the same footing as the
+# paid feeds, and the reason an economic chart still draws on a deployment that takes
+# money. Its individual series can carry a third-party copyright though; see the note above
+# LOCAL_SERIES.
+LICENSED = ("fmp", "twelvedata", "fred")
+
+# Sources that publish daily bars and coarser. Asking one for intraday would mean serving a
+# five-minute chart with daily data under a five-minute label, so they are dropped instead.
+DAILY_ONLY = ("stooq", "fred")
+
+# Which config key turns each keyed source on. A source whose key is blank is dropped
 # before any request is made, so an unconfigured one never spends a call finding out.
-SOURCE_KEYS = {"fmp": "FMP_KEY", "twelvedata": "TWELVEDATA_KEY"}
+SOURCE_KEYS = {"fmp": "FMP_KEY", "twelvedata": "TWELVEDATA_KEY", "fred": "FRED_KEY"}
+
+# ---------------------------------------------------------------------------
+# Economic series
+# ---------------------------------------------------------------------------
+# What separates an economic symbol from a ticker, and it has to be something explicit: a
+# bare GDP or T could plausibly be either, and resolving that by guessing is how a chart of
+# the wrong instrument gets drawn under the right label. The prefix is also the gesture that
+# searches FRED itself rather than the built-in list — see search().
+ECONOMIC_PREFIX = "FRED:"
+
+# FRED ids are alphanumeric with underscores. Checking the shape gives a better message than
+# the API's own, and keeps whatever was typed into the ticker field out of a file path.
+ECONOMIC_ID = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+
+def is_economic(ticker) -> bool:
+    """True for a `FRED:`-prefixed symbol — an economic series rather than a ticker."""
+    return str(ticker or "").strip().upper().startswith(ECONOMIC_PREFIX)
+
+
+def economic_id(ticker) -> str:
+    """The FRED series id inside a prefixed symbol. `FRED:UNRATE` -> `UNRATE`."""
+    return str(ticker or "").strip().upper()[len(ECONOMIC_PREFIX):]
+
+
+def economic_available() -> bool:
+    """Whether economic series can be drawn at all — /api/meta reports this.
+
+    There is no fallback to offer: FRED is the only source for these, so without a key the
+    interface stops offering them rather than suggesting a symbol that always fails.
+    """
+    return _keyed("fred")
+
 
 # Yahoo keeps intraday history for a while and then drops it, by a different amount per
 # interval — minute bars for a week, five-minute for two months. A chart asking for more
@@ -140,31 +197,37 @@ def _covers(source, start) -> bool:
         return True  # unparseable; fetch complains about it somewhere more useful
 
 
-def _sources_for(interval, start=None):
+def _sources_for(interval, start=None, ticker=None):
     """The sources that can answer this request, in preference order.
+
+    The symbol picks the list — tickers from SOURCES, economic series from
+    ECONOMIC_SOURCES — and then the same three drop rules narrow it. Picking first is what
+    keeps the two kinds from ever falling through into each other: FRED answering a request
+    for AAPL is not a fallback, it is a different instrument.
 
     Three ways to be dropped, and the same principle behind all of them: **a source that
     cannot serve the request is removed, never asked to approximate it.** A failed render
     is recoverable; a wrong one that looks right is not.
 
-    - *No key.* A licensed source without one is dropped before any request is made, which
+    - *No key.* A keyed source without one is dropped before any request is made, which
       is the whole of what an unconfigured clone notices. `LICENSED_ONLY` goes the other
       way and removes the scraped sources outright — see config.py for why a paid deploy
       wants that.
-    - *Wrong interval.* Stooq serves daily bars and coarser, so intraday never falls
-      through to it — answering a five-minute chart with daily bars and labelling it
-      five-minute is the exact failure this rule exists for.
+    - *Wrong interval.* Stooq and FRED serve daily bars and coarser, so intraday never
+      falls through to them — answering a five-minute chart with daily bars and labelling
+      it five-minute is the exact failure this rule exists for.
     - *Too far back.* A plan with a history horizon answers a longer window with a short
       frame rather than an error, so a MAX chart would come back as five years under a MAX
       label. Dropping the source lets a deeper one below it answer instead; under
       LICENSED_ONLY there is nothing below it and the render fails, which is the honest
       outcome.
     """
-    order = tuple(s for s in SOURCES if _keyed(s))
+    catalogue = ECONOMIC_SOURCES if is_economic(ticker) else SOURCES
+    order = tuple(s for s in catalogue if _keyed(s))
     if config.LICENSED_ONLY:
         order = tuple(s for s in order if s in LICENSED)
     if is_intraday(interval):
-        order = tuple(s for s in order if s != "stooq")
+        order = tuple(s for s in order if s not in DAILY_ONLY)
     return tuple(s for s in order if _covers(s, start))
 
 
@@ -179,7 +242,7 @@ _SOURCES = {}
 # worth knowing when the total return doesn't match what another chart says. Yahoo is on
 # neither footing, so it stays silent.
 SOURCE_NAMES = {"fmp": "Financial Modeling Prep", "twelvedata": "Twelve Data",
-                "stooq": "Stooq"}
+                "stooq": "Stooq", "fred": "FRED, St. Louis Fed"}
 
 # Quick-pick windows for the date selector, resolved against today. `short` is what fits on
 # a button, `label` is what it means; the UI reads both from /api/meta so adding a preset
@@ -352,7 +415,7 @@ def _drop_superseded(ticker, start, end, interval=DEFAULT_INTERVAL):
     if not _is_open_ended(end):
         return
     keep = {_cache_path(ticker, start, end, s, interval)
-            for s in _sources_for(interval, start)}
+            for s in _sources_for(interval, start, ticker)}
     pattern = f"{ticker.upper()}_{_cache_key(ticker, start, end, interval)}.*.csv"
     for path in glob.glob(os.path.join(CACHE_DIR, pattern)):
         if path not in keep:
@@ -364,7 +427,7 @@ def _drop_superseded(ticker, start, end, interval=DEFAULT_INTERVAL):
 
 def _find_cached(ticker, start, end, interval=DEFAULT_INTERVAL):
     """Return (path, source) for a cached frame, whichever source wrote it."""
-    for source in _sources_for(interval, start):
+    for source in _sources_for(interval, start, ticker):
         path = _cache_path(ticker, start, end, source, interval)
         if os.path.exists(path):
             return path, source
@@ -569,6 +632,152 @@ def _twelvedata(ticker, start, end=None, interval=DEFAULT_INTERVAL):
     return df[~df.index.duplicated()].sort_index()
 
 
+FRED_URL = "https://api.stlouisfed.org/fred"
+
+# Metadata is cached hard because it changes about never — a series' title and units are
+# fixed properties of it, and the render subprocess would otherwise re-request them on
+# every job. The disk copy is also what an offline render reads.
+_ECONOMIC_META = {}
+
+
+def _fred_get(path, params):
+    """One FRED response, parsed.
+
+    Failures arrive as a 4xx carrying a JSON body that names the cause, which is far more
+    useful than the status line: an unregistered key and a series id that doesn't exist are
+    the two anyone actually hits, and they need completely different instructions.
+    """
+    if not config.FRED_KEY:
+        raise RuntimeError("no API key — set ROLLTAPE_FRED_KEY")
+
+    query = dict(params, api_key=config.FRED_KEY, file_type="json")
+    url = f"{FRED_URL}/{path}?{urllib.parse.urlencode(query)}"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            body = json.loads(exc.read().decode("utf-8", "replace"))
+            detail = str(body.get("error_message") or "")
+        except Exception:  # noqa: BLE001 - the body is a courtesy; the status still stands
+            pass
+        if exc.code == 429:
+            raise RuntimeError(f"rate limit reached — {detail or exc.reason}") from None
+        raise ValueError(detail or f"HTTP {exc.code}") from None
+
+
+def _fred(ticker, start, end=None, interval=DEFAULT_INTERVAL):
+    """One economic series from FRED, in the shared OHLCV shape.
+
+    The shape is the interesting part. A FRED observation is a single number for a period —
+    4.1 percent for March — so open, high, low and close are all that same number and there
+    is no intra-period range to know. That is honest for a line or a timeline, which read
+    the close and nothing else, and meaningless for a candlestick, which would draw a column
+    of flat dashes implying a month in which nothing moved. So the pairing is refused in
+    `clean_config` rather than approximated here. Volume is zero for the same reason the
+    licensed feeds set it zero on an instrument that has none.
+
+    Frequency is the series' own — monthly for CPI, quarterly for GDP, daily for a Treasury
+    yield — and nothing here resamples it. A chart of twelve points is what a year of
+    monthly data honestly looks like.
+    """
+    series_id = economic_id(ticker)
+    if not ECONOMIC_ID.match(series_id):
+        raise ValueError(f"{series_id or ticker!r} is not a FRED series id")
+    if is_intraday(interval):
+        raise ValueError("FRED publishes daily at best, so there are no intraday bars")
+
+    params = {"series_id": series_id,
+              "observation_start": pd.Timestamp(start).strftime("%Y-%m-%d")}
+    if end:
+        params["observation_end"] = pd.Timestamp(end).strftime("%Y-%m-%d")
+
+    rows = _fred_get("series/observations", params).get("observations") or []
+    if not rows:
+        raise ValueError("no observations returned")
+
+    df = pd.DataFrame(rows)
+    if "date" not in df or "value" not in df:
+        raise ValueError("unexpected response shape")
+    df.index = pd.to_datetime(df.pop("date"))
+    # A missing observation is written as "." rather than left out — a holiday on a daily
+    # series, or a month a survey didn't run. Coercing turns those into NaN for the dropna
+    # below, which is the same treatment every other fetcher gives a hole in its data.
+    value = pd.to_numeric(df["value"], errors="coerce")
+
+    out = pd.DataFrame({c: value for c in ("Open", "High", "Low", "Close")})
+    out["Volume"] = 0.0
+    return out[COLUMNS].dropna().sort_index()
+
+
+def _meta_path(series_id):
+    # Hashed rather than named, the same way _cache_path keys its frames: a series id
+    # arrives from the ticker field and has no business reaching a file path unescaped.
+    key = hashlib.md5(series_id.encode()).hexdigest()[:16]
+    return os.path.join(CACHE_DIR, f"fred-meta.{key}.json")
+
+
+def _fred_meta(series_id):
+    rows = _fred_get("series", {"series_id": series_id}).get("seriess") or []
+    if not rows:
+        raise ValueError("no such series")
+    row = rows[0]
+    return {
+        "id": series_id,
+        "title": str(row.get("title") or series_id).strip(),
+        "units": str(row.get("units") or "").strip(),
+        "units_short": str(row.get("units_short") or "").strip(),
+        "frequency": str(row.get("frequency") or "").strip(),
+        # The short form on purpose: this ends up in a subtitle, and "SA" costs four
+        # characters where "Seasonally Adjusted" costs a line.
+        "seasonal": str(row.get("seasonal_adjustment_short") or "").strip(),
+    }
+
+
+def economic_meta(ticker):
+    """Title, units and frequency for one economic series.
+
+    Three things a chart cannot work out from the numbers alone come from here: what to call
+    the series, what unit to print a value in, and how often it is published. A price chart
+    needs none of them — a ticker is its own title and the axis has dollar signs on it —
+    which is why this exists beside the fetch rather than inside it.
+
+    **A failed lookup degrades to the bare id rather than raising.** The title on a chart is
+    worth a request; it is not worth a render. Without a key it doesn't make one at all.
+    """
+    series_id = economic_id(ticker)
+    fallback = {"id": series_id, "title": series_id, "units": "", "units_short": "",
+                "frequency": "", "seasonal": ""}
+    if not series_id or not _keyed("fred"):
+        return fallback
+    if series_id in _ECONOMIC_META:
+        return _ECONOMIC_META[series_id]
+
+    path = _meta_path(series_id)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        try:
+            meta = _fred_meta(series_id)
+        except Exception:  # noqa: BLE001 - deliberate; see the docstring
+            return fallback
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(meta, fh)
+        except OSError:  # a read-only filesystem still gets the in-memory copy
+            pass
+
+    _ECONOMIC_META[series_id] = meta
+    return meta
+
+
+def clear_economic_meta():
+    _ECONOMIC_META.clear()
+
+
 def _stooq_symbol(ticker):
     """Stooq namespaces by market; a bare US symbol needs the .us suffix."""
     return ticker.lower() if "." in ticker else f"{ticker.lower()}.us"
@@ -645,9 +854,16 @@ def _usable(df, sessions):
 def _nothing_eligible(ticker, start, interval):
     """Explain an empty source list, which is a configuration problem rather than a fetch.
 
-    Two ways to get here and they need different instructions, so the message says which
+    Several ways to get here and they need different instructions, so the message says which
     one happened rather than listing everything that could be wrong.
     """
+    if is_economic(ticker):
+        if not _keyed("fred"):
+            return (f"No data for {ticker}: economic series come from FRED, which needs a "
+                    "key. Set ROLLTAPE_FRED_KEY — it is free from fred.stlouisfed.org.")
+        return (f"No data for {ticker}: FRED publishes daily at best, so there are no "
+                f"{interval} bars to draw. Pick a daily range.")
+
     dropped = [s for s in SOURCES if _keyed(s) and not _covers(s, start)]
     if dropped and config.LICENSED_ONLY:
         return (f"No data for {ticker}: {SOURCE_NAMES.get(dropped[0], dropped[0])} only "
@@ -682,9 +898,11 @@ def fetch(ticker: str, start: str, end: str | None = None,
             return _usable(df, sessions)
 
     fetchers = {"fmp": _fmp, "twelvedata": _twelvedata,
-                "yahoo": _yahoo, "stooq": _stooq}
+                "yahoo": _yahoo, "stooq": _stooq, "fred": _fred}
     problems = []
-    for source in _sources_for(interval, start):  # preference order, as in _find_cached
+    # Preference order, as in _find_cached — and for an economic symbol that order holds
+    # only FRED, so a failure here is a failure rather than a fall through to a price feed.
+    for source in _sources_for(interval, start, ticker):
         try:
             df = fetchers[source](ticker, start, end, interval)
             trimmed = _usable(df, sessions)
@@ -827,6 +1045,66 @@ LOCAL_SYMBOLS = (
     ("DOGE-USD", "Dogecoin USD", "cryptocurrency"),
 )
 
+# The economic half of the same floor, and it carries more weight than LOCAL_SYMBOLS does:
+# a ticker is a thing people know and type, while nobody outside a spreadsheet remembers
+# that the headline inflation series is called CPIAUCSL. So each row carries the words
+# somebody would actually type — "inflation", "jobs", "rates" — matched but never displayed,
+# which is what lets the field find a series from the thing it measures.
+#
+# Worth knowing before pointing a public render at an obscure one: most of FRED is federal
+# statistics and free of copyright, but some series are redistributed from private providers
+# under their own terms. The ones below are all official statistics. Anything found through
+# the FRED: search is not vetted, and its FRED page names the source's terms.
+LOCAL_SERIES = (
+    # Inflation and prices
+    ("CPIAUCSL", "Consumer Price Index", "inflation cpi prices cost of living"),
+    ("CPILFESL", "Core CPI, less food and energy", "inflation core cpi prices"),
+    ("PCEPI", "PCE Price Index", "inflation pce prices fed target"),
+    ("PCEPILFE", "Core PCE Price Index", "inflation core pce fed target"),
+    ("PPIACO", "Producer Price Index", "inflation ppi producer wholesale prices"),
+    # Jobs
+    ("UNRATE", "Unemployment Rate", "jobs unemployment labour labor joblessness"),
+    ("PAYEMS", "Nonfarm Payrolls", "jobs payrolls employment nfp hiring"),
+    ("ICSA", "Initial Jobless Claims", "jobs claims unemployment weekly layoffs"),
+    ("CIVPART", "Labour Force Participation Rate", "jobs participation labour labor"),
+    ("JTSJOL", "Job Openings", "jobs openings jolts vacancies hiring"),
+    # Rates and the Fed
+    ("FEDFUNDS", "Federal Funds Effective Rate", "rates fed interest policy"),
+    ("DFF", "Federal Funds Rate, daily", "rates fed interest policy daily"),
+    ("DGS2", "2-Year Treasury Yield", "rates treasury yield bonds"),
+    ("DGS10", "10-Year Treasury Yield", "rates treasury yield bonds"),
+    ("DGS30", "30-Year Treasury Yield", "rates treasury yield bonds long"),
+    ("T10Y2Y", "10-Year minus 2-Year Spread", "rates yield curve inversion recession"),
+    ("T10Y3M", "10-Year minus 3-Month Spread", "rates yield curve inversion recession"),
+    ("MORTGAGE30US", "30-Year Mortgage Rate", "rates mortgage housing home loans"),
+    ("SOFR", "Secured Overnight Financing Rate", "rates sofr overnight funding"),
+    # Growth and output
+    ("GDP", "Gross Domestic Product", "growth gdp output economy"),
+    ("GDPC1", "Real GDP", "growth gdp real output economy"),
+    ("A191RL1Q225SBEA", "Real GDP Growth Rate", "growth gdp rate quarterly economy"),
+    ("INDPRO", "Industrial Production Index", "growth industry manufacturing output"),
+    ("RSAFS", "Retail Sales", "growth retail sales consumer spending"),
+    ("UMCSENT", "Consumer Sentiment", "consumer sentiment confidence michigan"),
+    # Money, credit and the consumer
+    ("M2SL", "M2 Money Supply", "money supply m2 liquidity printing"),
+    ("WALCL", "Fed Balance Sheet", "money fed balance sheet qe liquidity"),
+    ("PSAVERT", "Personal Saving Rate", "consumer saving savings households"),
+    ("TOTALSL", "Consumer Credit Outstanding", "consumer credit debt borrowing"),
+    ("DRCCLACBS", "Credit Card Delinquency Rate", "consumer credit delinquency debt"),
+    # Housing
+    ("CSUSHPINSA", "Case-Shiller Home Price Index", "housing home prices property"),
+    ("HOUST", "Housing Starts", "housing starts construction building"),
+    ("MSPUS", "Median Home Sale Price", "housing home prices median property"),
+    # Markets and commodities
+    ("VIXCLS", "CBOE Volatility Index", "vix volatility fear markets"),
+    ("DCOILWTICO", "WTI Crude Oil Price", "oil crude wti energy commodities"),
+    ("DTWEXBGS", "US Dollar Index, broad", "dollar dxy currency fx"),
+    ("T10YIE", "10-Year Breakeven Inflation Rate", "inflation expectations breakeven"),
+)
+
+# FRED's own search, behind the prefix. Same limit and timeout reasoning as Yahoo's.
+FRED_SEARCH_ORDER = "popularity"
+
 # Typing is bursty, and backspacing asks a question that was already answered. Bounded by
 # hand rather than lru_cache because only a successful answer is worth keeping: caching a
 # failed lookup would leave the field degraded long after Yahoo came back.
@@ -842,6 +1120,33 @@ def _local_search(q):
     return [{"symbol": sym, "name": name, "type": kind, "exchange": ""}
             for sym, name, kind in LOCAL_SYMBOLS
             if q in sym or q in name.upper()]
+
+
+def _economic_hit(series_id, name):
+    """One suggestion row for an economic series.
+
+    The exchange field carries "FRED" because that is what the dropdown badges a row with,
+    and a row reading UNRATE · Unemployment Rate · FRED explains the prefix in front of it
+    without the field needing a legend.
+    """
+    return {"symbol": ECONOMIC_PREFIX + series_id, "name": name,
+            "type": "economic", "exchange": "FRED"}
+
+
+def _local_economic_search(q):
+    """The built-in economic list. An empty query returns all of it, which is what makes
+    typing a bare `FRED:` a browsable menu rather than an empty dropdown."""
+    return [_economic_hit(sid, name) for sid, name, keys in LOCAL_SERIES
+            if not q or q in sid or q in name.upper() or q in keys.upper()]
+
+
+def _fred_search(q, limit):
+    payload = _fred_get("series/search",
+                        {"search_text": q, "limit": limit,
+                         "order_by": FRED_SEARCH_ORDER, "sort_order": "desc"})
+    return [_economic_hit(str(row.get("id") or "").strip().upper(),
+                          str(row.get("title") or "").strip())
+            for row in payload.get("seriess") or [] if row.get("id")]
 
 
 def _yahoo_search(q, limit):
@@ -869,16 +1174,26 @@ def _yahoo_search(q, limit):
     return out
 
 
-def _yahoo_search_cached(q, limit):
-    key = (q, limit)
+def _search_cached(fn, q, limit):
+    """Memoise one lookup. Keyed by the function too, since two services answer here now
+    and "CPI" means a different list to each of them."""
+    key = (fn.__name__, q, limit)
     if key in _SEARCH_CACHE:
         _SEARCH_CACHE.move_to_end(key)
         return _SEARCH_CACHE[key]
-    hits = _yahoo_search(q, limit)  # a failure propagates, and so is never cached
+    hits = fn(q, limit)  # a failure propagates, and so is never cached
     _SEARCH_CACHE[key] = hits
     while len(_SEARCH_CACHE) > SEARCH_CACHE_SIZE:
         _SEARCH_CACHE.popitem(last=False)
     return hits
+
+
+def _yahoo_search_cached(q, limit):
+    return _search_cached(_yahoo_search, q, limit)
+
+
+def _fred_search_cached(q, limit):
+    return _search_cached(_fred_search, q, limit)
 
 
 def _merge_hits(groups):
@@ -904,6 +1219,11 @@ def _match_rank(hit, q):
     is stable — so within a rank the built-in list still comes before Yahoo's ordering.
     """
     sym = hit["symbol"]
+    # An economic symbol ranks on its series id. Someone typing UNRATE means that series
+    # exactly, and leaving the FRED: in front would demote the match to a substring and put
+    # every company with those letters in its name above it.
+    if sym.startswith(ECONOMIC_PREFIX):
+        sym = economic_id(sym)
     if sym == q:
         return 0
     if sym.startswith(q):
@@ -923,13 +1243,33 @@ def search(query, limit=8):
     different service from the price download and free of the display terms a licensed
     feed exists to satisfy, because a suggestion is a symbol and a company name rather
     than a price.
+
+    **The `FRED:` prefix switches which service is asked.** A plain query is a ticker
+    query — Yahoo, plus the built-in economic list so that typing "inflation" still finds
+    CPI without a second round trip on every keystroke of every symbol anyone ever types. A
+    prefixed one is explicitly economic, so it goes to FRED's own search instead and reaches
+    all of it. That makes the prefix do double duty: it is the namespace a symbol needs, and
+    it is the gesture that says "look past the built-in list". A bare `FRED:` lists the
+    built-in series, which is a menu rather than an empty dropdown.
     """
     q = str(query or "").strip().upper()
     if not q:
         return []
     limit = max(int(limit), 1)
 
-    groups = [_local_search(q)]
+    if is_economic(q):
+        series = economic_id(q)
+        groups = [_local_economic_search(series)]
+        if series:
+            try:
+                groups.append(_fred_search_cached(series, limit))
+            except Exception:  # noqa: BLE001 - deliberate; see the docstring
+                pass
+        hits = _merge_hits(groups)
+        hits.sort(key=lambda hit: _match_rank(hit, series))
+        return hits[:limit]
+
+    groups = [_local_search(q), _local_economic_search(q)]
     try:
         groups.append(_yahoo_search_cached(q, limit))
     except Exception:  # noqa: BLE001 - deliberate; see the docstring

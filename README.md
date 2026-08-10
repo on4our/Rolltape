@@ -22,6 +22,9 @@ Out of the box that means Yahoo with a Stooq fallback, which needs no account. S
 `ROLLTAPE_FMP_KEY` and Financial Modeling Prep answers first instead; see **Where the
 numbers come from** for why you would, and for the one thing its entry plan can't do.
 
+Set `ROLLTAPE_FRED_KEY` and the ticker field also takes economic series — CPI, payrolls,
+the yield curve. The key is free; see **Economic data**.
+
 ## Chart types
 
 | Type | What it does | Tickers |
@@ -57,6 +60,49 @@ Two things worth knowing. Suggestions come from Yahoo's search with a built-in l
 common symbols underneath, so the field still works offline and when Yahoo
 is having a bad day — you may just have to type an unusual symbol in full. And a symbol
 that doesn't resolve says so on its own line; the others still load.
+
+## Economic data
+
+The same field takes economic series, prefixed with `FRED:` — `FRED:UNRATE` is the
+unemployment rate, `FRED:CPIAUCSL` is CPI. It needs a key in `ROLLTAPE_FRED_KEY`, which is
+free from [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html). Without
+one the prefix isn't offered at all.
+
+**You don't have to know the series id.** Typing what a series measures finds it —
+`inflation` finds CPI and core PCE, `jobs` finds payrolls and claims, `yield curve` finds
+the 10Y–2Y spread. That comes from a built-in list of the forty or so series a markets
+channel actually points at, so it answers on the first keystroke and offline. Typing
+`FRED:` on its own lists them.
+
+Past that list, **`FRED:` searches FRED itself** — `FRED:copper` reaches all 800,000 series.
+The prefix is doing two jobs: it marks the symbol as economic, and it says "look past the
+built-in list". A plain query never spends a request on FRED, so typing tickers costs
+exactly what it did before.
+
+Charts of a series come out labelled as one:
+
+- The title is the series' name — **Unemployment Rate**, not UNRATE.
+- The axis and the readout are in the series' own units. A rate reads `4.8%`, not `$4.8`.
+- The subtitle names the unit and the seasonal adjustment, because a line sitting at 4
+  means percent on one series and trillions of dollars on another.
+- **A rate's move is reported in points.** Unemployment going 4.0 to 4.5 is `+0.5 pts`. It
+  is not `+12.5%`, which is what a percentage change of a percentage would say.
+- Moving averages are counted in the series' own periods, so a `12` on monthly CPI is a
+  **12-month** average and is warmed with a year of history rather than twelve days of it.
+
+Three things are refused rather than approximated, all for the same reason — a FRED
+observation is one number per period, not a bar:
+
+- **Candlesticks.** There is no open, high or low to draw. The chart would be a row of flat
+  dashes reading as a market where nothing moved.
+- **Intraday ranges.** FRED publishes daily at best.
+- **The volatility metric on the bar chart.** It annualises from trading days in a year, and
+  a monthly series would come out roughly eight times too large.
+
+All three fail as a message while you're setting the chart up, not as a dead render.
+
+Series come only from FRED — it is not one of the price sources and they are not fallbacks
+for it, since none of them carries CPI and FRED carries no tickers. The footer credits it.
 
 ## Date range
 
@@ -196,8 +242,8 @@ no plane to move over, so the controls disappear for those two.
 app.py          Flask server, render queue, job tracking
 render_job.py   Runs one render in a child process, and reports progress back
 renderers.py    All six chart types, themes, easing, camera moves, export
-data.py         FMP, Twelve Data, Yahoo and Stooq fetches, in order, the disk cache,
-                and the symbol search
+data.py         FMP, Twelve Data, Yahoo and Stooq fetches, in order, FRED for economic
+                series, the disk cache, and the symbol search
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go
 jobs.py         The render job registry
@@ -219,7 +265,7 @@ re-asked immediately.
 
 ## Where the numbers come from
 
-Four sources, tried in order.
+Four sources for prices, tried in order.
 
 1. **[Financial Modeling Prep](https://site.financialmodelingprep.com)** — the licensed
    feed, used whenever `ROLLTAPE_FMP_KEY` is set.
@@ -237,6 +283,12 @@ from second choice. If they all fail you get one error naming every cause.
 
 The exception is intraday. Stooq has daily bars and nothing finer, so it is never asked for
 5-minute data — answering with daily bars under a 5-minute label is worse than failing.
+
+**[FRED](https://fred.stlouisfed.org) is a fifth source and it is not in that order.** A
+symbol is either a ticker or an economic series, and each kind has exactly one set of
+sources that can answer it — no price feed publishes the unemployment rate, and FRED
+publishes no tickers. So there is no falling through between the two, because there would be
+nothing to fall through to. `ROLLTAPE_FRED_KEY` turns it on; see **Economic data** above.
 
 ### Why FMP
 
@@ -370,6 +422,7 @@ The code is deployment-ready. These env vars all default to the local behaviour:
 | `ROLLTAPE_FMP_KEY` | unset | Financial Modeling Prep API key; answers first when set |
 | `ROLLTAPE_FMP_HISTORY_YEARS` | `5` | How far back the FMP plan reaches — Starter is 5, Professional 30 |
 | `ROLLTAPE_TWELVEDATA_KEY` | unset | Twelve Data API key; the second licensed source |
+| `ROLLTAPE_FRED_KEY` | unset | FRED API key; economic series, free, off when unset |
 | `ROLLTAPE_LICENSED_ONLY` | off | Refuse the Yahoo/Stooq fallbacks — for a deploy serving customers |
 | `ROLLTAPE_LANDING` | off | Landing page at `/`, app at `/app` |
 | `ROLLTAPE_DEMO_URL` | `/app` | Where the landing page's buttons point |

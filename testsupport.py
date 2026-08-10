@@ -79,6 +79,37 @@ def synthetic(ticker, start, end, interval=data.DEFAULT_INTERVAL):
     )
 
 
+# One observation a month, which is the cadence of most of what a chart channel points at —
+# CPI, payrolls, the unemployment rate. Frequent enough that a year of it still has bars to
+# animate, and coarse enough that a test drawing it is exercising the real shape rather than
+# daily data wearing a FRED symbol.
+ECONOMIC_FREQ = "MS"
+
+
+def synthetic_economic(ticker, start, end=None, freq=ECONOMIC_FREQ):
+    """Deterministic fake observations for a FRED symbol, in the shared OHLCV shape.
+
+    Flat OHLC on purpose, because that is what `data._fred` really returns: one number per
+    period means the open, high, low and close are the same number. A test that generated a
+    range here would be testing a frame the app can never actually see, and would quietly
+    pass the candlestick path that exists to be refused.
+    """
+    series = data.economic_id(ticker) or ticker
+    seed = int(hashlib.md5(series.encode()).hexdigest()[:8], 16)
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range(start, end or pd.Timestamp.today().normalize(), freq=freq)
+    if len(idx) < 2:
+        raise ValueError("Date range is too short.")
+
+    # A rate wandering around a few percent. The level doesn't matter to any test; that it
+    # stays positive does, since the log-axis path gates on that.
+    level = 4.0 + np.cumsum(rng.normal(0, 0.12, len(idx)))
+    value = np.clip(level, 0.4, None)
+    frame = pd.DataFrame({c: value for c in ("Open", "High", "Low", "Close")}, index=idx)
+    frame["Volume"] = 0.0
+    return frame[data.COLUMNS]
+
+
 def synthetic_fetch(ticker, start, end=None, interval=data.DEFAULT_INTERVAL,
                     sessions=None):
     """Stand in for `data.fetch`, down to the session trim and the source record.
@@ -87,9 +118,16 @@ def synthetic_fetch(ticker, start, end=None, interval=data.DEFAULT_INTERVAL,
     and then checks the footer is checking real behaviour only if this leaves the same
     trace a real fetch would. It records "yahoo" because that is the source the footer
     stays silent about, so a chart drawn here carries no stamp it wouldn't carry live.
+
+    An economic symbol records "fred" for the same reason, and there the footer *does* say
+    so — which is the behaviour a test asserting attribution needs to be able to see.
     """
     ticker = ticker.strip().upper()
     end = end or pd.Timestamp.today().normalize()
+    if data.is_economic(ticker):
+        frame = data._usable(synthetic_economic(ticker, start, end), None)
+        data._SOURCES[ticker] = "fred"
+        return frame
     frame = data._usable(synthetic(ticker, start, end, interval), sessions)
     data._SOURCES[ticker] = "yahoo"
     return frame
