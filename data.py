@@ -15,9 +15,12 @@ There is deliberately no generated-data mode. A chart drawn from invented prices
 exactly like a real one three steps later in a video editor, and no flag is worth that.
 The test suite gets its offline prices from `testsupport.py`, which the app never imports.
 
-Also the symbol lookup behind the ticker field — see search() at the bottom. That is a
-different service from the price download and fails independently of it, which is why it
-keeps its own built-in fallback rather than sharing the source order above.
+Two other services live here, both separate from the price download and both failing
+independently of it. `events()` supplies the dated earnings, splits and dividends the
+timeline chart marks by itself; it reuses the source order because the same three feeds
+publish them, but it fails soft where a price fetch raises. `search()` at the bottom is the
+symbol lookup behind the ticker field, and keeps its own built-in fallback rather than
+sharing the order above at all.
 """
 
 import glob
@@ -380,7 +383,7 @@ FMP_INTERVALS = {"1m": "1min", "5m": "5min", "15m": "15min",
                  "30m": "30min", "1h": "1hour"}
 
 
-def _fmp_rows(path, params):
+def _fmp_rows(path, params, timeout=30):
     """One FMP response as a list of row dicts.
 
     Two shapes to cope with. The intraday endpoints answer with a bare array; the daily one
@@ -389,7 +392,7 @@ def _fmp_rows(path, params):
     saves a silent empty frame if the account is pointed at the other one.
     """
     url = f"{FMP_URL}/{path}?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(url, timeout=30) as resp:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode("utf-8", "replace"))
 
     if isinstance(payload, dict):
@@ -420,7 +423,7 @@ def _fmp(ticker, start, end=None, interval=DEFAULT_INTERVAL):
 
     Unverified and worth checking with a key in hand: how this feed adjusts for dividends
     and splits. `_yahoo` asks for both, Stooq does its own thing, and the three disagreeing
-    changes the total return a chart narrates — which is the whole of roadmap item 7.
+    changes the total return a chart narrates — which is the whole of roadmap item 6.
     """
     if not config.FMP_KEY:
         raise RuntimeError("no API key — set ROLLTAPE_FMP_KEY")
@@ -524,7 +527,7 @@ def _twelvedata(ticker, start, end=None, interval=DEFAULT_INTERVAL):
 
     Unverified and worth checking with a key in hand: how this feed adjusts for dividends
     and splits. `_yahoo` asks for both, Stooq does its own thing, and the three disagreeing
-    changes the total return a chart narrates — which is the whole of roadmap item 7. Until
+    changes the total return a chart narrates — which is the whole of roadmap item 6. Until
     someone has compared them, the footer naming the source is what covers it.
     """
     if not config.TWELVEDATA_KEY:
@@ -724,6 +727,311 @@ def clear_cache():
     if os.path.isdir(CACHE_DIR):
         for f in os.listdir(CACHE_DIR):
             os.remove(os.path.join(CACHE_DIR, f))
+
+
+# ---------------------------------------------------------------------------
+# Corporate events
+# ---------------------------------------------------------------------------
+# What the timeline chart can mark without anyone typing a date. These are facts about the
+# instrument rather than about the window, which is why they can be looked up at all — an
+# earnings date is the same for everyone, unlike the editorial callouts sitting beside them.
+#
+# The interface builds its checkboxes from this dict the way it builds the chart list from
+# CHARTS, so a fourth kind is an entry here, a fetcher per source, and nothing else.
+EVENT_KINDS = {
+    "earnings": {"label": "Earnings", "desc": "Every reporting date in the window."},
+    "splits": {"label": "Splits", "desc": "Share splits, with the ratio."},
+    "dividends": {"label": "Dividends", "desc": "Ex-dividend dates, with the amount."},
+}
+
+# Stooq is a price CSV and publishes none of this. Dropping it here is the same rule as
+# dropping it for intraday: a source that cannot serve the request is removed rather than
+# asked to approximate it, and there is no approximation of an earnings date.
+EVENT_SOURCES = ("fmp", "twelvedata", "yahoo")
+
+# yfinance returns its earnings history newest-first and bounded by a count rather than a
+# date. Ten years of quarters plus the forward guesses it carries, which is past the deepest
+# window the interface offers.
+YAHOO_EARNINGS_LIMIT = 48
+
+# FMP's event endpoints are limit-based rather than range-based, so the window is trimmed
+# locally. Same arithmetic as above, with room for a company that reports monthly dividends.
+FMP_EVENT_LIMIT = 250
+
+# Shorter than the 30s a price fetch gets, for the reason the symbol search is shorter
+# still: this runs inside `/api/preview`, on `DRAW_LOCK`, and the marks are an overlay. A
+# preview that redraws without them beats one that stalls for half a minute and then draws
+# the same chart anyway.
+EVENT_TIMEOUT = 12
+
+
+def _event_sources(start=None):
+    """The sources that can answer for events, in preference order.
+
+    Narrowed through `_sources_for` rather than beside it, so the key checks, LICENSED_ONLY
+    and the plan horizon all still apply — a five-year plan is no better at reaching back
+    ten years for an earnings date than it is for a price, and it fails the same silent way.
+    """
+    order = _sources_for(DEFAULT_INTERVAL, start)
+    return tuple(s for s in order if s in EVENT_SOURCES)
+
+
+def _num(value):
+    """A float from whatever the response spelled it as, or None."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(out) else out
+
+
+def _pick(row, *names):
+    """First of `names` present in `row` with something in it."""
+    for name in names:
+        if row.get(name) not in (None, "", "null"):
+            return row[name]
+    return None
+
+
+def _split_label(num, den):
+    """Reads as `3-for-1 split`, from whichever pair of factors the source supplied."""
+    if not num or not den or num <= 0 or den <= 0:
+        return None
+    return f"{num:g}-for-{den:g} split"
+
+
+def _dividend_label(amount):
+    if amount is None or amount <= 0:
+        return None
+    # Two decimals below a dollar reads as money; a cash amount is never worth more.
+    return f"Dividend ${amount:,.2f}"
+
+
+def _event(date, kind, label):
+    """One event, or None when the row didn't carry enough to name itself.
+
+    Every event is dated to a day even when the source knows the hour. A callout lands on a
+    bar, and on a daily chart the bar is the day — an ex-dividend timestamp of 00:00 that
+    rounds onto the previous session would put the mark on the wrong candle.
+    """
+    if not label:
+        return None
+    try:
+        stamp = pd.Timestamp(date)
+    except (ValueError, TypeError):
+        return None
+    # A missing date parses to NaT rather than raising, and NaT has no .normalize().
+    if pd.isna(stamp):
+        return None
+    return {"date": stamp.normalize().strftime("%Y-%m-%d"), "kind": kind, "label": label}
+
+
+def _fmp_events(ticker, kind, start, end):
+    """Earnings, splits or dividends from FMP.
+
+    These endpoints take a symbol and a count rather than a date range, so the window is
+    applied locally by `_in_window`. Asking for more than the window needs and throwing the
+    surplus away is the cheap direction to be wrong in: one request either way.
+    """
+    if not config.FMP_KEY:
+        raise RuntimeError("no API key — set ROLLTAPE_FMP_KEY")
+
+    path = {"earnings": "earnings", "splits": "splits", "dividends": "dividends"}[kind]
+    rows = _fmp_rows(path, {"symbol": ticker, "apikey": config.FMP_KEY,
+                            "limit": FMP_EVENT_LIMIT}, timeout=EVENT_TIMEOUT)
+
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        date = _pick(row, "date", "paymentDate", "recordDate")
+        if kind == "earnings":
+            label = "Earnings"
+        elif kind == "splits":
+            label = _split_label(_num(_pick(row, "numerator", "splitFrom")),
+                                 _num(_pick(row, "denominator", "splitTo")))
+        else:
+            label = _dividend_label(_num(_pick(row, "dividend", "adjDividend")))
+        event = _event(date, kind, label)
+        if event:
+            out.append(event)
+    return out
+
+
+TWELVEDATA_BASE = "https://api.twelvedata.com"
+
+
+def _twelvedata_events(ticker, kind, start, end):
+    """The same three from Twelve Data, which does take a date range."""
+    if not config.TWELVEDATA_KEY:
+        raise RuntimeError("no API key — set ROLLTAPE_TWELVEDATA_KEY")
+
+    params = {"symbol": ticker, "apikey": config.TWELVEDATA_KEY,
+              "start_date": pd.Timestamp(start).strftime("%Y-%m-%d")}
+    if end:
+        params["end_date"] = pd.Timestamp(end).strftime("%Y-%m-%d")
+
+    url = f"{TWELVEDATA_BASE}/{kind}?{urllib.parse.urlencode(params)}"
+    with urllib.request.urlopen(url, timeout=EVENT_TIMEOUT) as resp:
+        payload = json.loads(resp.read().decode("utf-8", "replace"))
+
+    # Failures arrive as HTTP 200 with a status field, exactly as they do for prices.
+    if not isinstance(payload, dict):
+        raise ValueError("unexpected response shape")
+    if payload.get("status") == "error":
+        message = payload.get("message") or "request rejected"
+        if payload.get("code") == 429:
+            raise RuntimeError(f"rate limit reached — {message}")
+        raise ValueError(message)
+
+    rows = payload.get(kind) or payload.get("values") or []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        date = _pick(row, "date", "datetime", "ex_date", "payment_date")
+        if kind == "earnings":
+            label = "Earnings"
+        elif kind == "splits":
+            label = _split_label(_num(_pick(row, "to_factor", "numerator")),
+                                 _num(_pick(row, "from_factor", "denominator")))
+        else:
+            label = _dividend_label(_num(_pick(row, "amount", "dividend")))
+        event = _event(date, kind, label)
+        if event:
+            out.append(event)
+    return out
+
+
+def _yahoo_events(ticker, kind, start, end):
+    """The same three from Yahoo, through yfinance's Ticker accessors.
+
+    Not the plain-urllib treatment `search` gets: the chart endpoint carries dividends and
+    splits but no earnings at all, so two of the three kinds would need yfinance anyway and
+    a second transport for one of them buys nothing.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        raise RuntimeError("yfinance is not installed. Run: pip install yfinance")
+
+    handle = yf.Ticker(ticker)
+    out = []
+    if kind == "earnings":
+        frame = handle.get_earnings_dates(limit=YAHOO_EARNINGS_LIMIT)
+        for stamp in (frame.index if frame is not None else []):
+            event = _event(stamp, kind, "Earnings")
+            if event:
+                out.append(event)
+        return out
+
+    series = handle.splits if kind == "splits" else handle.dividends
+    for stamp, value in (series.items() if series is not None else []):
+        value = _num(value)
+        # Yahoo states a split as the single ratio it multiplied the old shares by, so a
+        # 3-for-1 arrives as 3.0 and there is no second factor to read.
+        label = (_split_label(value, 1.0) if kind == "splits"
+                 else _dividend_label(value))
+        event = _event(stamp, kind, label)
+        if event:
+            out.append(event)
+    return out
+
+
+def _in_window(rows, start, end):
+    """Trim to the chart's window and sort, since only one source filters server-side."""
+    lo = pd.Timestamp(start).normalize()
+    hi = pd.Timestamp(end).normalize() if end else None
+    kept = []
+    for row in rows:
+        stamp = pd.Timestamp(row["date"])
+        if stamp < lo or (hi is not None and stamp > hi):
+            continue
+        kept.append(row)
+    kept.sort(key=lambda r: r["date"])
+    return kept
+
+
+def _events_path(ticker, start, end, kind, source):
+    """Where one kind's events for one window are cached.
+
+    The dot after the symbol is what keeps these files out of `_drop_superseded`'s glob,
+    which matches on `SYMBOL_` and would otherwise retire an event file as a stale price
+    frame. Same open-ended stamping as prices, and for the same reason: an earnings date in
+    the future moves, and a window running up to today keeps gaining them.
+    """
+    stamp = f"{_fresh_until(DEFAULT_INTERVAL)}." if _is_open_ended(end) else ""
+    key = hashlib.md5(f"{ticker}|{start}|{end}|{kind}".encode()).hexdigest()[:16]
+    return os.path.join(CACHE_DIR, f"{ticker.upper()}.{key}.{stamp}{source}.events.json")
+
+
+def _cached_events(ticker, start, end, kind, source):
+    path = _events_path(ticker, start, end, kind, source)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rows = json.load(fh)
+    except (OSError, ValueError):
+        return None  # a half-written file is worth refetching, not crashing over
+    return rows if isinstance(rows, list) else None
+
+
+def _events_for_kind(ticker, start, end, kind):
+    """One kind, from the first source that answers.
+
+    **A kind comes whole from one source or not at all.** Merging two feeds' earnings dates
+    would produce a set that is complete from neither and looks authoritative anyway — the
+    same failure as labelling daily bars five-minute, in a place nobody would think to
+    check. So a source that raises is passed over entirely rather than contributed from.
+
+    An empty answer is a real answer: a company that has never split has no splits, and
+    falling through to ask a second source would spend a call to be told so again.
+    """
+    # Bound here rather than in a module-level table, exactly as `fetch` binds its own:
+    # a table built at import time holds the original functions, which quietly makes each
+    # of these unpatchable and lets a test that meant to stub a source reach the network.
+    fetchers = {"fmp": _fmp_events, "twelvedata": _twelvedata_events,
+                "yahoo": _yahoo_events}
+    for source in _event_sources(start):
+        rows = _cached_events(ticker, start, end, kind, source)
+        if rows is None:
+            try:
+                rows = _in_window(fetchers[source](ticker, kind, start, end), start, end)
+            except Exception:  # noqa: BLE001 - the next source gets a turn
+                continue
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            try:
+                with open(_events_path(ticker, start, end, kind, source), "w",
+                          encoding="utf-8") as fh:
+                    json.dump(rows, fh)
+            except OSError:  # a read-only cache dir costs a refetch, not the render
+                pass
+        return rows
+    return []
+
+
+def events(ticker: str, start: str, end: str | None = None, kinds=()) -> list:
+    """Dated corporate events for a window, one row per event, sorted.
+
+    Fails soft, which is the opposite of what `fetch` does and deliberate. A render without
+    its prices is nothing; a render whose earnings lookup timed out is the chart someone
+    asked for, missing an overlay. The renderer draws either way and the difference is
+    visible on screen, so failing the whole job over it would trade a recoverable outcome
+    for an unrecoverable one.
+
+    What it will not do is answer *partially* from a source — see `_events_for_kind`.
+    """
+    ticker = str(ticker or "").strip().upper()
+    wanted = [k for k in EVENT_KINDS if k in set(kinds or ())]
+    if not ticker or not wanted:
+        return []
+
+    out = []
+    for kind in wanted:
+        out.extend(_events_for_kind(ticker, start, end, kind))
+    out.sort(key=lambda r: (r["date"], r["kind"]))
+    return out
 
 
 # ---------------------------------------------------------------------------

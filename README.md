@@ -30,7 +30,7 @@ numbers come from** for why you would, and for the one thing its entry plan can'
 | Comparison | Several tickers indexed to 100, labels at the line ends | up to 6 |
 | Candlesticks | OHLC candles appearing in sequence over a volume strip | 1 |
 | Bar comparison | Bars growing to a metric or your own numbers | up to 8 |
-| Annotated timeline | Line reveal with callouts landing on dates you set | 1 |
+| Annotated timeline | Line reveal with callouts landing on dates — looked up or typed | 1 |
 | Bar race | Ranked bars reordering as performance changes | up to 8 |
 
 Bar comparison can pull total return, max drawdown, annualised volatility or latest
@@ -94,6 +94,39 @@ would be about two thirds empty.
 intraday render fails rather than quietly handing you daily bars with a 5-minute label. It
 needs either a Twelve Data key or yfinance installed; with neither, the intraday options
 are hidden rather than offered and broken.
+
+## Callouts on the timeline chart
+
+Two kinds, and a chart can carry both.
+
+**Auto callouts** are the dates the price source already knows: **Earnings**, **Splits**
+and **Dividends**, each its own toggle. Turn one on and every occurrence inside your window
+is marked — earnings by date, splits with the ratio (`10-for-1 split`), dividends with the
+amount. Off by default, so nothing changes on a chart you already had.
+
+**Your own callouts** are the rows underneath: a date and whatever you want it to say. This
+is where the thing the feed can't know goes — `AI narrative begins`, `Fed pivots`. Type one
+on the same day as an automatic mark and yours replaces it, so there is no way to end up
+with two labels stacked on one date.
+
+On a crowded chart the labels stack into up to three rows and then stop. **When there is no
+room left, the mark stays and only its text drops** — so a five-year chart with earnings on
+still shows all twenty reporting dates, it just doesn't write "Earnings" twenty times.
+Nothing is ever silently left off. Where labels do compete for a spot, yours wins, then a
+split, then a dividend, then earnings — the ones that say something specific outrank the
+one that repeats.
+
+An earnings mark is labelled `Earnings` rather than `Q2 earnings` on purpose: results are
+reported in the quarter *after* the one they cover, and plenty of companies don't run their
+fiscal year on the calendar, so the quarter number would be wrong often enough to matter.
+The date carries the meaning.
+
+If the lookup fails — a provider outage, no key, a quota gone — the chart draws without the
+marks rather than failing the render. You will see it immediately in the preview.
+
+**Not every source has these.** Stooq is a price CSV and publishes none of it, so a machine
+with no licensed key falls back to Yahoo for events; with `ROLLTAPE_LICENSED_ONLY=1` and no
+key there is nothing to ask and the marks simply don't appear.
 
 ## Price axis and moving averages
 

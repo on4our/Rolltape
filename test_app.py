@@ -123,6 +123,50 @@ class PricingPageTests(unittest.TestCase):
         self.assertIn("monthly * 10", self._read("templates/pricing.html"))
 
 
+class AutoCalloutConfigTests(unittest.TestCase):
+    """Which corporate events the timeline is asked to mark.
+
+    Unlike the moving-average field, a typo here raises. These arrive from a fixed row of
+    toggles rather than a free-text box, so an unknown name is a caller's mistake — and
+    dropping it silently would mean marks that never appear on a chart that renders fine.
+    """
+
+    def test_off_by_default(self):
+        # The same contract as camera=locked and ma_lag=none: a config written before this
+        # existed renders exactly as it always did.
+        self.assertEqual(cfg()["auto_annotations"], [])
+        self.assertEqual(cfg(auto_annotations=None)["auto_annotations"], [])
+
+    def test_the_kinds_are_kept(self):
+        self.assertEqual(cfg(auto_annotations=["earnings", "splits"])["auto_annotations"],
+                         ["earnings", "splits"])
+
+    def test_an_unknown_kind_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            cfg(auto_annotations=["earnings", "buybacks"])
+        self.assertIn("must be one of", str(caught.exception))
+
+    def test_the_shape_the_browser_sends_survives(self):
+        self.assertEqual(cfg(auto_annotations=[" Earnings "])["auto_annotations"],
+                         ["earnings"])
+        self.assertEqual(cfg(auto_annotations="splits,earnings")["auto_annotations"],
+                         ["earnings", "splits"])
+
+    def test_duplicates_collapse_and_the_order_is_the_registry_order(self):
+        # Two of one kind would be two lookups and two marks on the same date, and the
+        # order decides which label gets the space when a chart is crowded.
+        self.assertEqual(
+            cfg(auto_annotations=["splits", "earnings", "splits"])["auto_annotations"],
+            ["earnings", "splits"])
+
+    def test_the_interface_is_told_which_kinds_exist(self):
+        # The toggles are built from /api/meta the way the chart list is, so a fourth kind
+        # needs no edit to the template.
+        meta = app.app.test_client().get("/api/meta").get_json()
+        self.assertEqual([k["id"] for k in meta["event_kinds"]], list(data.EVENT_KINDS))
+        self.assertTrue(all(k["label"] and k["desc"] for k in meta["event_kinds"]))
+
+
 class RailSectionTests(unittest.TestCase):
     """The two rails' collapsible sections, and the things that make splitting them safe.
 

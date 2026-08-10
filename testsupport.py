@@ -15,6 +15,12 @@ Two ways in, for the two kinds of test:
   hand a child, by design, so instead its disk cache is filled in advance and the ordinary
   cache hit in `data.fetch` does the rest. That exercises a real code path rather than a
   test-only one, which is the nicer property of the two.
+
+`patch_events(case, rows)` sits alongside the first of those and stands in for `data.events`
+rather than for prices. Corporate events are looked up, not generated — there is nothing to
+invent and no chart to mislead anyone with — so it is a fixed list rather than a generator,
+and it exists for the same reason: a timeline test with auto-callouts on would otherwise
+reach the network mid-render.
 """
 
 import hashlib
@@ -101,6 +107,26 @@ def patch_fetch(case):
     patcher.start()
     case.addCleanup(patcher.stop)
     case.addCleanup(data.reset_sources)
+
+
+def patch_events(case, rows=()):
+    """Point `data.events` at a fixed list of corporate events for one test case.
+
+    The timeline renderer asks for these inside the same call that draws the chart, so a
+    test with auto-callouts switched on would otherwise reach the network for them. Filters
+    by kind the way the real one does, so a test asking for splits alone gets splits alone —
+    without that, every such test would pass whatever it requested.
+    """
+    rows = [dict(r) for r in rows]
+
+    def fake_events(ticker, start, end=None, kinds=()):
+        wanted = set(kinds or ())
+        return sorted((dict(r) for r in rows if r["kind"] in wanted),
+                      key=lambda r: (r["date"], r["kind"]))
+
+    patcher = mock.patch.object(data, "events", fake_events)
+    patcher.start()
+    case.addCleanup(patcher.stop)
 
 
 def seed_cache(cache_dir, ticker, start, end=None, interval=data.DEFAULT_INTERVAL,
