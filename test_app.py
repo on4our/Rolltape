@@ -13,6 +13,7 @@ from unittest import mock
 
 import app
 import data
+import fundamentals
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -121,6 +122,65 @@ class PricingPageTests(unittest.TestCase):
             r"\$(\d+)", re.search(r"Annual is 10x monthly — (.+?)\.", doc).group(1))]
         self.assertEqual(stated, [m * 10 for m in monthly])
         self.assertIn("monthly * 10", self._read("templates/pricing.html"))
+
+
+class WaterfallConfigTests(unittest.TestCase):
+    """The waterfall's three settings, which are fiscal rather than calendar.
+
+    They are checked here rather than in the renderer for the reason every other setting
+    is: the renderer is handed concrete values and a bad one has to fail as a 400 before
+    the job is queued, not as a KeyError two minutes into a render.
+    """
+
+    def wf(self, **over):
+        return cfg(chart="waterfall", **over)
+
+    def test_the_bridge_defaults_to_the_income_statement(self):
+        self.assertEqual(self.wf()["bridge"], "income")
+
+    def test_an_unknown_bridge_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.wf(bridge="segments")
+
+    def test_an_unknown_statement_period_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.wf(statement="monthly")
+
+    def test_quarterly_statements_are_accepted(self):
+        self.assertEqual(self.wf(statement="quarterly")["statement"], "quarterly")
+
+    def test_the_period_count_is_bounded_rather_than_refused(self):
+        # A number typed into a spinner is not the same class of input as a name off a
+        # fixed list — clamping keeps a fat-fingered 900 from queueing a fetch nobody
+        # meant, without failing a render over it.
+        self.assertEqual(self.wf(periods=900)["periods"], fundamentals.MAX_PERIODS)
+        self.assertEqual(self.wf(periods=1)["periods"], 2)
+        self.assertEqual(self.wf(periods="lots")["periods"], 5)
+
+    def test_typed_rows_stand_in_for_a_ticker(self):
+        got = app.clean_config({"chart": "waterfall", "tickers": [],
+                                "rows": [{"label": "Opening", "value": 10}]})
+        self.assertEqual(got["tickers"], [])
+
+    def test_without_rows_it_still_needs_one(self):
+        with self.assertRaises(ValueError):
+            app.clean_config({"chart": "waterfall", "tickers": []})
+
+
+class MetaTests(unittest.TestCase):
+    """What /api/meta publishes, which is where the interface builds its controls from."""
+
+    def setUp(self):
+        self.meta = app.app.test_client().get("/api/meta").get_json()
+
+    def test_the_waterfall_is_offered_as_a_chart(self):
+        self.assertIn("waterfall", [c["id"] for c in self.meta["charts"]])
+
+    def test_the_bridges_and_statement_periods_come_from_the_registries(self):
+        self.assertEqual([b["id"] for b in self.meta["bridges"]],
+                         list(fundamentals.BRIDGES))
+        self.assertEqual([s["id"] for s in self.meta["statements"]],
+                         list(fundamentals.PERIODS))
 
 
 class RailSectionTests(unittest.TestCase):

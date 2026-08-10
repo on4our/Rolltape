@@ -32,10 +32,48 @@ numbers come from** for why you would, and for the one thing its entry plan can'
 | Bar comparison | Bars growing to a metric or your own numbers | up to 8 |
 | Annotated timeline | Line reveal with callouts landing on dates you set | 1 |
 | Bar race | Ranked bars reordering as performance changes | up to 8 |
+| Revenue waterfall | An income statement stepping down to net income | 1 |
 
 Bar comparison can pull total return, max drawdown, annualised volatility or latest
 close — or switch it to **My own numbers** and type revenue, margins, whatever you're
 narrating.
+
+## The revenue waterfall
+
+The one chart here that isn't drawn from prices. It reads an income statement and steps
+through it: revenue, then cost of revenue, gross profit, R&D and SG&A, operating income,
+tax and everything else, landing on net income — each bar hanging off wherever the last one
+finished, with the subtotals restated as full-height pillars and their share of revenue
+printed above them.
+
+Two bridges, on the **Bridge** control:
+
+- **Revenue to net income** reads the latest filing and shows where the money went.
+- **Revenue growth** reads a run of them and shows what each period added or gave back,
+  opening on the earliest revenue and closing on the latest.
+
+Pick annual or quarterly statements, and for the growth bridge how many periods it spans.
+The date range above it disappears for this chart, because a filing is not a window you
+drag — a waterfall is one period or a run of them, and nothing about 1Y or MAX changes what
+it draws.
+
+Everything on it is arithmetic between figures the company reported. Each change bar is one
+subtotal subtracted from another rather than a sum of cost lines, so the bars land on the
+net income the last pillar names even when a filer leaves a line out or classifies
+something unusually — and a stage whose inputs are missing is dropped rather than guessed
+at, so a company that reports no gross profit gets one operating-expenses bar instead of
+three invented ones.
+
+Statements come from Financial Modeling Prep when `ROLLTAPE_FMP_KEY` is set, and from
+Yahoo otherwise. There is nothing behind Yahoo — Stooq publishes no fundamentals and Twelve
+Data's are on a plan above the one wired here — so unlike a price chart, a waterfall fails
+rather than falling through when both are down. Under `ROLLTAPE_LICENSED_ONLY` only FMP is
+allowed, same as for prices.
+
+The API also takes a bridge typed out by hand, for numbers no feed has — post `rows` of
+`{"label", "value", "kind"}` where `kind` is `start`, `delta` or `total`, and the ticker
+becomes optional. The interface doesn't expose that; it is there so a segment breakdown or
+a figure off a slide can still be animated.
 
 ## Typing a ticker
 
@@ -195,9 +233,10 @@ no plane to move over, so the controls disappear for those two.
 ```
 app.py          Flask server, render queue, job tracking
 render_job.py   Runs one render in a child process, and reports progress back
-renderers.py    All six chart types, themes, easing, camera moves, export
-data.py         FMP, Twelve Data, Yahoo and Stooq fetches, in order, the disk cache,
-                and the symbol search
+renderers.py    All seven chart types, themes, easing, camera moves, export
+data.py         FMP, Twelve Data, Yahoo and Stooq price fetches, in order, the disk
+                cache, and the symbol search
+fundamentals.py Income statements from FMP and Yahoo, and the waterfall's bridges
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go
 jobs.py         The render job registry
@@ -206,6 +245,9 @@ signups.py      Email capture, to a list provider or a local file
 templates/      The interface, the landing page, and the pricing page at /pricing
 outputs/        Rendered MP4s land here
 ```
+
+Income statements are cached in the same directory and stamped with the day they were
+fetched, since "the last five filings" changes the morning a company reports.
 
 Price data is cached in `.cache/` so repeated renders of the same range don't re-download.
 A finished historical window is cached for good — it can't change. A range with **End**

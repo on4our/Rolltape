@@ -27,9 +27,11 @@ fallback. An ffmpeg already on PATH still wins when there is one.
 ```
 app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
-renderers.py    Six chart types + themes + easing + camera + ffmpeg export
+renderers.py    Seven chart types + themes + easing + camera + ffmpeg export
 data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, CSV cache,
                 and the symbol search behind the ticker field
+fundamentals.py Income statements — FMP then Yahoo — and the waterfall's bridges. A
+                separate seam from data.py because a statement is not a price series
 config.py       Env-var configuration; every default reproduces the local setup
 storage.py      Where a finished render lands and what URL plays it
 jobs.py         The render job registry
@@ -109,10 +111,16 @@ need a `data-for="yourchart"` attribute in `index.html`. The fixture is what mak
 suite cover the new chart at all — several tests iterate the whole registry, so a chart
 missing from it is silently untested rather than failing.
 
+A chart that doesn't draw from prices also has to be taken out of the controls that assume
+it does — the waterfall is the only one so far, and `usesRange()` in `index.html` is where
+that happens for the date range, the custom dates and the bar interval. Leaving them on
+screen would imply a choice the render is about to ignore, which is the same reason a
+locked camera hides travel and vertical.
+
 ## Tests
 
 ```bash
-python -m unittest              # all 262, about 20 seconds
+python -m unittest              # all 334, about 20 seconds
 python -m unittest test_camera  # one module
 ```
 
@@ -125,8 +133,8 @@ for not having run it.
 **There is no generated-data mode in the app**, and reintroducing one would be a mistake: a
 chart of invented prices is indistinguishable from a real one three steps later in a video
 editor. The generator lives in `testsupport.py`, which nothing the app runs imports, and
-tests reach it two ways — `patch_fetch(case)` in-process, and `seed_cache(...)` for the two
-tests that spawn a real render subprocess. The second is the interesting one: rather than a
+tests reach it three ways — `patch_fetch(case)` and `patch_income(case)` in-process, and
+`seed_cache(...)` for the two tests that spawn a real render subprocess. The second is the interesting one: rather than a
 flag handed across the process boundary, the child's disk cache is filled in advance and
 the ordinary cache hit in `data.fetch` does the rest, so the test exercises a production
 path instead of a test-only one.
@@ -135,6 +143,9 @@ path instead of a test-only one.
   numbers against `docs/pricing.md`; and the error page's HTML-versus-JSON split.
 - `test_data.py` — the four-source fallback order, FMP and Twelve Data parsing, the plan
   horizon, range presets, cache freshness, attribution.
+- `test_fundamentals.py` — the statement fetch and, more importantly, the bridge
+  arithmetic: that every bridge lands on the total it names, under a missing line, an
+  overshooting expense split, and a loss.
 - `test_render.py` — the export path: backgrounds, date labelling, stills, every theme.
 - `test_camera.py` — the planned limits behind each move.
 - `test_render_job.py` — the two-process protocol, the inherited cache, and preview latency
@@ -160,6 +171,12 @@ Two things the suite is built around, both worth preserving:
 **Themes.** All colour lives in the `THEMES` dict at the top of `renderers.py`. Never
 hardcode a colour inside a renderer. Adding a theme requires no other change.
 
+Where a chart needs a colour for a *role* the palette doesn't name, derive it rather than
+adding a hex — `_pillar_color()` picks the first series colour that is neither `up` nor
+`down`, because two of the four themes open their palette with the same value they use for
+a rise and `series[0]` would paint a waterfall's closing pillar identically to the change
+beside it. Adding a theme still needs no edit here, which is the property that matters.
+
 **Quality tiers.** A tier owns `crf` and `preset` outright, but only *seeds* `fps` and
 `res` — the slate overrides those two independently. `clean_config()` resolves both to
 concrete numbers, so `cfg["fps"]` and `cfg["resolution"]` are always set and nothing
@@ -180,6 +197,19 @@ the only place it gets narrowed. Everything else (`_find_cached`, `_drop_superse
 fetch loop) reads that one function, so another source is an entry in `SOURCES`, a fetcher
 with the shared `(ticker, start, end, interval)` signature, an entry in the `fetchers` dict,
 an entry in `SOURCE_KEYS` if it needs one, and nothing else.
+
+**Statements are a second seam, not a fifth source.** `fundamentals.py` fetches income
+statements and `SOURCES` there is FMP then Yahoo. It is a separate module because
+`data.SOURCES` is a preference order over fetchers that all share one signature —
+`(ticker, start, end, interval)` returning OHLCV — and a statement has none of those
+arguments: it arrives per fiscal period, in line items, from a different endpoint. What it
+does share is borrowed rather than restated: `data.keyed`, `data.covers` and
+`data.fmp_rows` are public for exactly that, and `data.note_source` is the one writer
+behind the footer, so a waterfall drawn off the licensed feed credits it without
+`attribution()` learning a second path. Two sources rather than four because Stooq
+publishes no fundamentals at all and Twelve Data's are on a plan above the $29 one wired
+here — which also means a waterfall has nothing behind Yahoo and fails rather than falling
+through, unlike every price chart.
 
 **A source that can't serve the request is dropped, never asked to approximate it.** There
 are three ways to be dropped and they exist for the same reason — a failed render is
@@ -234,6 +264,24 @@ clip isn't swallowed by it, and closed over the last quarter so the final frame 
 chart a lagged and an unlagged render both end on. `none` is the default and reproduces
 the pre-lag output exactly. A renderer opts in by drawing its averages from that second
 array rather than from `cut`; drawing them from `cut` is how they keep pace.
+
+**Bridges close by construction.** The waterfall's whole claim is that its bars land on the
+total the last one names, so `fundamentals.bridge()` only ever subtracts one *reported*
+subtotal from another — cost of revenue is `gross profit - revenue`, not the filed cost
+line. Summing components instead would stop landing on net income the moment a filer left
+a line out or classified something unusually, and the error would surface on the tax bar,
+which is the last place anyone would look for it. Three consequences worth keeping: a stage
+whose inputs are missing is *dropped* rather than guessed at (no gross profit means one
+operating-expenses bar, not three invented ones); the R&D/SG&A split draws whatever it
+doesn't account for as a labelled residual rather than absorbing it; and a split that
+overshoots the step falls back to one honest bar. `IncomeBridgeTests` is that arithmetic,
+made enforceable.
+
+Figures stay in the currency they were filed in and at the scale they were filed at —
+nothing rescales on the way in, so `$60.9B` on screen is checkable against the filing.
+`_compact` is what reads it out and `_compact_axis` is the axis version, which picks one
+scale and one precision for every tick; `_money` is for prices and would print a quarter's
+revenue as `$130,497,000,000`.
 
 **Motion.** `ease()` maps normalised time to progress; `_plan()` maps frame index to a
 position along a densely-interpolated series. Series are upsampled to ~2x the frame count
@@ -435,7 +483,10 @@ draining the queue is still what bounds CPU, not the lock.
   is what every render is. That needs their Data Display and Licensing Agreement, quoted
   rather than listed, and it is unresolved. Twelve Data is wired and tested as the
   alternative — its $29 plan states display use is included — so switching is a key swap
-  rather than a rewrite.
+  rather than a rewrite. **A revenue figure on screen is display use exactly as a price
+  is**, so the waterfall sits under the same unresolved question — and the escape hatch is
+  narrower there, because Twelve Data's fundamentals are on a plan above the one that
+  would replace FMP for prices.
 - Neither licensed feed's dividend and split adjustment has been compared against Yahoo or
   Stooq. Same class of discrepancy the README warns about for Yahoo versus Stooq, and the
   same thing roadmap item 7 is about — but unmeasured rather than merely unexposed, so
@@ -468,6 +519,34 @@ draining the queue is still what bounds CPU, not the lock.
   if you're watching `.cache/`.
 - Moving averages are only on the line, candlestick and timeline charts. Comparison and
   race draw several tickers already, and averages on top would be unreadable.
+- **A waterfall has one source below the licensed one and nothing below that.** Yahoo's
+  fundamentals endpoint is the whole fallback, so when it moves the render fails rather
+  than falling through the way a daily price chart does. That is the honest outcome and
+  it is also a thinner floor than any other chart stands on.
+- **Neither statement fetcher has been checked against a live response from this repo.**
+  Both are written to the documented shapes and covered by recorded samples in
+  `test_fundamentals.py`, which is the same standard the FMP and Twelve Data price
+  fetchers are held to — but those were written with a key in hand and these were not.
+  The first thing to do with a real key is confirm the field names, particularly
+  `fiscalYear` versus `calendarYear` across FMP's stable and v3 paths.
+- **Yahoo reports no fiscal period label**, so `_yahoo_label` derives one from the period
+  end date. The annual form is right for very nearly every filer; quarterly is the weak
+  half, because a company whose year is offset from the calendar numbers its quarters
+  differently from the calendar quarter they end in. FMP reports the real label and is
+  tried first, so this is the degraded answer rather than the usual one.
+- The waterfall ignores `range`, `start`, `end` and `interval` entirely — `usesRange()`
+  hides them in the interface, but an API caller can still post them and they do nothing.
+- A hand-typed bridge whose totals disagree with its own running sum draws the totals it
+  was given, because on that path the author's number is the authority. The fetched
+  bridges close by construction and can't hit this.
+- **Statement figures and price figures may not agree about a company.** Nothing
+  cross-checks them, and the adjustment question in the note above applies here too: a
+  waterfall off FMP and a price chart off Yahoo in the same video are two sources with no
+  reconciliation between them.
+- The waterfall's manual-row path is reachable only through the API. It is what the
+  offline tests draw from and what a segment breakdown would use, but the interface has
+  no editor for it — the bars chart's row editor is a two-column one and a bridge row
+  needs a third field for its kind.
 
 ## Roadmap
 
@@ -484,7 +563,10 @@ Near term, in rough priority order.
 4. Reload a past render's config from the queue. Jobs already carry their `cfg`; the UI
    just can't reach it, so "same chart, but AMD" means retyping everything.
 5. Auto-annotations on the timeline chart — earnings dates and splits from the data
-   source, rather than typing every callout by hand.
+   source, rather than typing every callout by hand. `fundamentals.py` is now the seam
+   this goes through: it already knows the fiscal periods and both feeds publish the
+   dates, so the work is a fetcher and a way to merge them with typed callouts rather
+   than a new source.
 6. Benchmark overlay: draw SPY muted behind any single-ticker chart.
 7. Adjusted vs raw closes as an explicit choice. `auto_adjust=True` is hardcoded in
    `_yahoo`, and Yahoo and Stooq adjust differently enough to change the total return
@@ -496,8 +578,19 @@ averages, the encoder preset (`final` moved from `slow` to `medium`, with an
 Auto/Faster/Slower override in the UI), brand kits, the landing page with email
 capture — step 3 of docs/acquisition.md's sequencing, which leaves the demo instance
 above it as a deploy rather than a code change — the licensed price feed, which was the
-one hard blocker in front of charging anybody, and symbol suggestions in the ticker field
-with `/api/series` behind them.
+one hard blocker in front of charging anybody, symbol suggestions in the ticker field
+with `/api/series` behind them, and the revenue waterfall — the first chart here drawn
+from something other than prices, which is what `fundamentals.py` exists for.
+
+Two things the waterfall opens up that are not on the list above because they are one
+fetcher each now rather than a module: a `pe` or `margin` metric on the bar chart, which
+wants the same statements plus a price, and segment revenue, which is an FMP endpoint
+Yahoo has no equivalent for — so it would be the first thing here that needs a key rather
+than merely preferring one. A composition donut is the other obvious neighbour and the
+one to be careful with: slices have to be parts of a whole, so revenue by segment or index
+weights qualify and a chart of P/E ratios across tickers does not — those don't sum to
+anything, and a pie of them would be exactly the wrong-but-looks-right failure the source
+rules exist to prevent. That is a bar chart.
 
 ### Cinematography — transitions
 

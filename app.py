@@ -17,6 +17,7 @@ from flask import (Flask, Response, jsonify, redirect, render_template, request,
 import config
 import data as datasrc
 import examples as showcase
+import fundamentals
 import jobs as jobstore
 import render_job
 import presets
@@ -170,7 +171,9 @@ def clean_config(raw):
         raise ValueError(f"Unknown chart type: {chart}")
 
     tickers = [t.strip().upper() for t in raw.get("tickers", []) if str(t).strip()]
-    needs_ticker = not (chart == "bars" and raw.get("rows"))
+    # Two charts can be drawn from numbers typed into the form instead of fetched, and
+    # neither needs a symbol when it is.
+    needs_ticker = not (chart in ("bars", "waterfall") and raw.get("rows"))
     if needs_ticker and not tickers:
         raise ValueError("Add at least one ticker.")
     tickers = tickers[: spec["tickers"]]
@@ -220,6 +223,14 @@ def clean_config(raw):
     # Same reasoning for the averages: they arrived with the price line before there was a
     # lag to ask for, and "none" is that render.
     ma_lag = _one_of(raw.get("ma_lag"), renderers.MA_LAG, "none", "Average lag")
+    # The waterfall reads fiscal periods rather than a date window, so its three settings
+    # are checked here and the renderer is handed concrete ones — same as the tier
+    # resolving fps and resolution before anything downstream can re-derive them.
+    bridge = _one_of(raw.get("bridge"), fundamentals.BRIDGES,
+                     fundamentals.DEFAULT_BRIDGE, "Bridge")
+    statement = _one_of(raw.get("statement"), fundamentals.PERIODS,
+                        fundamentals.DEFAULT_PERIOD, "Statement period")
+    periods = _bounded(raw.get("periods"), 5, 2, fundamentals.MAX_PERIODS)
 
     cfg = {
         "chart": chart,
@@ -249,6 +260,9 @@ def clean_config(raw):
         "normalize": bool(raw.get("normalize", True)),
         "max_candles": int(raw.get("max_candles", 90) or 90),
         "metric": raw.get("metric", "return"),
+        "bridge": bridge,
+        "statement": statement,
+        "periods": periods,
         "rows": raw.get("rows") or [],
         "annotations": raw.get("annotations") or [],
         "unit": raw.get("unit", ""),
@@ -420,6 +434,11 @@ def meta():
                    for k, v in datasrc.RANGES.items()],
         "cameras": [{"id": k, "label": v["label"], "desc": v["desc"]}
                     for k, v in renderers.CAMERAS.items()],
+        "bridges": [{"id": k, "label": v["label"], "desc": v["desc"]}
+                    for k, v in fundamentals.BRIDGES.items()],
+        "statements": [{"id": k, "label": v["label"]}
+                       for k, v in fundamentals.PERIODS.items()],
+        "max_periods": fundamentals.MAX_PERIODS,
         "travels": list(renderers.TRAVELS),
         "ma_lags": list(renderers.MA_LAGS),
         "sizes": {a: {str(r): list(s) for r, s in rs.items()}

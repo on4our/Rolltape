@@ -455,7 +455,7 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
                rather than only appearing, since nothing else on the page says it. -->
           <div class="quotes" id="tickerData" aria-live="polite" hidden></div>
         </div>
-        <div class="field">
+        <div class="field" id="rangeField">
           <label>Date range</label>
           <div class="chips" id="ranges"></div>
           <div class="hint" id="rangeHint"></div>
@@ -531,6 +531,23 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
           <div class="hint">Unit and decimal places</div>
         </div>
 
+        <!-- The waterfall reads fiscal periods, not the date range above it — a bridge is
+             one filing or a run of them, and neither is a window you drag. -->
+        <div class="field" data-for="waterfall">
+          <label for="bridge">Bridge</label>
+          <select class="ctrl" id="bridge"></select>
+          <div class="hint" id="bridgeHint"></div>
+        </div>
+        <div class="field" data-for="waterfall">
+          <label for="statement">Statements</label>
+          <select class="ctrl" id="statement"></select>
+        </div>
+        <div class="field" data-for="waterfall" id="periodsField">
+          <label for="periods">Periods</label>
+          <input class="ctrl" id="periods" type="number" min="2" max="12" value="5">
+          <div class="hint">How many periods of change the bridge steps through</div>
+        </div>
+
         <div class="field" data-for="timeline">
           <label>Callouts</label>
           <div id="notes"></div>
@@ -561,8 +578,8 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
       </div>
     </details>
 
-    <!-- Bars and the race have no plane to move a camera over — the rows are the
-         composition — so the whole group drops out for them. -->
+    <!-- Bars, the race and the waterfall have no plane to move a camera over — the rows
+         are the composition — so the whole group drops out for them. -->
     <details class="group" id="gCamera" data-for="line compare candles timeline" open>
       <summary><span class="caret"></span><span class="eyebrow">Camera</span>
         <span class="digest" id="dCamera"></span></summary>
@@ -710,7 +727,7 @@ const state = {
   chart:"line", normalize:1, easing:"out", theme:"midnight", range:"1y",
   aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0, preset:"auto",
   camera:"locked", travel:"standard", cameraY:"track", log:0, maLag:"none",
-  meta:null, maxTickers:1, kits:{}
+  bridge:"income", meta:null, maxTickers:1, kits:{}
 };
 const CUSTOM = "custom";
 
@@ -733,6 +750,12 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
     `<button data-v="${v}" aria-pressed="${v===state.maLag}">${
       v==="none" ? "Off" : v[0].toUpperCase()+v.slice(1)}</button>`).join("");
   applyCamera();
+  // Both lists come from the registries in fundamentals.py, the same way the camera's do
+  // — adding a bridge there is the whole change here.
+  $("#bridge").innerHTML = (m.bridges||[]).map(b=>
+    `<option value="${b.id}">${esc(b.label)}</option>`).join("");
+  $("#statement").innerHTML = (m.statements||[]).map(s=>
+    `<option value="${s.id}">${esc(s.label)}</option>`).join("");
   $("#themes").innerHTML = m.themes.map(t=>`
     <button class="swatch" data-id="${t.id}" aria-pressed="${t.id===state.theme}">
       <span class="swatch-dots">${t.swatch.map(c=>`<i style="background:${c}"></i>`).join("")}</span>
@@ -779,9 +802,16 @@ const segLabel = id => ($(id).querySelector('[aria-pressed="true"]') || {}).text
 const named = (list, id) => ((state.meta[list] || []).find(x => x.id === id) || {}).label || "";
 
 const SECTIONS = [
-  ["gChart",  () => named("charts", state.chart)],
+  ["gChart",  () => [named("charts", state.chart),
+                     state.chart === "waterfall" ? named("bridges", state.bridge) : ""]
+                    .filter(Boolean).join(" · ")],
+  // A waterfall has no date range to report, so its digest names what it does read
+  // instead — a summary saying "1Y" for a chart that ignores the range is worse than none.
   ["gData",   () => [$("#tickers").value.trim(),
-                     state.range === CUSTOM ? "Custom dates" : named("ranges", state.range)]
+                     state.chart === "waterfall"
+                       ? named("statements", $("#statement").value)
+                       : (state.range === CUSTOM ? "Custom dates"
+                                                 : named("ranges", state.range))]
                     .filter(Boolean).join(" · ")],
   ["gMotion", () => `${+$("#duration").value}s + ${+$("#hold").value}s · ` +
                     segLabel("#easingSeg").toLowerCase()],
@@ -899,8 +929,14 @@ const day = iso => { const [y,m,d] = iso.split("-"); return `${+d} ${MONTHS[+m-1
 // Each preset arrives from /api/meta already resolved, so the hint can't disagree with the
 // window the render will fetch. Left open past midnight the text goes a day stale; the
 // render re-resolves server-side either way.
+// The waterfall reads fiscal periods off a filing, so the date range, the custom dates and
+// the bar interval decide nothing about what it draws. Same rule the camera group follows:
+// a control that cannot change the render doesn't stay on screen implying that it can.
+const usesRange = () => state.chart !== "waterfall";
+
 function applyRange(){
-  const custom = state.range === CUSTOM;
+  const custom = state.range === CUSTOM && usesRange();
+  $("#rangeField").hidden = !usesRange();
   $("#customRange").hidden = !custom;
   // A preset names its own interval, so the manual control belongs to a custom range only
   // — leaving it visible would imply a choice the server is about to overrule.
@@ -1009,8 +1045,23 @@ function applyChart(){
   }
   toggleRows();
   applyMaLag();
+  applyBridge();
+  applyRange();  // the range block follows the chart too — see usesRange()
   slate();
 }
+
+// An income bridge reads one filing, so the period count means nothing to it — the control
+// follows the bridge on and off the way travel follows a moving camera. Recomputed from
+// both conditions rather than accumulated, so it comes back when the bridge changes again.
+function applyBridge(){
+  const b = (state.meta.bridges||[]).find(x=>x.id===state.bridge);
+  $("#bridgeHint").textContent = b ? b.desc : "";
+  $("#periodsField").hidden = state.chart !== "waterfall" || state.bridge !== "growth";
+}
+$("#bridge").addEventListener("change", ()=>{
+  state.bridge = $("#bridge").value;
+  applyBridge(); schedule();
+});
 $("#metric").addEventListener("change", ()=>{ toggleRows(); schedule(); });
 function toggleRows(){
   const manual = state.chart==="bars" && $("#metric").value==="manual";
@@ -1238,6 +1289,7 @@ function config(){
     normalize: !!state.normalize,
     max_candles: +$("#maxCandles").value,
     metric: $("#metric").value,
+    bridge: state.bridge, statement: $("#statement").value, periods: +$("#periods").value,
     rows: manual ? collect($("#rows"), "label", "value").map(r=>({label:r.label, value:+r.value})) : [],
     annotations: state.chart==="timeline" ? collect($("#notes"), "date", "label") : [],
     unit: $("#unit").value, decimals: +$("#decimals").value,

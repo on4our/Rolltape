@@ -1,4 +1,4 @@
-"""Generated prices for the test suite. Nothing the app runs imports this module.
+"""Generated prices and statements for the test suite. Nothing the app runs imports this.
 
 The suite is built around not touching the network — see CLAUDE.md — which means something
 has to stand in for a price feed. This is that something, and it lives here rather than in
@@ -15,6 +15,13 @@ Two ways in, for the two kinds of test:
   hand a child, by design, so instead its disk cache is filled in advance and the ordinary
   cache hit in `data.fetch` does the rest. That exercises a real code path rather than a
   test-only one, which is the nicer property of the two.
+
+Income statements get the same treatment through `patch_income(case)`, and the generator
+behind it holds one property the price one doesn't need: **every subtotal is consistent with
+the lines above it**. A waterfall's whole claim is that it lands on the net income it names,
+so a fixture whose gross profit disagreed with its revenue and cost would make that
+untestable — the bridge would close over an inconsistency instead of being checked against
+one.
 """
 
 import hashlib
@@ -25,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 import data
+import fundamentals
 
 # Regular US trading hours. Only this generator needs them — a real feed decides its own
 # session — but they have to be right or an offline intraday test isn't exercising the
@@ -98,6 +106,64 @@ def synthetic_fetch(ticker, start, end=None, interval=data.DEFAULT_INTERVAL,
 def patch_fetch(case):
     """Point `data.fetch` at generated prices for the length of one test case."""
     patcher = mock.patch.object(data, "fetch", synthetic_fetch)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+    case.addCleanup(data.reset_sources)
+
+
+def synthetic_income(ticker, period=fundamentals.DEFAULT_PERIOD, periods=1):
+    """Deterministic fake income statements in the shape `fundamentals.fetch` returns.
+
+    Margins are drawn once per ticker and then held roughly steady, because a bridge drawn
+    from a company whose gross margin wanders between 10% and 90% year to year is a shape no
+    filing has and a chart nobody would ship. Every subtotal is derived from the line above
+    it rather than drawn independently — see the module docstring.
+    """
+    seed = int(hashlib.md5(f"{ticker.upper()}|{period}".encode()).hexdigest()[:8], 16)
+    rng = np.random.default_rng(seed)
+    months = fundamentals.PERIODS[period]["months"]
+    n = int(periods) + 1
+
+    ends = pd.date_range(end=pd.Timestamp("2025-12-31"), periods=n,
+                         freq=pd.DateOffset(months=months))
+    revenue = (2e9 + seed % 40 * 1e9) * np.cumprod(
+        np.concatenate([[1.0], 1 + rng.normal(0.18, 0.12, n - 1)]))
+    gross_margin = rng.uniform(0.35, 0.75)
+    rnd_share, sga_share = rng.uniform(0.08, 0.18), rng.uniform(0.05, 0.12)
+    tax = rng.uniform(0.12, 0.22)
+
+    gross = revenue * gross_margin
+    rnd, sga = revenue * rnd_share, revenue * sga_share
+    operating = gross - rnd - sga
+    rows = []
+    for i, end in enumerate(ends):
+        rows.append({
+            "End": end,
+            "Label": (f"FY{end.year}" if period == "annual"
+                      else f"Q{(end.month - 1) // 3 + 1} {end.year}"),
+            "Currency": "USD",
+            "Revenue": revenue[i], "CostOfRevenue": revenue[i] - gross[i],
+            "GrossProfit": gross[i], "ResearchDevelopment": rnd[i],
+            "SellingGeneralAdministrative": sga[i],
+            "OperatingExpenses": rnd[i] + sga[i], "OperatingIncome": operating[i],
+            "NetIncome": operating[i] * (1 - tax),
+        })
+    return fundamentals._frame(rows)
+
+
+def patch_income(case):
+    """Point `fundamentals.fetch` at generated statements for the length of one test case.
+
+    Records "yahoo" like `synthetic_fetch` does, and for the same reason — that is the
+    source the footer stays silent about, so a chart drawn here carries no attribution it
+    wouldn't carry live.
+    """
+    def fake(ticker, period=fundamentals.DEFAULT_PERIOD, periods=1):
+        frame = synthetic_income(ticker, period, periods)
+        data.note_source(ticker, "yahoo")
+        return frame
+
+    patcher = mock.patch.object(fundamentals, "fetch", fake)
     patcher.start()
     case.addCleanup(patcher.stop)
     case.addCleanup(data.reset_sources)

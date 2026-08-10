@@ -2,6 +2,7 @@
 
 import logging
 import shutil
+import textwrap
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,6 +23,7 @@ from matplotlib.animation import FFMpegWriter, FuncAnimation
 from matplotlib.collections import LineCollection, PolyCollection
 
 import data as datasrc
+import fundamentals
 
 # ---------------------------------------------------------------------------
 # Themes
@@ -645,6 +647,56 @@ def _money_axis(lo, hi):
 def _num_axis(lo, hi):
     dec = _decimals(lo, hi)
     return lambda v, _=None: f"{v:,.{dec}f}"
+
+
+# Line items are read at the scale they are filed at. `_money` is built for a price and
+# would print a quarter's revenue as $130,497,000,000, which is both unreadable at 40pt and
+# a different number from the one anybody says out loud.
+_SCALES = ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K"))
+
+
+def _compact(v, cur="$"):
+    """$60.9B — a filed figure at the scale it gets narrated at.
+
+    Precision follows magnitude the way `_money` does, for the same reason: $1.05B and
+    $105B want a different number of decimals to carry the same information, and a fixed
+    one either rounds the small figures flat or litters the large ones.
+    """
+    a = abs(v)
+    for cut, suffix in _SCALES:
+        if a >= cut:
+            n = v / cut
+            a = abs(n)
+            dec = 2 if a < 10 else 1 if a < 100 else 0
+            return f"{cur}{n:,.{dec}f}{suffix}"
+    return f"{cur}{v:,.0f}"
+
+
+def _signed_compact(v, cur="$"):
+    """The same figure as a change, with the sign outside the currency: -$32.6B."""
+    sign = "-" if v < 0 else "+"
+    return f"{sign}{_compact(abs(v), cur)}"
+
+
+def _compact_axis(lo, hi, cur="$"):
+    """One scale and one precision for every tick down the axis.
+
+    `_compact` picks precision from each value on its own, which is right for a readout and
+    wrong for an axis: it prints $140B directly above $80.0B, and the reader spends a beat
+    working out whether those are the same kind of number. Same reasoning as `_money_axis`,
+    which exists for the same reason one step down the scale.
+    """
+    mag = max(abs(lo), abs(hi))
+    cut, suffix = 1.0, ""
+    for edge, mark in _SCALES:
+        if mag >= edge:
+            cut, suffix = edge, mark
+            break
+    dec = _decimals(lo / cut, hi / cut)
+    # Zero has no scale. "$0B" is the kind of label that makes a reader stop and check
+    # whether the axis means what they think it means.
+    return lambda v, _=None: (f"{cur}0" if v == 0
+                              else f"{cur}{v / cut:,.{dec}f}{suffix}")
 
 
 def _glow(ax, color, ctx, zorder=2):
@@ -1586,6 +1638,215 @@ def render_race(cfg, ctx, out, progress=None, still=None):
     return _export(fig, anim, out, ctx, progress)
 
 
+# ---------------------------------------------------------------------------
+# 7. Revenue waterfall
+# ---------------------------------------------------------------------------
+def _wrap(label, width, lines=2):
+    """A bar label folded to `width`, then to at most `lines` of it.
+
+    Both numbers follow the aspect. A 16:9 frame gives a bar enough width for two
+    comfortable lines; 9:16 gives it barely half that, so the same label needs a narrower
+    fold and a third line to land in. Anything past the limit is folded back into the last
+    line rather than dropped — a truncated label is worse than a tight one.
+    """
+    parts = textwrap.wrap(str(label), width) or [str(label)]
+    if len(parts) > lines:
+        parts = parts[:lines - 1] + [" ".join(parts[lines - 1:])]
+    return "\n".join(parts)
+
+
+def _waterfall_rows(cfg):
+    """The bridge to draw: hand-typed rows if there are any, a fetched statement otherwise.
+
+    Same split as the bar chart's manual metric, and for the same reason — a bridge is
+    often a number off a slide that no API has, and a chart type that can only draw what a
+    feed serves is one you stop reaching for. The fetched path is the one that needs a
+    source; the typed one needs nothing and works offline.
+    """
+    typed = []
+    for row in cfg.get("rows") or []:
+        label = str(row.get("label", "")).strip()
+        if not label or row.get("value") in (None, ""):
+            continue
+        kind = str(row.get("kind") or "delta").strip().lower()
+        typed.append({"label": label, "value": float(row["value"]),
+                      "kind": kind if kind in fundamentals.KINDS else "delta",
+                      "share": False})
+    if typed:
+        # A bridge has to open on a level, whatever the first row called itself — a first
+        # bar drawn as a change would start from zero and mean the same thing while
+        # labelling the axis differently on every following bar.
+        typed[0]["kind"] = "start" if typed[0]["kind"] == "delta" else typed[0]["kind"]
+        return typed, {"currency": str(cfg.get("currency") or "$"),
+                       "label": "", "first": "", "end": None}
+
+    return fundamentals.bridge(cfg["tickers"][0],
+                               cfg.get("bridge", fundamentals.DEFAULT_BRIDGE),
+                               cfg.get("statement", fundamentals.DEFAULT_PERIOD),
+                               cfg.get("periods", 5))
+
+
+def _waterfall_levels(rows):
+    """Where each bar starts and stops.
+
+    A delta hangs off wherever the row before it ended; a level is drawn from zero. Worked
+    out once, before the first frame, for the same reason the camera plans its windows —
+    `still=` asks for a frame in the middle without drawing the ones before it, and a
+    running total accumulated per frame would hand the still export a different chart.
+    """
+    bases = np.zeros(len(rows))
+    tops = np.zeros(len(rows))
+    level = 0.0
+    for i, row in enumerate(rows):
+        if row["kind"] == "delta":
+            bases[i], tops[i] = level, level + row["value"]
+        else:
+            bases[i], tops[i] = 0.0, row["value"]
+        level = tops[i]
+    return bases, tops
+
+
+def _pillar_color(theme):
+    """The colour for a level, which must not be the colour for a change.
+
+    Two of the four themes open their series palette with the same value they use for a
+    rise, so `series[0]` would paint the closing pillar and the positive bar beside it
+    identically — the one distinction a waterfall exists to draw. Picking the first series
+    colour that isn't already spoken for keeps every value in THEMES, which is the rule
+    that matters here: adding a theme still needs no change to this file.
+    """
+    taken = {theme["up"], theme["down"]}
+    for color in theme["series"]:
+        if color not in taken:
+            return color
+    return theme["text"]
+
+
+def _waterfall_titles(cfg, meta):
+    """Default title and subtitle for whichever bridge this is.
+
+    The subtitle names the period, because a waterfall carries no date axis to read it off
+    — an income bridge with nothing saying which year it is, is a chart nobody can check.
+    """
+    title = cfg.get("title") or (cfg["tickers"][0] if cfg.get("tickers") else "Waterfall")
+    subtitle = cfg.get("subtitle")
+    if subtitle is None:
+        if cfg.get("bridge") == "growth" and meta.get("first") and meta.get("label"):
+            subtitle = f"Revenue, {meta['first']} to {meta['label']}"
+        elif meta.get("label"):
+            period = fundamentals.PERIODS.get(cfg.get("statement") or "", {})
+            unit = "quarter" if period.get("months") == 3 else "year"
+            subtitle = f"{meta['label']} · full {unit}"
+        else:
+            subtitle = ""
+    return title, subtitle
+
+
+def render_waterfall(cfg, ctx, out, progress=None, still=None):
+    rows, meta = _waterfall_rows(cfg)
+    if len(rows) < 2:
+        raise ValueError("A waterfall needs at least two rows.")
+    cur = meta["currency"]
+    bases, tops = _waterfall_levels(rows)
+    n = len(rows)
+    opening = tops[0] if rows[0]["kind"] != "delta" else 0.0
+
+    n_frames = max(int(cfg["duration"] * ctx.fps), 2)
+    hold = int(cfg["hold"] * ctx.fps)
+    # Bars start in sequence across this share of the reveal and the last one finishes on
+    # the final frame, so the clip ends on the completed bridge however many bars it has.
+    lead = 0.72
+    step = lead / max(n - 1, 1)
+    grow = max(1.0 - lead, step * 1.35)
+
+    t = ctx.theme
+    fig = _new_fig(ctx)
+    title, subtitle = _waterfall_titles(cfg, meta)
+    _titles(fig, ctx, title, subtitle, cfg.get("footer"))
+    rect = _plot_area(ctx, True)
+    # Wider than the shared rect, which reserves its right margin for the line charts'
+    # end-of-series labels. A waterfall's labels are under its bars, so that margin is dead
+    # space and the bars get it instead.
+    ax = fig.add_axes([rect[0] + 0.03, rect[1] + 0.03,
+                       rect[2] + (0.06 if ctx.tall else 0.10), rect[3] - 0.03])
+    # The share line is the widest text on the chart and the least of what it says. A 9:16
+    # frame is half the width with the same number of bars in it, so there it goes — the
+    # same call `_style_axes` makes when it drops from eight date ticks to five.
+    shares = bool(opening) and not ctx.tall and any(r["share"] for r in rows)
+    lo = min(0.0, float(bases.min()), float(tops.min()))
+    hi = max(float(tops.max()), float(bases.max()))
+    span = (hi - lo) or 1.0
+    _style_axes(ax, ctx, y_fmt=_compact_axis(lo, hi, cur), x_dates=False)
+    ax.grid(False, axis="x")  # a category axis has nothing to line up against
+
+    # Headroom is measured against the bar that actually needs it rather than applied flat,
+    # because the two are rarely the same bar: the tallest is usually the opening revenue
+    # pillar, which prints one line, while the pillar printing two is shorter. A flat
+    # allowance sized for the second leaves a dead band above the first.
+    crown = max(top + span * (0.10 if row["share"] and shares else 0.055)
+                for top, row in zip(tops, rows))
+    ax.set_ylim(lo - (span * 0.07 if lo < 0 else 0), max(crown, hi + span * 0.055))
+    ax.set_xlim(-0.68, n - 0.32)
+    ax.set_xticks(np.arange(n))
+    ax.set_xticklabels([_wrap(r["label"], *((9, 3) if ctx.tall else (14, 2)))
+                        for r in rows],
+                       fontsize=(13 if ctx.tall else 15) * ctx.s, color=t["text"],
+                       fontweight="bold", linespacing=1.3)
+    for lbl in ax.get_xticklabels():
+        lbl.set_fontfamily(FONT_STACK)  # the labels are words, not figures
+    ax.axhline(0, color=t["axis"], lw=1.4 * ctx.s, zorder=2)
+
+    accent = _pillar_color(t)
+    width = 0.62
+    bars, values, notes, links = [], [], [], []
+    for i, row in enumerate(rows):
+        col = accent if row["kind"] != "delta" else (t["up"] if row["value"] >= 0
+                                                    else t["down"])
+        bars.append(ax.bar(i, 0.0, width=width, bottom=bases[i], color=col, zorder=3)[0])
+        values.append(ax.text(i, 0, "", color=col, fontsize=(15 if ctx.tall else 19) * ctx.s,
+                              fontweight="bold", ha="center", va="bottom",
+                              fontfamily=MONO_STACK, zorder=4))
+        notes.append(ax.text(i, 0, "", color=t["muted"],
+                             fontsize=(12 if ctx.tall else 13) * ctx.s, ha="center",
+                             va="bottom", fontfamily=MONO_STACK, zorder=4))
+        # The connector runs across the gap at the level the previous bar left off, which
+        # is what makes a floating bar readable as a step rather than as a bar chart.
+        links.append(None if i == 0 else
+                     ax.plot([i - 1 + width / 2, i - width / 2], [tops[i - 1]] * 2,
+                             color=t["axis"], lw=1.6 * ctx.s, zorder=1,
+                             solid_capstyle="butt")[0])
+
+    off = span * 0.02
+
+    def draw(f):
+        gt = min(f / max(n_frames - 1, 1), 1.0)
+        for i, row in enumerate(rows):
+            local = float(np.clip((gt - i * step) / grow, 0.0, 1.0))
+            h = float(ease(cfg["easing"], local))
+            reach = (tops[i] - bases[i]) * h
+            bars[i].set_height(reach)
+            head = bases[i] + reach
+            up = tops[i] >= bases[i]
+            values[i].set_position((i, head + (off if up else -off)))
+            values[i].set_va("bottom" if up else "top")
+            values[i].set_text(_signed_compact(row["value"] * h, cur)
+                               if row["kind"] == "delta" else _compact(head, cur))
+            values[i].set_alpha(local)
+            if shares and row["share"]:
+                notes[i].set_position((i, head + off * 3.6))
+                notes[i].set_text(f"{head / opening * 100:,.0f}% of revenue")
+                notes[i].set_alpha(local)
+            if links[i] is not None:
+                links[i].set_alpha(float(np.clip(local * 3.0, 0.0, 1.0)) * 0.9)
+        return ()
+
+    if still is not None:
+        draw(int(n_frames * still))
+        return fig
+    anim = FuncAnimation(fig, draw, frames=n_frames + hold, interval=1000 / ctx.fps)
+    return _export(fig, anim, out, ctx, progress)
+
+
 CHARTS = {
     "line": {"fn": render_line, "label": "Line reveal", "tickers": 1,
              "desc": "One ticker drawing left to right with a live price readout."},
@@ -1599,6 +1860,9 @@ CHARTS = {
                  "desc": "A line reveal with callouts landing on dates you set."},
     "race": {"fn": render_race, "label": "Bar race", "tickers": 8,
              "desc": "Ranked bars reordering as performance changes over time."},
+    "waterfall": {"fn": render_waterfall, "label": "Revenue waterfall", "tickers": 1,
+                  "desc": "An income statement stepping down from revenue to net "
+                          "income, or revenue growth period by period."},
 }
 
 

@@ -8,12 +8,14 @@ Run with: python -m unittest
 
 import io
 import unittest
+from unittest import mock
 
 import numpy as np
 import pandas as pd
 
 import app as appmod
 import data
+import fundamentals
 import renderers
 import testsupport
 # Imported after renderers so the Agg backend is already selected.
@@ -30,6 +32,9 @@ CHART_FIXTURES = {
     "timeline": {"tickers": ["NVDA"],
                  "annotations": [{"date": "2024-03-01", "label": "Q1"}]},
     "race": {"tickers": ["NVDA", "AMD", "MU"]},
+    # Statements rather than prices, and the fixture says so — several tests below sweep
+    # this dict, so a chart missing from it is silently untested rather than failing.
+    "waterfall": {"tickers": ["NVDA"], "bridge": "income"},
 }
 
 
@@ -51,10 +56,13 @@ def size_of(img):
 
 
 class GeneratedDataCase(unittest.TestCase):
-    """Base for the drawing tests: prices come from testsupport, never from a network."""
+    """Base for the drawing tests: prices and statements come from testsupport, never a
+    network. Both are patched for every case so the sweeps over CHART_FIXTURES cover the
+    waterfall on the same footing as the price charts."""
 
     def setUp(self):
         testsupport.patch_fetch(self)
+        testsupport.patch_income(self)
 
     def cfg(self, chart="line", **kw):
         return appmod.clean_config({**BASE, **CHART_FIXTURES[chart],
@@ -510,6 +518,146 @@ class MaPeriodTests(unittest.TestCase):
     def test_a_list_works_as_well_as_a_string(self):
         self.assertEqual(appmod.ma_periods([50, 200]), [50, 200])
         self.assertEqual(appmod.ma_periods(None), [])
+
+
+class WaterfallLevelTests(unittest.TestCase):
+    """Where the bars sit, worked out before the first frame rather than per frame.
+
+    This is the same property the camera has and for the same reason: `still=` asks for a
+    frame in the middle without drawing the ones before it, so a running total accumulated
+    inside `draw` would hand the still export a different chart than the video.
+    """
+
+    def rows(self, *specs):
+        return [{"label": label, "value": value, "kind": kind, "share": False}
+                for label, value, kind in specs]
+
+    def test_a_change_hangs_off_wherever_the_last_bar_ended(self):
+        bases, tops = renderers._waterfall_levels(
+            self.rows(("Revenue", 100.0, "start"), ("Cost", -30.0, "delta")))
+        self.assertEqual(list(bases), [0.0, 100.0])
+        self.assertEqual(list(tops), [100.0, 70.0])
+
+    def test_a_level_is_drawn_from_zero(self):
+        bases, tops = renderers._waterfall_levels(
+            self.rows(("Revenue", 100.0, "start"), ("Cost", -30.0, "delta"),
+                      ("Gross", 70.0, "total")))
+        self.assertEqual(bases[2], 0.0)
+        self.assertEqual(tops[2], 70.0)
+
+    def test_the_bars_after_a_level_carry_on_from_it(self):
+        # A subtotal restates the running figure rather than adding to it, so the change
+        # after it starts where the pillar stopped and not at zero.
+        bases, _ = renderers._waterfall_levels(
+            self.rows(("Revenue", 100.0, "start"), ("Cost", -30.0, "delta"),
+                      ("Gross", 70.0, "total"), ("Opex", -20.0, "delta")))
+        self.assertEqual(bases[3], 70.0)
+
+    def test_a_bridge_can_cross_zero(self):
+        _, tops = renderers._waterfall_levels(
+            self.rows(("Revenue", 100.0, "start"), ("Costs", -130.0, "delta")))
+        self.assertEqual(tops[-1], -30.0)
+
+
+class WaterfallDrawTests(GeneratedDataCase):
+    def cfg(self, **kw):
+        return appmod.clean_config({**BASE, "chart": "waterfall",
+                                    **CHART_FIXTURES["waterfall"], **kw})
+
+    def test_it_draws_from_typed_rows_with_no_source_at_all(self):
+        # The manual path touches neither price feed nor statement endpoint, which is what
+        # makes a bridge off a slide possible — and is also why this case patches nothing.
+        cfg = appmod.clean_config({**BASE, "chart": "waterfall", "rows": [
+            {"label": "Opening", "value": 100.0, "kind": "start"},
+            {"label": "Won", "value": 30.0, "kind": "delta"},
+            {"label": "Closing", "value": 130.0, "kind": "total"}]})
+        with mock.patch.object(fundamentals, "fetch",
+                               mock.Mock(side_effect=AssertionError("fetched anyway"))):
+            img = draw(cfg, at=1.0)
+        self.assertEqual(img.shape[2], 4)
+
+    def test_a_typed_bridge_needs_no_ticker(self):
+        cfg = appmod.clean_config({**BASE, "chart": "waterfall", "rows": [
+            {"label": "Opening", "value": 100.0},
+            {"label": "Won", "value": 30.0}]})
+        self.assertEqual(cfg["tickers"], [])
+
+    def test_the_reveal_actually_reveals(self):
+        # Early in the reveal only the first bars have grown, so the two frames cannot be
+        # the same image — a staggered reveal that drew everything at once would pass every
+        # other test here.
+        cfg = self.cfg()
+        self.assertFalse(np.array_equal(draw(cfg, at=0.15), draw(cfg, at=1.0)))
+
+    def test_the_date_range_changes_nothing(self):
+        # A waterfall reads fiscal periods off a filing. If a range preset could move the
+        # bars, the interface would be hiding a control that matters.
+        self.assertTrue(np.array_equal(draw(self.cfg(range="1y"), at=1.0),
+                                       draw(self.cfg(range="5y"), at=1.0)))
+
+    def test_the_growth_bridge_draws_a_different_chart(self):
+        self.assertFalse(np.array_equal(draw(self.cfg(bridge="income"), at=1.0),
+                                        draw(self.cfg(bridge="growth"), at=1.0)))
+
+    def test_two_bars_are_the_minimum(self):
+        cfg = appmod.clean_config({**BASE, "chart": "waterfall",
+                                   "rows": [{"label": "Only", "value": 1.0}]})
+        with self.assertRaises(ValueError):
+            draw(cfg, at=1.0)
+
+
+class WaterfallColorTests(unittest.TestCase):
+    def test_no_theme_paints_a_level_the_colour_of_a_change(self):
+        # Two themes open their series palette with the same value they use for a rise, so
+        # `series[0]` would make the closing pillar and the bar beside it indistinguishable
+        # — the one distinction the chart exists to draw.
+        for name, theme in renderers.THEMES.items():
+            with self.subTest(theme=name):
+                pillar = renderers._pillar_color(theme)
+                self.assertNotEqual(pillar, theme["up"])
+                self.assertNotEqual(pillar, theme["down"])
+
+
+class CompactMoneyTests(unittest.TestCase):
+    """Line items are read at the scale they are filed at, not the scale a price is."""
+
+    def test_it_scales_to_the_magnitude(self):
+        self.assertEqual(renderers._compact(130.497e9), "$130B")
+        self.assertEqual(renderers._compact(1.05e9), "$1.05B")
+        self.assertEqual(renderers._compact(60.9e6), "$60.9M")
+        self.assertEqual(renderers._compact(4.2e12), "$4.20T")
+        self.assertEqual(renderers._compact(512.0), "$512")
+
+    def test_a_change_carries_its_sign_outside_the_currency(self):
+        self.assertEqual(renderers._signed_compact(-32.6e9), "-$32.6B")
+        self.assertEqual(renderers._signed_compact(5.76e9), "+$5.76B")
+
+    def test_the_currency_follows_the_filing(self):
+        self.assertEqual(renderers._compact(1.5e9, "€"), "€1.50B")
+        self.assertEqual(renderers._compact(1.5e9, "SEK "), "SEK 1.50B")
+
+    def test_every_tick_down_an_axis_shares_one_scale_and_precision(self):
+        # _compact picks precision per value, which prints $140B directly above $80.0B and
+        # makes a reader stop to work out whether those are the same kind of number.
+        fmt = renderers._compact_axis(0.0, 140e9)
+        labels = [fmt(v) for v in (0, 20e9, 80e9, 140e9)]
+        self.assertEqual(labels, ["$0", "$20B", "$80B", "$140B"])
+
+    def test_zero_carries_no_scale_suffix(self):
+        self.assertEqual(renderers._compact_axis(0.0, 5e9)(0), "$0")
+
+
+class WrapTests(unittest.TestCase):
+    def test_it_folds_to_the_line_limit_rather_than_truncating(self):
+        # A label folded past the limit keeps its words on the last line. Dropping them
+        # would leave a bar captioned with half a phrase.
+        self.assertEqual(renderers._wrap("Tax, interest & other", 9, 2),
+                         "Tax,\ninterest & other")
+        self.assertEqual(renderers._wrap("Tax, interest & other", 9, 3),
+                         "Tax,\ninterest\n& other")
+
+    def test_a_short_label_is_left_alone(self):
+        self.assertEqual(renderers._wrap("R&D", 14, 2), "R&D")
 
 
 if __name__ == "__main__":

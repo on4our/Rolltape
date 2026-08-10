@@ -94,7 +94,7 @@ def intraday_available() -> bool:
     this one feature goes. Better to tell the interface up front than to let someone build
     a 5-minute chart and hit a failed render at the end of it.
     """
-    if _keyed("fmp") or _keyed("twelvedata"):
+    if keyed("fmp") or keyed("twelvedata"):
         return True
     return _yfinance_installed() and not config.LICENSED_ONLY
 
@@ -111,8 +111,12 @@ def periods_per_year(interval) -> float:
     return 252.0 * max(pd.Timedelta("6h30min") / pd.Timedelta(step), 1.0)
 
 
-def _keyed(source) -> bool:
-    """True when a licensed source has a key configured. Unlicensed sources need none."""
+def keyed(source) -> bool:
+    """True when a licensed source has a key configured. Unlicensed sources need none.
+
+    Public because fundamentals.py narrows its own source order the same three ways this
+    module does, and a second copy of the key check is a second thing to forget to update.
+    """
     attr = SOURCE_KEYS.get(source)
     return True if attr is None else bool(getattr(config, attr, ""))
 
@@ -129,8 +133,12 @@ def _horizon_days(source):
     return None
 
 
-def _covers(source, start) -> bool:
-    """Whether `source` can reach back to `start`."""
+def covers(source, start) -> bool:
+    """Whether `source` can reach back to `start`.
+
+    Public for the same reason as `keyed`: a statement request reaches back through the
+    same plan horizon a price request does, and the ceiling wants one implementation.
+    """
     days = _horizon_days(source)
     if days is None or start is None:
         return True
@@ -160,12 +168,12 @@ def _sources_for(interval, start=None):
       LICENSED_ONLY there is nothing below it and the render fails, which is the honest
       outcome.
     """
-    order = tuple(s for s in SOURCES if _keyed(s))
+    order = tuple(s for s in SOURCES if keyed(s))
     if config.LICENSED_ONLY:
         order = tuple(s for s in order if s in LICENSED)
     if is_intraday(interval):
         order = tuple(s for s in order if s != "stooq")
-    return tuple(s for s in order if _covers(s, start))
+    return tuple(s for s in order if covers(s, start))
 
 
 # Which source answered for each ticker in the current render. One module-level record is
@@ -258,6 +266,17 @@ def primary_source() -> str:
 
 def reset_sources():
     _SOURCES.clear()
+
+
+def note_source(ticker, source):
+    """Record that `source` answered for `ticker` in the current render.
+
+    The one writer, so the footer names every feed that actually answered whether the
+    numbers on screen are prices or line items. fundamentals.py calls this for the same
+    reason `fetch` does — a waterfall drawn off the licensed feed has to credit it, and a
+    render that mixed the two should name both.
+    """
+    _SOURCES[str(ticker).strip().upper()] = source
 
 
 def sources_used():
@@ -380,13 +399,18 @@ FMP_INTERVALS = {"1m": "1min", "5m": "5min", "15m": "15min",
                  "30m": "30min", "1h": "1hour"}
 
 
-def _fmp_rows(path, params):
+def fmp_rows(path, params):
     """One FMP response as a list of row dicts.
 
     Two shapes to cope with. The intraday endpoints answer with a bare array; the daily one
     has historically wrapped it in {"symbol": ..., "historical": [...]}, and both spellings
     are in the wild across their v3 and stable paths. Accepting either costs three lines and
     saves a silent empty frame if the account is pointed at the other one.
+
+    Public because the statement endpoints in fundamentals.py answer in the same shapes and
+    fail in the same way — an error body arriving under a 200, with the rate limit worth
+    naming as itself. This is where "how to talk to FMP" lives; which endpoint to ask and
+    what the rows mean is the caller's business.
     """
     url = f"{FMP_URL}/{path}?{urllib.parse.urlencode(params)}"
     with urllib.request.urlopen(url, timeout=30) as resp:
@@ -434,9 +458,9 @@ def _fmp(ticker, start, end=None, interval=DEFAULT_INTERVAL):
         step = FMP_INTERVALS.get(interval)
         if not step:
             raise ValueError(f"interval {interval} is not on the FMP grid")
-        rows = _fmp_rows(f"historical-chart/{step}", params)
+        rows = fmp_rows(f"historical-chart/{step}", params)
     else:
-        rows = _fmp_rows("historical-price-eod/full", params)
+        rows = fmp_rows("historical-price-eod/full", params)
 
     if not rows:
         raise ValueError("no rows returned")
@@ -648,7 +672,7 @@ def _nothing_eligible(ticker, start, interval):
     Two ways to get here and they need different instructions, so the message says which
     one happened rather than listing everything that could be wrong.
     """
-    dropped = [s for s in SOURCES if _keyed(s) and not _covers(s, start)]
+    dropped = [s for s in SOURCES if keyed(s) and not covers(s, start)]
     if dropped and config.LICENSED_ONLY:
         return (f"No data for {ticker}: {SOURCE_NAMES.get(dropped[0], dropped[0])} only "
                 f"reaches back {config.FMP_HISTORY_YEARS} years and this chart starts at "
@@ -678,7 +702,7 @@ def fetch(ticker: str, start: str, end: str | None = None,
     if cached:
         df = pd.read_csv(cached, index_col=0, parse_dates=True)
         if not df.empty:
-            _SOURCES[ticker] = source
+            note_source(ticker, source)
             return _usable(df, sessions)
 
     fetchers = {"fmp": _fmp, "twelvedata": _twelvedata,
@@ -695,7 +719,7 @@ def fetch(ticker: str, start: str, end: str | None = None,
         # part of the cache key, so a trimmed frame under that key would be a lie.
         df.to_csv(_cache_path(ticker, start, end, source, interval))
         _drop_superseded(ticker, start, end, interval)
-        _SOURCES[ticker] = source
+        note_source(ticker, source)
         return trimmed
 
     if not problems:  # nothing was even eligible to try
