@@ -29,8 +29,6 @@ import subprocess
 import sys
 from collections import deque
 
-import config
-import data as datasrc
 import renderers
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -93,17 +91,16 @@ def _died(code, tail):
     return f"{detail} {tail[-1]}" if tail else detail
 
 
-def run(cfg, out_path, progress=None, demo=False):
+def run(cfg, out_path, progress=None):
     """Render `cfg` to `out_path` in a child process, reporting progress per frame.
 
     Blocks until the child is done, so the caller is expected to be the worker thread.
     Raises RenderError, whose message is meant to be shown to the user as-is.
     """
+    # The child reads its configuration from the environment, and inheriting the parent's
+    # is the whole of it — the API key and the cache directory both arrive that way, so
+    # there is nothing to hand over explicitly.
     env = dict(os.environ)
-    # The child reads its configuration from the environment, so a `--demo` run has to say
-    # so here — otherwise the flag stops at the server and children go to the network for
-    # real prices behind a UI that says it is running on generated data.
-    env["ROLLTAPE_DEMO"] = "1" if demo else "0"
 
     reported, ok = None, False
     tail = deque(maxlen=TAIL_LINES)
@@ -169,8 +166,6 @@ def _child(argv):
     except ValueError as exc:
         _emit({"error": f"Could not read the render config: {exc}"})
         return 2
-
-    datasrc.set_demo(config.DEMO)
 
     try:
         renderers.render(cfg, out_path, progress=lambda i, n: _emit({"progress": i,

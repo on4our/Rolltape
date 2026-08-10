@@ -41,8 +41,6 @@ DRAW_LOCK = threading.Lock()
 # frame size instead — see /api/still.
 PREVIEW_DPI = 90
 
-datasrc.set_demo(config.DEMO)
-
 
 # ---------------------------------------------------------------------------
 # Config normalising
@@ -293,8 +291,7 @@ def worker():
             # Deliberately not under DRAW_LOCK — the render has its own process and its own
             # pyplot state, so previews carry on being answered while it runs. One worker
             # thread is still what keeps renders from piling onto the CPU together.
-            render_job.run(job["cfg"], path, progress=progress,
-                           demo=datasrc.is_demo())
+            render_job.run(job["cfg"], path, progress=progress)
             # Size has to be read before publish; a remote backend may move the file.
             size_mb = round(os.path.getsize(path) / 1e6, 2)
             url = storage.publish(path, job["file"])
@@ -329,10 +326,10 @@ def index():
     return send_from_directory(app.template_folder, "index.html")
 
 
-# Served from every instance rather than only the public demo one, because the point of a
-# pricing page is that someone can be sent a link to it. The app only *links* to it in
-# demo mode — see the topbar in index.html — so a local install stays a tool rather than a
-# shopfront.
+# Served from every instance rather than only the public one, because the point of a
+# pricing page is that someone can be sent a link to it. The app only *links* to it on a
+# public instance — see the topbar in index.html — so a local install stays a tool rather
+# than a shopfront.
 @app.get("/pricing")
 def pricing():
     return send_from_directory(app.template_folder, "pricing.html")
@@ -349,7 +346,6 @@ def landing():
         # Both point at this same process by default, which is what makes the demo
         # container self-contained: the page and the thing it advertises are one deploy.
         demo_url=config.DEMO_URL,
-        demo=datasrc.is_demo(),
     )
 
 
@@ -439,7 +435,9 @@ def meta():
                   for a, qs in renderers.SIZES.items()},
         "presets": list(renderers.PRESETS),
         "auto_preset": {k: v["preset"] for k, v in renderers.ENCODE.items()},
-        "demo": datasrc.is_demo(),
+        # A public instance is where someone is deciding whether to buy, so that is where
+        # the interface shows a way through to the prices.
+        "public": config.LANDING,
     })
 
 
@@ -603,12 +601,11 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=5000)
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--demo", action="store_true",
-                   help="Use generated data instead of Yahoo (for offline testing)")
     a = p.parse_args()
-    datasrc.set_demo(a.demo or config.DEMO)
-    print(f"\n  Rolltape running at http://{a.host}:{a.port}"
-          f"{'  [demo data]' if a.demo else ''}\n")
+    # Name the feed that will actually answer, so a key that didn't reach the process is
+    # visible at startup rather than in the footer of a finished render.
+    feed = datasrc.primary_source()
+    print(f"\n  Rolltape running at http://{a.host}:{a.port}  [{feed}]\n")
     app.run(host=a.host, port=a.port, threaded=True, debug=False)
 
 

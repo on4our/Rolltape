@@ -1,7 +1,8 @@
 """Tests for the export path — background handling, date labelling and the still export.
 
-No network and no ffmpeg: everything here draws stills from demo data, which exercises
-the same figure scaffolding a video render uses without paying for an encode.
+No network and no ffmpeg: everything here draws stills from generated prices supplied by
+testsupport.py, which exercises the same figure scaffolding a video render uses without
+paying for an encode.
 Run with: python -m unittest
 """
 
@@ -14,6 +15,7 @@ import pandas as pd
 import app as appmod
 import data
 import renderers
+import testsupport
 # Imported after renderers so the Agg backend is already selected.
 import matplotlib.image as mpimg
 
@@ -48,18 +50,18 @@ def size_of(img):
     return img.shape[1], img.shape[0]
 
 
-class DemoDataCase(unittest.TestCase):
+class GeneratedDataCase(unittest.TestCase):
+    """Base for the drawing tests: prices come from testsupport, never from a network."""
+
     def setUp(self):
-        data.set_demo(True)
-        self.addCleanup(data.set_demo, False)
-        self.addCleanup(data.reset_sources)
+        testsupport.patch_fetch(self)
 
     def cfg(self, chart="line", **kw):
         return appmod.clean_config({**BASE, **CHART_FIXTURES[chart],
                                     "chart": chart, **kw})
 
 
-class BackgroundTests(DemoDataCase):
+class BackgroundTests(GeneratedDataCase):
     def test_every_chart_type_honours_the_background_setting(self):
         # A renderer that reads theme["bg"] directly instead of ctx.bg would paint a
         # backdrop into a transparent export and quietly ruin the overlay.
@@ -78,7 +80,7 @@ class BackgroundTests(DemoDataCase):
             renderers.make_ctx("midnight", "16:9", "final", transparent=True).bg, "none")
 
 
-class ContainerTests(DemoDataCase):
+class ContainerTests(GeneratedDataCase):
     def test_alpha_renders_land_in_a_mov(self):
         # h264 in an .mp4 has no alpha channel, so the container has to follow the codec.
         self.assertEqual(renderers.output_extension(False), ".mp4")
@@ -89,7 +91,7 @@ class ContainerTests(DemoDataCase):
         self.assertTrue(appmod.slug(self.cfg(transparent=True)).endswith(".mov"))
 
 
-class StillExportTests(DemoDataCase):
+class StillExportTests(GeneratedDataCase):
     def test_a_still_is_the_real_frame_size(self):
         # This is what makes the export usable as a thumbnail — it has to be the frame
         # the video would have shown, at the size the video will be.
@@ -116,7 +118,7 @@ class StillExportTests(DemoDataCase):
         self.assertEqual(alpha_of(self.cfg(transparent=False))[3, 3], 255)
 
 
-class WindowTests(DemoDataCase):
+class WindowTests(GeneratedDataCase):
     """From a posted config to the dates a fetch actually gets."""
 
     def test_a_preset_resolves_to_dates_before_it_reaches_a_renderer(self):
@@ -211,7 +213,7 @@ class DateLabelTests(unittest.TestCase):
 PRICE_CHARTS = ("line", "compare", "candles", "timeline")
 
 
-class LogScaleTests(DemoDataCase):
+class LogScaleTests(GeneratedDataCase):
     def figure(self, chart, **kw):
         cfg = self.cfg(chart, **kw)
         ctx = renderers.make_ctx("midnight", "16:9", "draft")
@@ -276,7 +278,7 @@ class LogScaleTests(DemoDataCase):
 MA_CHARTS = ("line", "candles", "timeline")
 
 
-class MovingAverageTests(DemoDataCase):
+class MovingAverageTests(GeneratedDataCase):
     def figure(self, chart, at=0.9, **kw):
         cfg = self.cfg(chart, **kw)
         ctx = renderers.make_ctx("midnight", "16:9", "draft")

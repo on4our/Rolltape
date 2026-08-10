@@ -13,7 +13,7 @@ import numpy as np
 
 import app as appmod
 import renderers
-from test_render import CHART_FIXTURES, DemoDataCase, draw
+from test_render import CHART_FIXTURES, GeneratedDataCase, draw
 
 # The charts that draw on a price/time plane. Everything else composes out of ranked rows,
 # so there is nothing for a camera to point at and it never builds one — derived rather
@@ -264,7 +264,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(self.base(camera="  Follow ")["camera"], "follow")
 
 
-class DrawTests(DemoDataCase):
+class DrawTests(GeneratedDataCase):
     """The parts a plan can't answer — what actually lands on the frame."""
 
     def test_every_camera_chart_draws_with_every_move(self):

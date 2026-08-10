@@ -1,10 +1,14 @@
-"""Tests for the Yahoo/Stooq fetch path, the date range presets and footer attribution.
+"""Tests for the fetch path, the date range presets and footer attribution.
 
-No network: the Stooq endpoint is mocked with a recorded CSV sample, and the Yahoo path is
-forced to fail to exercise the fallback. Run with: python -m unittest
+No network: the Stooq and Twelve Data endpoints are mocked with recorded response samples,
+and the source above whichever one is under test is forced to fail so the fallback runs.
+The API key is patched in per-test rather than read from the environment, so the suite
+behaves the same on a machine that has one configured and on a machine that doesn't.
+Run with: python -m unittest
 """
 
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -13,8 +17,10 @@ from unittest import mock
 
 import pandas as pd
 
+import config
 import data
 import renderers
+import testsupport
 
 # A trimmed but faithful sample of what stooq.com/q/d/l/?s=aapl.us&i=d returns.
 STOOQ_CSV = """Date,Open,High,Low,Close,Volume
@@ -26,12 +32,308 @@ STOOQ_CSV = """Date,Open,High,Low,Close,Volume
 """
 
 
+# A trimmed but faithful sample of a Twelve Data /time_series response. Prices are strings
+# in the real thing, which is the detail worth keeping: a parser that forgot would produce
+# a frame that plots as a flat line of NaN rather than raising.
+TWELVEDATA_JSON = json.dumps({
+    "meta": {"symbol": "AAPL", "interval": "1day", "currency": "USD",
+             "exchange_timezone": "America/New_York", "exchange": "NASDAQ",
+             "type": "Common Stock"},
+    "values": [  # newest first, which is the order the fetcher asks for
+        {"datetime": "2024-01-08", "open": "182.09", "high": "185.60",
+         "low": "181.50", "close": "185.56", "volume": "59144500"},
+        {"datetime": "2024-01-05", "open": "181.99", "high": "182.76",
+         "low": "180.17", "close": "181.18", "volume": "62303300"},
+        {"datetime": "2024-01-04", "open": "182.15", "high": "183.09",
+         "low": "180.88", "close": "181.91", "volume": "71983600"},
+    ],
+    "status": "ok",
+})
+
+
 def _urlopen_returning(body):
     """Stand in for urllib.request.urlopen, which is used as a context manager."""
     resp = mock.MagicMock()
     resp.read.return_value = body.encode()
     resp.__enter__.return_value = resp
     return mock.Mock(return_value=resp)
+
+
+def _urlopen_returning_each(*bodies):
+    """Answer successive calls with successive bodies, for the paging tests."""
+    def factory(*_a, **_kw):
+        resp = mock.MagicMock()
+        resp.read.return_value = bodies[min(factory.calls, len(bodies) - 1)].encode()
+        resp.__enter__.return_value = resp
+        factory.calls += 1
+        return resp
+    factory.calls = 0
+    return factory
+
+
+def _with_key(key="test-key"):
+    """Configure a licensed key for the length of a block.
+
+    Patched rather than read from the environment so the suite gives the same answer on a
+    machine that has a real key configured and on one that doesn't.
+    """
+    return mock.patch.object(config, "TWELVEDATA_KEY", key)
+
+
+# A trimmed but faithful sample of an FMP daily response. Newest first, and the daily
+# endpoint has historically wrapped its rows in an object while the intraday ones return a
+# bare array — both spellings are covered below.
+FMP_DAILY_JSON = json.dumps({"symbol": "AAPL", "historical": [
+    {"date": "2024-01-08", "open": 182.09, "high": 185.60, "low": 181.50,
+     "close": 185.56, "volume": 59144500},
+    {"date": "2024-01-05", "open": 181.99, "high": 182.76, "low": 180.17,
+     "close": 181.18, "volume": 62303300},
+    {"date": "2024-01-04", "open": 182.15, "high": 183.09, "low": 180.88,
+     "close": 181.91, "volume": 71983600},
+]})
+
+FMP_INTRADAY_JSON = json.dumps([
+    {"date": "2024-01-08 09:35:00", "open": 182.4, "low": 182.0, "high": 182.6,
+     "close": 182.5, "volume": 120000},
+    {"date": "2024-01-08 09:30:00", "open": 182.1, "low": 181.9, "high": 182.5,
+     "close": 182.4, "volume": 250000},
+])
+
+
+def _with_fmp(key="test-key", years=5):
+    """Configure an FMP key and plan horizon for the length of a block."""
+    return mock.patch.multiple(config, FMP_KEY=key, FMP_HISTORY_YEARS=years)
+
+
+class FMPParsingTests(unittest.TestCase):
+    def test_daily_parses_to_the_shared_column_contract(self):
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_DAILY_JSON)):
+            df = data._fmp("AAPL", "2024-01-01")
+
+        self.assertEqual(list(df.columns), data.COLUMNS)
+        self.assertEqual(len(df), 3)
+        # Arrives newest first; every renderer expects the opposite.
+        self.assertEqual(str(df.index[0].date()), "2024-01-04")
+        self.assertAlmostEqual(df["Close"].iloc[-1], 185.56)
+
+    def test_a_bare_array_parses_the_same_as_a_wrapped_one(self):
+        # The intraday endpoints answer with a list rather than {"historical": [...]}.
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_INTRADAY_JSON)):
+            df = data._fmp("AAPL", "2024-01-08", interval="5m")
+
+        self.assertEqual(len(df), 2)
+        self.assertEqual(str(df.index[0]), "2024-01-08 09:30:00")
+
+    def test_intraday_goes_to_the_per_interval_endpoint(self):
+        with _with_fmp("sekrit"), mock.patch(
+                "urllib.request.urlopen",
+                _urlopen_returning(FMP_INTRADAY_JSON)) as urlopen:
+            data._fmp("AAPL", "2024-01-08", "2024-01-09", interval="15m")
+
+        url = urlopen.call_args[0][0]
+        self.assertIn("/historical-chart/15min?", url)  # the grid name, not Rolltape's
+        self.assertIn("apikey=sekrit", url)
+        self.assertIn("from=2024-01-08", url)
+        self.assertIn("to=2024-01-09", url)
+
+    def test_daily_goes_to_the_end_of_day_endpoint(self):
+        with _with_fmp(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(FMP_DAILY_JSON)) as urlopen:
+            data._fmp("AAPL", "2024-01-01")
+        self.assertIn("/historical-price-eod/full?", urlopen.call_args[0][0])
+
+    def test_an_error_body_arrives_with_a_200(self):
+        body = json.dumps({"Error Message": "Invalid API KEY."})
+        with _with_fmp(), mock.patch("urllib.request.urlopen", _urlopen_returning(body)):
+            with self.assertRaises(ValueError) as caught:
+                data._fmp("AAPL", "2024-01-01")
+        self.assertIn("Invalid API KEY", str(caught.exception))
+
+    def test_the_rate_limit_is_named_as_itself(self):
+        body = json.dumps({"Error Message": "Limit Reach. Please upgrade your plan."})
+        with _with_fmp(), mock.patch("urllib.request.urlopen", _urlopen_returning(body)):
+            with self.assertRaises(RuntimeError) as caught:
+                data._fmp("AAPL", "2024-01-01")
+        self.assertIn("rate limit", str(caught.exception))
+
+    def test_no_key_fails_before_the_request_is_made(self):
+        with mock.patch.object(config, "FMP_KEY", ""), \
+             mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("asked anyway")):
+            with self.assertRaises(RuntimeError):
+                data._fmp("AAPL", "2024-01-01")
+
+    def test_an_interval_off_the_grid_is_refused(self):
+        # Every interval the interface offers is on FMP's grid today, so this guards the
+        # next one added to INTERVALS without a matching entry here — which would otherwise
+        # fall through to the daily endpoint and label the result 5-minute.
+        thinned = {k: v for k, v in data.FMP_INTERVALS.items() if k != "5m"}
+        with _with_fmp(), mock.patch.object(data, "FMP_INTERVALS", thinned), \
+             mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("asked anyway")):
+            with self.assertRaises(ValueError):
+                data._fmp("AAPL", "2024-01-01", interval="5m")
+
+
+class PlanHorizonTests(unittest.TestCase):
+    """The Starter plan reaches back five years and says nothing when asked for more.
+
+    That is the dangerous shape: a MAX request comes back as a short frame rather than an
+    error, which would put five years of history under a MAX label and look entirely
+    correct. So the ceiling is enforced before the request rather than after it.
+    """
+
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        patcher = mock.patch.object(data, "CACHE_DIR", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        data.reset_sources()
+        self.addCleanup(data.reset_sources)
+
+    def _years_ago(self, n):
+        return (pd.Timestamp.today() - pd.Timedelta(days=int(365.25 * n))).strftime(
+            "%Y-%m-%d")
+
+    def test_a_window_inside_the_horizon_uses_the_licensed_feed(self):
+        with _with_fmp():
+            self.assertEqual(data._sources_for("1d", self._years_ago(2))[0], "fmp")
+
+    def test_a_window_past_the_horizon_drops_the_licensed_feed(self):
+        with _with_fmp():
+            order = data._sources_for("1d", self._years_ago(20))
+        self.assertNotIn("fmp", order)
+        # Yahoo and Stooq have deeper history, so the deep chart still draws — just not
+        # from the plan that cannot serve it.
+        self.assertEqual(order[0], "yahoo")
+
+    def test_a_deeper_plan_keeps_the_licensed_feed(self):
+        # Upgrading to the 30-year plan is meant to be an env var, not a code change.
+        with _with_fmp(years=30):
+            self.assertIn("fmp", data._sources_for("1d", self._years_ago(20)))
+
+    def test_a_max_chart_really_falls_through_rather_than_truncating(self):
+        frame = pd.read_csv(io.StringIO(STOOQ_CSV), parse_dates=["Date"], index_col="Date")
+        with _with_fmp(), \
+             mock.patch.object(data, "_fmp", side_effect=AssertionError("asked anyway")), \
+             mock.patch.object(data, "_yahoo", return_value=frame):
+            data.fetch("AAPL", "1970-01-01")
+
+        self.assertEqual(data.sources_used(), {"yahoo"})
+
+    def test_licensed_only_past_the_horizon_says_what_to_do_about_it(self):
+        # Nothing below the licensed feed to fall through to, so this has to fail — and
+        # the message has to name the horizon rather than reading as a missing key.
+        with _with_fmp(), mock.patch.object(config, "LICENSED_ONLY", True), \
+             mock.patch.object(data, "_fmp", side_effect=AssertionError("asked anyway")):
+            with self.assertRaises(ValueError) as caught:
+                data.fetch("AAPL", "1970-01-01")
+
+        message = str(caught.exception)
+        self.assertIn("5 years", message)
+        self.assertIn("ROLLTAPE_FMP_HISTORY_YEARS", message)
+
+
+class TwelveDataParsingTests(unittest.TestCase):
+    def test_parses_to_the_shared_column_contract(self):
+        with _with_key(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(TWELVEDATA_JSON)):
+            df = data._twelvedata("AAPL", "2024-01-01")
+
+        self.assertEqual(list(df.columns), data.COLUMNS)
+        self.assertEqual(len(df), 3)
+        # Strings in, numbers out — and oldest first, whatever order they arrived in.
+        self.assertEqual(str(df.index[0].date()), "2024-01-04")
+        self.assertAlmostEqual(df["Close"].iloc[-1], 185.56)
+        self.assertEqual(df["Close"].dtype.kind, "f")
+
+    def test_an_error_body_arrives_with_a_200(self):
+        # The endpoint reports failure in the payload, so a parser trusting the HTTP status
+        # would hand back an empty frame and let the render fail somewhere less useful.
+        body = json.dumps({"code": 404, "message": "**symbol** not found",
+                           "status": "error"})
+        with _with_key(), mock.patch("urllib.request.urlopen", _urlopen_returning(body)):
+            with self.assertRaises(ValueError) as caught:
+                data._twelvedata("NOPE", "2024-01-01")
+        self.assertIn("not found", str(caught.exception))
+
+    def test_the_rate_limit_is_named_as_itself(self):
+        # The error anyone on the free tier actually hits. "Wait a minute" and "check the
+        # symbol" are different instructions, so they get different exception types.
+        body = json.dumps({"code": 429, "message": "API credits limit reached",
+                           "status": "error"})
+        with _with_key(), mock.patch("urllib.request.urlopen", _urlopen_returning(body)):
+            with self.assertRaises(RuntimeError) as caught:
+                data._twelvedata("AAPL", "2024-01-01")
+        self.assertIn("rate limit", str(caught.exception))
+
+    def test_no_key_fails_before_the_request_is_made(self):
+        with mock.patch.object(config, "TWELVEDATA_KEY", ""), \
+             mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("asked anyway")):
+            with self.assertRaises(RuntimeError):
+                data._twelvedata("AAPL", "2024-01-01")
+
+    def test_an_interval_off_the_grid_is_refused(self):
+        with _with_key(), mock.patch("urllib.request.urlopen",
+                                     side_effect=AssertionError("asked anyway")):
+            with self.assertRaises(ValueError):
+                data._twelvedata("AAPL", "2024-01-01", interval="3s")
+
+    def test_the_key_is_sent_and_bars_are_asked_for_newest_first(self):
+        with _with_key("sekrit"), mock.patch(
+                "urllib.request.urlopen", _urlopen_returning(TWELVEDATA_JSON)) as urlopen:
+            data._twelvedata("AAPL", "2024-01-01", interval="5m")
+
+        url = urlopen.call_args[0][0]
+        self.assertIn("apikey=sekrit", url)
+        self.assertIn("interval=5min", url)   # the grid name, not Rolltape's
+        self.assertIn("order=DESC", url)      # what makes a truncated page well defined
+        self.assertIn("timezone=Exchange", url)
+
+    def test_a_range_longer_than_one_page_is_paged_through(self):
+        # A full page means there is more behind it. Stopping there would end a `max` chart
+        # two decades short and look entirely normal doing it.
+        def page(dates):
+            return json.dumps({"status": "ok", "values": [
+                {"datetime": d, "open": "1", "high": "2", "low": "0.5",
+                 "close": "1.5", "volume": "100"} for d in dates]})
+
+        full = [str(d.date()) for d in
+                pd.bdate_range(end="2024-06-01", periods=data.TWELVEDATA_PAGE)[::-1]]
+        with _with_key(), mock.patch.object(data, "TWELVEDATA_PAGE", len(full)), \
+             mock.patch("urllib.request.urlopen", _urlopen_returning_each(
+                 page(full), page(["2000-01-04", "2000-01-03"]))) as urlopen:
+            df = data._twelvedata("AAPL", "1999-01-01", "2024-06-01")
+
+        self.assertEqual(urlopen.calls, 2)
+        self.assertEqual(len(df), len(full) + 2)
+        self.assertEqual(str(df.index[0].date()), "2000-01-03")
+        self.assertTrue(df.index.is_monotonic_increasing)
+        self.assertFalse(df.index.has_duplicates)
+
+    def test_a_short_page_ends_the_paging(self):
+        with _with_key(), mock.patch("urllib.request.urlopen",
+                                     _urlopen_returning(TWELVEDATA_JSON)) as urlopen:
+            data._twelvedata("AAPL", "1970-01-01", "2024-06-01")
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_an_instrument_without_volume_still_draws(self):
+        body = json.dumps({"status": "ok", "values": [
+            {"datetime": "2024-01-04", "open": "1", "high": "2", "low": "0.5",
+             "close": "1.5"},
+            {"datetime": "2024-01-03", "open": "1", "high": "2", "low": "0.5",
+             "close": "1.4"}]})
+        with _with_key(), mock.patch("urllib.request.urlopen", _urlopen_returning(body)):
+            df = data._twelvedata("^GSPC", "2024-01-01")
+
+        # Dropping the rows instead would throw away perfectly good prices over a column
+        # no chart divides by.
+        self.assertEqual(len(df), 2)
+        self.assertEqual(list(df["Volume"]), [0.0, 0.0])
 
 
 class StooqParsingTests(unittest.TestCase):
@@ -70,7 +372,6 @@ class FallbackTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(shutil.rmtree, self.cache, True)
-        data.set_demo(False)
         data.reset_sources()
         self.addCleanup(data.reset_sources)
 
@@ -128,16 +429,69 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(len(df), 5)
         self.assertEqual(data.sources_used(), {"stooq"})
 
-    def test_demo_mode_never_reaches_the_network(self):
-        data.set_demo(True)
-        self.addCleanup(data.set_demo, False)
+    def test_the_licensed_feed_is_preferred_over_both_scrapers(self):
+        frame = pd.read_csv(io.StringIO(STOOQ_CSV), parse_dates=["Date"], index_col="Date")
 
-        with mock.patch.object(data, "_yahoo", side_effect=AssertionError("fetched")), \
-             mock.patch("urllib.request.urlopen", side_effect=AssertionError("fetched")):
-            df = data.fetch("AAPL", "2024-01-01", "2024-03-01")
+        with _with_key(), \
+             mock.patch.object(data, "_twelvedata", return_value=frame) as licensed, \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("fell through")), \
+             mock.patch("urllib.request.urlopen", side_effect=AssertionError("fell through")):
+            data.fetch("AAPL", "2024-01-01")
 
-        self.assertFalse(df.empty)
-        self.assertEqual(data.sources_used(), {"demo"})
+        licensed.assert_called_once()
+        self.assertEqual(data.sources_used(), {"twelvedata"})
+
+    def test_yahoo_catches_a_licensed_feed_that_is_out_of_quota(self):
+        # The free tier runs out mid-month and the paid one has a ceiling too. A render
+        # that stops working on the 28th of every month is worse than one drawn from the
+        # fallback and labelled honestly.
+        frame = pd.read_csv(io.StringIO(STOOQ_CSV), parse_dates=["Date"], index_col="Date")
+
+        with _with_key(), \
+             mock.patch.object(data, "_twelvedata",
+                               side_effect=RuntimeError("rate limit reached")), \
+             mock.patch.object(data, "_yahoo", return_value=frame):
+            df = data.fetch("AAPL", "2024-01-01")
+
+        self.assertEqual(len(df), 5)
+        self.assertEqual(data.sources_used(), {"yahoo"})
+
+    def test_without_a_key_the_licensed_feed_is_never_called(self):
+        # A fresh clone has no key. It must not spend a request finding that out, and the
+        # error from a keyless call must not end up in a user-facing message.
+        with mock.patch.object(config, "TWELVEDATA_KEY", ""), \
+             mock.patch.object(config, "FMP_KEY", ""), \
+             mock.patch.object(data, "_fmp",
+                               side_effect=AssertionError("called without a key")), \
+             mock.patch.object(data, "_twelvedata",
+                               side_effect=AssertionError("called without a key")), \
+             mock.patch.object(data, "_yahoo", side_effect=RuntimeError("endpoint moved")), \
+             mock.patch("urllib.request.urlopen", _urlopen_returning(STOOQ_CSV)):
+            df = data.fetch("AAPL", "2024-01-01")
+
+        self.assertEqual(data.sources_used(), {"stooq"})
+        self.assertEqual(len(df), 5)
+
+    def test_licensed_only_refuses_to_fall_through_to_a_scraper(self):
+        # The setting a paying deploy runs on: no licensed answer means no chart, rather
+        # than a chart quietly drawn from data that may not be shown to a customer.
+        with _with_key(), mock.patch.object(config, "LICENSED_ONLY", True), \
+             mock.patch.object(data, "_twelvedata", side_effect=ValueError("upstream down")), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("fell through")), \
+             mock.patch("urllib.request.urlopen", side_effect=AssertionError("fell through")):
+            with self.assertRaises(ValueError) as caught:
+                data.fetch("AAPL", "2024-01-01")
+
+        self.assertIn("upstream down", str(caught.exception))
+
+    def test_licensed_only_without_a_key_says_what_to_do_about_it(self):
+        with mock.patch.object(config, "TWELVEDATA_KEY", ""), \
+             mock.patch.object(config, "LICENSED_ONLY", True), \
+             mock.patch.object(data, "_yahoo", side_effect=AssertionError("fell through")):
+            with self.assertRaises(ValueError) as caught:
+                data.fetch("AAPL", "2024-01-01")
+
+        self.assertIn("ROLLTAPE_FMP_KEY", str(caught.exception))
 
 
 class CacheFreshnessTests(unittest.TestCase):
@@ -156,7 +510,6 @@ class CacheFreshnessTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(shutil.rmtree, self.cache, True)
-        data.set_demo(False)
         data.reset_sources()
         self.addCleanup(data.reset_sources)
 
@@ -283,7 +636,7 @@ class RangeTests(unittest.TestCase):
 
 
 class IntradayTests(unittest.TestCase):
-    """Intraday is Yahoo-only and perishable, which is what these guard."""
+    """Intraday never falls through to Stooq, and it perishes. Both guarded here."""
 
     def setUp(self):
         self.cache = tempfile.mkdtemp()
@@ -291,7 +644,6 @@ class IntradayTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(shutil.rmtree, self.cache, True)
-        data.set_demo(False)
         data.reset_sources()
         self.addCleanup(data.reset_sources)
 
@@ -311,7 +663,7 @@ class IntradayTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 data.fetch("AAPL", "2026-08-01", None, "5m")
 
-        self.assertIn("Yahoo-only", str(caught.exception))
+        self.assertIn("Stooq serves daily and coarser", str(caught.exception))
 
     def test_daily_still_falls_back_to_stooq(self):
         with mock.patch.object(data, "_yahoo", side_effect=RuntimeError("endpoint moved")), \
@@ -389,14 +741,13 @@ class SessionTrimTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(shutil.rmtree, self.cache, True)
-        data.set_demo(False)
         data.reset_sources()
         self.addCleanup(data.reset_sources)
         # Two sessions of 5-minute bars, which is what "intraday" asks a source for.
-        self.frame = data._synthetic("AAPL", "2024-01-11", "2024-01-12", "5m")
+        self.frame = testsupport.synthetic("AAPL", "2024-01-11", "2024-01-12", "5m")
 
     def test_a_session_is_cut_into_bars_at_the_interval(self):
-        idx = data._session_index("2024-01-12", "2024-01-12", "5min")
+        idx = testsupport.session_index("2024-01-12", "2024-01-12", "5min")
         self.assertEqual(len(idx), 78)  # 09:30 to 16:00, exclusive of the close
         self.assertEqual(str(idx[0].time()), "09:30:00")
         self.assertEqual(str(idx[-1].time()), "15:55:00")
@@ -459,11 +810,21 @@ class FooterTests(unittest.TestCase):
         data._SOURCES["AAPL"] = "stooq"
         self.assertEqual(renderers._footer_text(None), "Data: Stooq")
 
-    def test_demo_wins_over_stooq(self):
-        # Demo data reaching a published video is the worse mistake, so it takes priority.
+    def test_a_render_that_mixed_sources_names_both(self):
+        # A comparison chart can take one ticker from the licensed feed and another from
+        # the fallback. Naming only one of them would be a false statement about the rest.
         data._SOURCES["AAPL"] = "stooq"
-        data._SOURCES["MSFT"] = "demo"
-        self.assertEqual(renderers._footer_text(None), "Demo data")
+        data._SOURCES["MSFT"] = "twelvedata"
+        self.assertEqual(renderers._footer_text(None), "Data: Twelve Data, Stooq")
+
+    def test_the_licensed_feed_is_credited(self):
+        data._SOURCES["AAPL"] = "twelvedata"
+        self.assertEqual(renderers._footer_text(None), "Data: Twelve Data")
+
+    def test_yahoo_alone_still_says_nothing(self):
+        # Nobody to credit and nothing surprising to disclose, so the footer stays clean.
+        data._SOURCES["AAPL"] = "yahoo"
+        self.assertIsNone(data.attribution())
 
 
 if __name__ == "__main__":

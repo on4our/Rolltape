@@ -17,8 +17,10 @@ ffmpeg does the encoding, and `pip install` brings its own copy — there is not
 to set up. If you already have ffmpeg on your PATH it gets used instead, which is the
 leaner option: the bundled build adds about 77MB to the install.
 
-To poke at the interface without hitting Yahoo, run `python app.py --demo`. That swaps
-in generated price data so every control still works offline.
+Prices come from a real feed and only from a real feed — there is no generated-data mode.
+Out of the box that means Yahoo with a Stooq fallback, which needs no account. Set
+`ROLLTAPE_FMP_KEY` and Financial Modeling Prep answers first instead; see **Where the
+numbers come from** for why you would, and for the one thing its entry plan can't do.
 
 ## Chart types
 
@@ -58,7 +60,7 @@ Daily by default. **Bar interval** also offers 1 minute, 5, 15, 30 and 1 hour, w
 what you want for a Fed afternoon or an earnings gap — the move is inside a single session,
 so a daily chart shows it as one candle.
 
-Yahoo only keeps intraday history for a while, and by a different amount per interval:
+Intraday history is kept for a while and then dropped, by a different amount per interval:
 about a week of 1-minute bars, two months of 5- to 30-minute, two years of hourly. A start
 date earlier than that is pulled forward to whatever exists rather than refused, and the
 subtitle names the range actually drawn.
@@ -67,10 +69,10 @@ Intraday charts are plotted by bar rather than by clock time, so the overnight h
 closed up and the ticks land on the session opens. Without that, a week of 5-minute bars
 would be about two thirds empty.
 
-**Intraday needs Yahoo.** Stooq serves daily bars and coarser, so unlike a daily render
-there is no fallback — if Yahoo is down, an intraday render fails rather than quietly
-handing you daily bars with a 5-minute label. It also needs yfinance installed; without it
-the intraday options are hidden rather than offered and broken.
+**Intraday never falls back to Stooq.** Stooq serves daily bars and coarser, so an
+intraday render fails rather than quietly handing you daily bars with a 5-minute label. It
+needs either a Twelve Data key or yfinance installed; with neither, the intraday options
+are hidden rather than offered and broken.
 
 ## Price axis and moving averages
 
@@ -173,7 +175,7 @@ no plane to move over, so the controls disappear for those two.
 app.py          Flask server, render queue, job tracking
 render_job.py   Runs one render in a child process, and reports progress back
 renderers.py    All six chart types, themes, easing, camera moves, export
-data.py         Yahoo fetch, Stooq fallback, disk cache, plus the demo generator
+data.py         FMP, Twelve Data, Yahoo and Stooq fetches, in order, plus the disk cache
 config.py       Env-var configuration, all defaulting to the local setup
 storage.py      Where finished MP4s go
 jobs.py         The render job registry
@@ -195,28 +197,83 @@ re-asked immediately.
 
 ## Where the numbers come from
 
-Yahoo first, via yfinance. Yahoo breaks periodically when they change their endpoints, so
-when that happens Rolltape falls back to [Stooq](https://stooq.com) — free daily bars, no
-account, a completely independent source. A failed render is worse than one drawn from
-second choice. If both fail you get one error naming both causes.
+Four sources, tried in order.
 
-The exception is the **1D** range. Stooq has daily bars and nothing finer, so there is no
-second source for intraday — those renders either come from Yahoo or fail.
+1. **[Financial Modeling Prep](https://site.financialmodelingprep.com)** — the licensed
+   feed, used whenever `ROLLTAPE_FMP_KEY` is set.
+2. **[Twelve Data](https://twelvedata.com)** — the other licensed option, used whenever
+   `ROLLTAPE_TWELVEDATA_KEY` is set.
+3. **Yahoo**, via yfinance.
+4. **[Stooq](https://stooq.com)** — free daily bars, no account, a completely independent
+   source.
+
+Each licensed source is inert without its key, so a fresh clone works with no account and
+which feeds are live is a matter of configuration rather than code. Each source below the
+last exists because the one above it breaks: Yahoo whenever they change their endpoints, a
+licensed feed whenever a monthly quota runs out. A failed render is worse than one drawn
+from second choice. If they all fail you get one error naming every cause.
+
+The exception is intraday. Stooq has daily bars and nothing finer, so it is never asked for
+5-minute data — answering with daily bars under a 5-minute label is worse than failing.
+
+### Why FMP
+
+- **Its interval grid is the one the interface already offers.**
+  1min/5min/15min/30min/1hour map straight onto Rolltape's.
+- **Its intraday history goes back years, not months.** This is the thing it does better
+  than anything else at the price: a 5-minute chart of a specific afternoon two years ago
+  is a render Twelve Data cannot serve at any tier.
+- **Plain REST/JSON**, which suits a codebase that is standard library plus four packages.
+
+### What the Starter plan can't do
+
+**Starter reaches back five years.** The 10Y and MAX presets ask for more, and FMP answers
+a too-long window with a short frame rather than an error — which would put five years of
+history under a MAX label and look entirely correct.
+
+Rolltape refuses to do that. `data.py` knows the plan's horizon and drops FMP for any
+window that reaches past it, so a MAX chart falls through to Yahoo and draws in full. The
+footer then names Yahoo rather than FMP, which is the honest answer. Under
+`ROLLTAPE_LICENSED_ONLY=1` there is nothing to fall through to and the render fails with a
+message naming the horizon.
+
+**A moving average eats into that five years.** Averages are fetched warm, which means
+pulling history from before the chart's left edge — 314 days for a 200-day line, 89 for a
+50-day. That run-up counts against the horizon, so the deepest chart FMP will serve *with a
+200-day average* starts about 4.1 years back rather than 5. Past that it falls through to
+Yahoo and still draws correctly; it just stops being a licensed render.
+
+If you upgrade to a plan with deeper history, set `ROLLTAPE_FMP_HISTORY_YEARS` to match —
+that is the whole change, no code edit.
+
+**One thing to settle before charging anyone.** FMP's individual plans do not cover
+displaying data to end users or the public; that needs their Data Display and Licensing
+Agreement, quoted rather than listed. Every render Rolltape produces is a public display,
+so this applies to a YouTube upload as much as to a paid tier. Ask them before the first
+paying user. `ROLLTAPE_TWELVEDATA_KEY` is wired and tested as the alternative if the answer
+is unattractive — Twelve Data states display use is included in its $29 plan.
 
 **The footer tells you which source answered.** Yahoo says nothing, since that's the
-assumed source. A chart built from the fallback reads `Data: Stooq`, and one built from
-`--demo` reads `Demo data` — which also stops generated prices reaching a video by accident.
+assumed source and there is nobody to credit. The others name themselves, and a render that
+mixed sources names all of them — one ticker off a different feed than the rest is exactly
+when a single label would be a lie.
 
-This matters because the two sources adjust prices differently: yfinance is asked for
-split- *and* dividend-adjusted closes, Stooq adjusts on its own terms. The same ticker over
-the same window can show a different total return depending on which one answered. Check the
-footer before you narrate a number.
+That matters because the sources adjust prices differently: yfinance is asked for split-
+*and* dividend-adjusted closes, Stooq adjusts on its own terms, and how the licensed feeds
+do it has not been checked against either. The same ticker over the same window can show a
+different total return depending on which one answered. Check the footer before you narrate
+a number.
 
-Stooq is a reliability fallback for personal use, and a daily-bars one — see **Bar
-interval** for what that means when Yahoo is down. It does not change the licensing
-position for a paid tier — see CLAUDE.md.
+### Paying customers
 
-Run the tests with `python -m unittest`. They mock both sources, so they need no network.
+Set `ROLLTAPE_LICENSED_ONLY=1` and the scraped sources are removed from the order
+altogether: no key, or a licensed feed that is down, means a failed render rather than a
+chart quietly drawn from data that may not be shown to someone who paid for it. Off by
+default, because a laptop rendering for its owner is the case the fallbacks exist for.
+
+Run the tests with `python -m unittest`. They mock every source, so they need no network —
+and the generated prices they draw from live in `testsupport.py`, which nothing the app
+runs imports. There is no path from a running Rolltape to an invented number.
 
 ## The landing page
 
@@ -249,9 +306,10 @@ is POSTed as `{"email": ..., "source": ...}` and nothing touches the disk. A `40
 from the provider counts as success, because "already subscribed" is not a failure from
 the visitor's side.
 
-Running it in demo mode is the honest way to put it in public: `ROLLTAPE_DEMO=1` needs no
-market data, so there is no licensing question, and the page says on itself that the
-prices are generated.
+Putting it in public means putting real market data in public, so set `ROLLTAPE_FMP_KEY`
+and `ROLLTAPE_LICENSED_ONLY=1` before pointing anyone at it. The
+showcase frames on the page are drawn by the real renderer from the real feed, which is
+the point of them.
 
 ## Deploying
 
@@ -269,7 +327,10 @@ The code is deployment-ready. These env vars all default to the local behaviour:
 |---|---|---|
 | `ROLLTAPE_OUT_DIR` | `./outputs` | Where MP4s are written |
 | `ROLLTAPE_CACHE_DIR` | `./.cache` | Where the price cache lives |
-| `ROLLTAPE_DEMO` | off | Same as `--demo`, for hosts with no CLI |
+| `ROLLTAPE_FMP_KEY` | unset | Financial Modeling Prep API key; answers first when set |
+| `ROLLTAPE_FMP_HISTORY_YEARS` | `5` | How far back the FMP plan reaches — Starter is 5, Professional 30 |
+| `ROLLTAPE_TWELVEDATA_KEY` | unset | Twelve Data API key; the second licensed source |
+| `ROLLTAPE_LICENSED_ONLY` | off | Refuse the Yahoo/Stooq fallbacks — for a deploy serving customers |
 | `ROLLTAPE_LANDING` | off | Landing page at `/`, app at `/app` |
 | `ROLLTAPE_DEMO_URL` | `/app` | Where the landing page's buttons point |
 | `ROLLTAPE_SIGNUP_URL` | unset | List provider to POST signups to |
@@ -306,9 +367,11 @@ queued and answered asynchronously, which a platform that freezes the instance t
 the response is sent cannot carry — and the function bundle only fit its size ceiling by
 about 3 MB, with yfinance dropped to get there.
 
-**Still open before anything ships commercially:** yfinance scrapes Yahoo, and
-redistributing that data to paying users isn't permitted. A licensed feed has to replace it
-first — see CLAUDE.md.
+**Before anything ships commercially:** set a licensed key and `ROLLTAPE_LICENSED_ONLY=1`.
+yfinance scrapes Yahoo, and showing that data to paying users isn't permitted — the
+licensed feeds are in place for exactly this, but the fallbacks are on by default and have
+to be turned off deliberately. See **What the Starter plan can't do** for the display
+licence question that is still open with FMP.
 
 ## Notes
 

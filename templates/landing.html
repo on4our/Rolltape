@@ -283,7 +283,6 @@ footer a:hover{color:var(--indigo)}
 <div class="topbar">
   <div class="wrap">
     <div class="wordmark">Roll<span>·</span>tape</div>
-    {% if demo %}<div class="pill warn">Demo data</div>{% endif %}
     <div class="spacer"></div>
     <a class="topnav" href="{{ demo_url }}">Open the app →</a>
   </div>
@@ -347,9 +346,7 @@ footer a:hover{color:var(--indigo)}
     <h2>Frames the renderer actually produced.</h2>
     <p class="sub">Not mockups — each one is drawn on request by the same code path that
       writes the video, at the same framing and the same moment through the animation.
-      {% if demo %}<b>On this instance the prices behind them are generated, not real</b>,
-      so read the shapes and the labels rather than the numbers. Every frame is stamped to
-      say so.{% endif %}</p>
+</p>
     <div class="shots">
       {% for example_id, ex in examples.items() %}
       <figure class="shot" style="margin:0">
@@ -495,13 +492,6 @@ footer a:hover{color:var(--indigo)}
     <a href="#examples">Examples</a>
     <a href="#signup">Get notified</a>
   </div>
-  {% if demo %}
-  <div class="wrap" style="margin-top:16px">
-    <span class="pill warn">Demo data</span>
-    <span style="margin-left:10px">This instance generates synthetic prices, so every
-      chart on it is illustrative. Renders are stamped to say so.</span>
-  </div>
-  {% endif %}
 </footer>
 
 <script>
