@@ -123,6 +123,53 @@ class PricingPageTests(unittest.TestCase):
         self.assertIn("monthly * 10", self._read("templates/pricing.html"))
 
 
+class RailSectionTests(unittest.TestCase):
+    """The rail's collapsible sections, and the one thing that makes collapsing safe.
+
+    A section that is closed still feeds config(), so a setting hidden without a digest
+    saying what it is set to is a setting nobody can see is wrong. Structure only — there
+    is no browser here, so this pins what the markup promises rather than what it does.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(HERE, "templates", "index.html")) as fh:
+            cls.html = fh.read()
+        cls.rail = re.search(r'<aside class="rail">(.*?)</aside>', cls.html, re.S).group(1)
+
+    def sections(self):
+        return re.findall(r'<details class="group"[^>]*id="(g\w+)"', self.rail)
+
+    def test_every_section_carries_a_digest(self):
+        digests = set(re.findall(r'<span class="digest" id="(d\w+)"', self.rail))
+        self.assertTrue(self.sections())
+        for sec in self.sections():
+            with self.subTest(section=sec):
+                self.assertIn("d" + sec[1:], digests)
+
+    def test_every_section_is_listed_in_the_script_that_fills_the_digests(self):
+        # digests() walks SECTIONS, not the DOM, so a section missing from that array gets
+        # a summary that stays blank forever rather than one that throws.
+        listed = re.findall(r'\["(g\w+)",', self.html)
+        self.assertEqual(sorted(listed), sorted(self.sections()))
+
+    def test_no_control_sits_outside_a_section(self):
+        # Everything in the rail has to be inside a disclosure. A stray control would be
+        # the one setting with nowhere to collapse to and no digest to describe it.
+        orphaned = re.sub(r"<details.*?</details>", "", self.rail, flags=re.S)
+        self.assertNotIn('class="ctrl', orphaned)
+        self.assertNotIn("<button", orphaned)
+
+    def test_the_set_once_sections_start_closed(self):
+        # This is the whole point: output, labels and the brand kit are a channel's
+        # settings rather than a render's, and leaving them open is what made the rail
+        # three screens tall. <details> is open when the attribute is present.
+        for sec in ("gOutput", "gLabels", "gKit"):
+            with self.subTest(section=sec):
+                tag = re.search(rf'<details class="group" id="{sec}"[^>]*>', self.rail)
+                self.assertNotIn(" open", tag.group(0))
+
+
 class ErrorPageTests(unittest.TestCase):
     """The split that matters: pages get HTML, /api/* keeps getting JSON.
 

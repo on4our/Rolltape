@@ -97,8 +97,41 @@ button,input,select,textarea{font:inherit;color:inherit}
 
 .eyebrow{
   font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
-  color:var(--faint);padding:20px 20px 8px;
+  color:var(--faint);
 }
+
+/* Every rail section is a disclosure. The settings divide cleanly into the ones touched
+   per render — chart, tickers, motion — and the ones picked once for a channel and never
+   looked at again, but all of them shared one scroll column, which put the theme swatches
+   two screens below the ticker field. Native <details> rather than a JS accordion: the
+   keyboard and screen-reader behaviour is the thing being asked for, and it keeps the
+   fields in the DOM, so a collapsed section still reaches config(). */
+.group{border-top:1px solid var(--line)}
+.group:first-of-type{border-top:0}
+.group > summary{
+  display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;
+  margin:8px 12px;padding:8px;border-radius:6px;
+  -webkit-user-select:none;user-select:none;
+}
+.group > summary::-webkit-details-marker{display:none}
+.group > summary:hover{background:var(--sunken)}
+.group > summary:focus-visible{outline:0;box-shadow:var(--focus)}
+.caret{
+  width:12px;height:8px;flex:none;transition:transform .15s ease;
+  background:no-repeat center/12px 8px url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='none' stroke='%23697386' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5 6 6.5l5-5'/%3E%3C/svg%3E");
+}
+.group[open] > summary .caret{transform:rotate(180deg)}
+/* The digest is what makes collapsing safe: a closed section still says what it is set to,
+   so nothing that changes the render is hidden without also being summarised. It truncates
+   rather than wrapping, because a summary that grows to two rows defeats the point. */
+.digest{
+  margin-left:auto;font-size:12.5px;color:var(--muted);min-width:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+/* An open section shows the controls themselves, so the digest would only repeat them.
+   visibility rather than display keeps the summary the same height either way. */
+.group[open] > summary .digest{visibility:hidden}
+.group-body{padding:0 20px 20px}
 .modes{padding:0 12px 8px}
 .mode{
   display:block;width:100%;text-align:left;background:none;border:0;cursor:pointer;
@@ -111,7 +144,6 @@ button,input,select,textarea{font:inherit;color:inherit}
 .mode[aria-pressed="true"] .mode-name{color:var(--indigo)}
 .mode-desc{color:var(--muted);font-size:12.5px;line-height:1.4;margin-top:2px}
 
-.group{padding:8px 20px 20px;border-top:1px solid var(--line);margin-top:12px}
 .field{margin-bottom:16px}
 .field > label{
   display:block;font-size:13px;font-weight:500;color:var(--slate);margin-bottom:6px;
@@ -310,6 +342,7 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
   .pricelink{margin-left:auto}
   .slate button{padding:5px 4px}  /* thumb-sized tap target, not a 12px word */
   .rail{height:auto;position:static;border-right:0;border-top:1px solid var(--line)}
+  .group > summary{padding:12px 8px}  /* a thumb-sized row, not an 11px word */
   .stage{padding:12px;border-radius:8px}
   .frame{min-height:0}
   .frame img{max-height:46vh}
@@ -343,205 +376,229 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
 <div class="layout">
   <!-- ------------------------------------------------------------ rail -->
   <aside class="rail">
-    <div class="eyebrow">Chart type</div>
-    <div class="modes" id="modes"></div>
+    <details class="group" id="gChart" open>
+      <summary><span class="caret"></span><span class="eyebrow">Chart type</span>
+        <span class="digest" id="dChart"></span></summary>
+      <div class="modes" id="modes"></div>
+    </details>
 
-    <div class="group">
-      <div class="field">
-        <label for="tickers">Tickers</label>
-        <input class="ctrl" id="tickers" value="NVDA" autocomplete="off" spellcheck="false">
-        <div class="hint" id="tickerHint">One symbol</div>
-      </div>
-      <div class="field">
-        <label>Date range</label>
-        <div class="chips" id="ranges"></div>
-        <div class="hint" id="rangeHint"></div>
-      </div>
-      <div class="row2" id="customRange" hidden>
-        <div class="field"><label for="start">Start</label>
-          <input class="ctrl" id="start" type="date" value="2024-01-01"></div>
-        <div class="field"><label for="end">End</label>
-          <input class="ctrl" id="end" type="date"></div>
-      </div>
+    <details class="group" id="gData" open>
+      <summary><span class="caret"></span><span class="eyebrow">Data</span>
+        <span class="digest" id="dData"></span></summary>
+      <div class="group-body">
+        <div class="field">
+          <label for="tickers">Tickers</label>
+          <input class="ctrl" id="tickers" value="NVDA" autocomplete="off" spellcheck="false">
+          <div class="hint" id="tickerHint">One symbol</div>
+        </div>
+        <div class="field">
+          <label>Date range</label>
+          <div class="chips" id="ranges"></div>
+          <div class="hint" id="rangeHint"></div>
+        </div>
+        <div class="row2" id="customRange" hidden>
+          <div class="field"><label for="start">Start</label>
+            <input class="ctrl" id="start" type="date" value="2024-01-01"></div>
+          <div class="field"><label for="end">End</label>
+            <input class="ctrl" id="end" type="date"></div>
+        </div>
 
-      <div class="field" id="intervalField" hidden>
-        <label for="interval">Bar interval</label>
-        <select class="ctrl" id="interval"></select>
-        <div class="hint" id="intervalHint">One bar per trading day</div>
-      </div>
+        <div class="field" id="intervalField" hidden>
+          <label for="interval">Bar interval</label>
+          <select class="ctrl" id="interval"></select>
+          <div class="hint" id="intervalHint">One bar per trading day</div>
+        </div>
 
-      <div class="field" data-for="compare race">
-        <label>Scale</label>
-        <div class="seg" id="normalizeSeg">
-          <button data-v="1" aria-pressed="true">Indexed to 100</button>
-          <button data-v="0" aria-pressed="false">Raw price</button>
+        <div class="field" data-for="compare race">
+          <label>Scale</label>
+          <div class="seg" id="normalizeSeg">
+            <button data-v="1" aria-pressed="true">Indexed to 100</button>
+            <button data-v="0" aria-pressed="false">Raw price</button>
+          </div>
+        </div>
+
+        <div class="field" data-for="line compare candles timeline">
+          <label>Price axis</label>
+          <div class="seg" id="logSeg">
+            <button data-v="0" aria-pressed="true">Linear</button>
+            <button data-v="1" aria-pressed="false">Log</button>
+          </div>
+          <div class="hint">Log keeps equal percentage moves the same height</div>
+        </div>
+
+        <div class="field" data-for="line candles timeline">
+          <label for="ma">Moving averages</label>
+          <input class="ctrl" id="ma" placeholder="50, 200" autocomplete="off"
+                 spellcheck="false">
+          <div class="hint">Trading days, up to three. Leave blank for none.</div>
+        </div>
+
+        <div class="field" data-for="candles">
+          <label for="maxCandles">Maximum candles</label>
+          <input class="ctrl" id="maxCandles" type="number" min="20" max="250" value="90">
+          <div class="hint" id="candleHint">Longer ranges roll up to weekly or monthly</div>
+        </div>
+
+        <div class="field" data-for="bars">
+          <label for="metric">Bar values</label>
+          <select class="ctrl" id="metric">
+            <option value="return">Total return over range (%)</option>
+            <option value="drawdown">Maximum drawdown (%)</option>
+            <option value="volatility">Annualised volatility (%)</option>
+            <option value="price">Latest close ($)</option>
+            <option value="manual">My own numbers</option>
+          </select>
+        </div>
+        <div class="field" data-for="bars" id="rowsField" hidden>
+          <label>Rows</label>
+          <div id="rows"></div>
+          <button class="addbtn" id="addRow" type="button">+ Add row</button>
+          <div class="row2" style="margin-top:8px">
+            <input class="ctrl" id="unit" placeholder="Unit e.g. % or $" value="">
+            <input class="ctrl" id="decimals" type="number" min="0" max="3" value="1">
+          </div>
+          <div class="hint">Unit and decimal places</div>
+        </div>
+
+        <div class="field" data-for="timeline">
+          <label>Callouts</label>
+          <div id="notes"></div>
+          <button class="addbtn" id="addNote" type="button">+ Add callout</button>
+          <div class="hint">Date and label, e.g. 2024-06-12 / Q2 earnings</div>
         </div>
       </div>
+    </details>
 
-      <div class="field" data-for="line compare candles timeline">
-        <label>Price axis</label>
-        <div class="seg" id="logSeg">
-          <button data-v="0" aria-pressed="true">Linear</button>
-          <button data-v="1" aria-pressed="false">Log</button>
+    <details class="group" id="gMotion" open>
+      <summary><span class="caret"></span><span class="eyebrow">Motion</span>
+        <span class="digest" id="dMotion"></span></summary>
+      <div class="group-body">
+        <div class="row2">
+          <div class="field"><label for="duration">Reveal (s)</label>
+            <input class="ctrl" id="duration" type="number" min="1" max="60" step="0.5" value="6"></div>
+          <div class="field"><label for="hold">Hold (s)</label>
+            <input class="ctrl" id="hold" type="number" min="0" max="20" step="0.5" value="1.5"></div>
         </div>
-        <div class="hint">Log keeps equal percentage moves the same height</div>
-      </div>
-
-      <div class="field" data-for="line candles timeline">
-        <label for="ma">Moving averages</label>
-        <input class="ctrl" id="ma" placeholder="50, 200" autocomplete="off"
-               spellcheck="false">
-        <div class="hint">Trading days, up to three. Leave blank for none.</div>
-      </div>
-
-      <div class="field" data-for="candles">
-        <label for="maxCandles">Maximum candles</label>
-        <input class="ctrl" id="maxCandles" type="number" min="20" max="250" value="90">
-        <div class="hint" id="candleHint">Longer ranges roll up to weekly or monthly</div>
-      </div>
-
-      <div class="field" data-for="bars">
-        <label for="metric">Bar values</label>
-        <select class="ctrl" id="metric">
-          <option value="return">Total return over range (%)</option>
-          <option value="drawdown">Maximum drawdown (%)</option>
-          <option value="volatility">Annualised volatility (%)</option>
-          <option value="price">Latest close ($)</option>
-          <option value="manual">My own numbers</option>
-        </select>
-      </div>
-      <div class="field" data-for="bars" id="rowsField" hidden>
-        <label>Rows</label>
-        <div id="rows"></div>
-        <button class="addbtn" id="addRow" type="button">+ Add row</button>
-        <div class="row2" style="margin-top:8px">
-          <input class="ctrl" id="unit" placeholder="Unit e.g. % or $" value="">
-          <input class="ctrl" id="decimals" type="number" min="0" max="3" value="1">
-        </div>
-        <div class="hint">Unit and decimal places</div>
-      </div>
-
-      <div class="field" data-for="timeline">
-        <label>Callouts</label>
-        <div id="notes"></div>
-        <button class="addbtn" id="addNote" type="button">+ Add callout</button>
-        <div class="hint">Date and label, e.g. 2024-06-12 / Q2 earnings</div>
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="eyebrow" style="padding:0 0 10px">Motion</div>
-      <div class="row2">
-        <div class="field"><label for="duration">Reveal (s)</label>
-          <input class="ctrl" id="duration" type="number" min="1" max="60" step="0.5" value="6"></div>
-        <div class="field"><label for="hold">Hold (s)</label>
-          <input class="ctrl" id="hold" type="number" min="0" max="20" step="0.5" value="1.5"></div>
-      </div>
-      <div class="field">
-        <label>Easing</label>
-        <div class="seg" id="easingSeg">
-          <button data-v="out" aria-pressed="true">Ease out</button>
-          <button data-v="inout" aria-pressed="false">Both ends</button>
-          <button data-v="linear" aria-pressed="false">Linear</button>
+        <div class="field">
+          <label>Easing</label>
+          <div class="seg" id="easingSeg">
+            <button data-v="out" aria-pressed="true">Ease out</button>
+            <button data-v="inout" aria-pressed="false">Both ends</button>
+            <button data-v="linear" aria-pressed="false">Linear</button>
+          </div>
         </div>
       </div>
-    </div>
+    </details>
 
     <!-- Bars and the race have no plane to move a camera over — the rows are the
          composition — so the whole group drops out for them. -->
-    <div class="group" data-for="line compare candles timeline">
-      <div class="eyebrow" style="padding:0 0 10px">Camera</div>
-      <div class="field">
-        <label for="camera">Move</label>
-        <select class="ctrl" id="camera"></select>
-        <div class="hint" id="cameraHint"></div>
-      </div>
-      <div class="field" id="travelField">
-        <label>Travel</label>
-        <div class="seg" id="travelSeg"></div>
-      </div>
-      <div class="field" id="cameraYField">
-        <label>Vertical</label>
-        <div class="seg" id="cameraYSeg">
-          <button data-v="track" aria-pressed="true">Track</button>
-          <button data-v="hold" aria-pressed="false">Hold scale</button>
+    <details class="group" id="gCamera" data-for="line compare candles timeline" open>
+      <summary><span class="caret"></span><span class="eyebrow">Camera</span>
+        <span class="digest" id="dCamera"></span></summary>
+      <div class="group-body">
+        <div class="field">
+          <label for="camera">Move</label>
+          <select class="ctrl" id="camera"></select>
+          <div class="hint" id="cameraHint"></div>
         </div>
-        <div class="hint">Tracking fills the frame as it moves. Holding keeps one price
-          scale, so every move stays the size it really was.</div>
+        <div class="field" id="travelField">
+          <label>Travel</label>
+          <div class="seg" id="travelSeg"></div>
+        </div>
+        <div class="field" id="cameraYField">
+          <label>Vertical</label>
+          <div class="seg" id="cameraYSeg">
+            <button data-v="track" aria-pressed="true">Track</button>
+            <button data-v="hold" aria-pressed="false">Hold scale</button>
+          </div>
+          <div class="hint">Tracking fills the frame as it moves. Holding keeps one price
+            scale, so every move stays the size it really was.</div>
+        </div>
       </div>
-    </div>
+    </details>
 
-    <div class="group">
-      <div class="eyebrow" style="padding:0 0 10px">Output</div>
-      <div class="field">
-        <label>Theme</label>
-        <div class="swatches" id="themes"></div>
-      </div>
-      <div class="field">
-        <label>Frame</label>
-        <div class="seg" id="aspectSeg">
-          <button data-v="16:9" aria-pressed="true">16:9</button>
-          <button data-v="9:16" aria-pressed="false">9:16</button>
-          <button data-v="1:1" aria-pressed="false">1:1</button>
+    <!-- Output, Labels and Brand kit start closed: they are a channel's settings rather
+         than a render's, so they are picked once and then in the way. -->
+    <details class="group" id="gOutput">
+      <summary><span class="caret"></span><span class="eyebrow">Output</span>
+        <span class="digest" id="dOutput"></span></summary>
+      <div class="group-body">
+        <div class="field">
+          <label>Theme</label>
+          <div class="swatches" id="themes"></div>
+        </div>
+        <div class="field">
+          <label>Frame</label>
+          <div class="seg" id="aspectSeg">
+            <button data-v="16:9" aria-pressed="true">16:9</button>
+            <button data-v="9:16" aria-pressed="false">9:16</button>
+            <button data-v="1:1" aria-pressed="false">1:1</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Quality</label>
+          <div class="seg" id="qualitySeg">
+            <button data-v="draft" aria-pressed="false">Draft</button>
+            <button data-v="final" aria-pressed="true">Final</button>
+            <button data-v="max" aria-pressed="false">Max</button>
+          </div>
+          <div class="hint">Click the size or frame rate in the slate to change either one</div>
+        </div>
+        <div class="field">
+          <label>Background</label>
+          <div class="seg" id="bgSeg">
+            <button data-v="0" aria-pressed="true">Solid</button>
+            <button data-v="1" aria-pressed="false">Transparent</button>
+          </div>
+          <div class="hint" id="bgHint">Theme colour, H.264 MP4</div>
+        </div>
+        <div class="field">
+          <label>Encoder</label>
+          <div class="seg" id="presetSeg">
+            <button data-v="auto" aria-pressed="true">Auto</button>
+            <button data-v="veryfast" aria-pressed="false">Faster</button>
+            <button data-v="slow" aria-pressed="false">Slower</button>
+          </div>
         </div>
       </div>
-      <div class="field">
-        <label>Quality</label>
-        <div class="seg" id="qualitySeg">
-          <button data-v="draft" aria-pressed="false">Draft</button>
-          <button data-v="final" aria-pressed="true">Final</button>
-          <button data-v="max" aria-pressed="false">Max</button>
-        </div>
-        <div class="hint">Click the size or frame rate in the slate to change either one</div>
-      </div>
-      <div class="field">
-        <label>Background</label>
-        <div class="seg" id="bgSeg">
-          <button data-v="0" aria-pressed="true">Solid</button>
-          <button data-v="1" aria-pressed="false">Transparent</button>
-        </div>
-        <div class="hint" id="bgHint">Theme colour, H.264 MP4</div>
-      </div>
-      <div class="field">
-        <label>Encoder</label>
-        <div class="seg" id="presetSeg">
-          <button data-v="auto" aria-pressed="true">Auto</button>
-          <button data-v="veryfast" aria-pressed="false">Faster</button>
-          <button data-v="slow" aria-pressed="false">Slower</button>
-        </div>
-      </div>
-    </div>
+    </details>
 
-    <div class="group">
-      <div class="eyebrow" style="padding:0 0 10px">Labels</div>
-      <div class="field"><label for="title">Title</label>
-        <input class="ctrl" id="title" placeholder="Defaults to the ticker"></div>
-      <div class="field"><label for="subtitle">Subtitle</label>
-        <input class="ctrl" id="subtitle" placeholder="Defaults to range and return"></div>
-      <div class="field"><label for="footer">Footer</label>
-        <input class="ctrl" id="footer" placeholder="@yourchannel"></div>
-    </div>
+    <details class="group" id="gLabels">
+      <summary><span class="caret"></span><span class="eyebrow">Labels</span>
+        <span class="digest" id="dLabels"></span></summary>
+      <div class="group-body">
+        <div class="field"><label for="title">Title</label>
+          <input class="ctrl" id="title" placeholder="Defaults to the ticker"></div>
+        <div class="field"><label for="subtitle">Subtitle</label>
+          <input class="ctrl" id="subtitle" placeholder="Defaults to range and return"></div>
+        <div class="field"><label for="footer">Footer</label>
+          <input class="ctrl" id="footer" placeholder="@yourchannel"></div>
+      </div>
+    </details>
 
-    <div class="group">
-      <div class="eyebrow" style="padding:0 0 10px">Brand kit</div>
-      <div class="field">
-        <label for="kit">Saved kits</label>
-        <select class="ctrl" id="kit" data-nopreview><option value="">None</option></select>
-        <div class="hint">Theme, footer and default title, kept between runs</div>
+    <details class="group" id="gKit">
+      <summary><span class="caret"></span><span class="eyebrow">Brand kit</span>
+        <span class="digest" id="dKit"></span></summary>
+      <div class="group-body">
+        <div class="field">
+          <label for="kit">Saved kits</label>
+          <select class="ctrl" id="kit" data-nopreview><option value="">None</option></select>
+          <div class="hint">Theme, footer and default title, kept between runs</div>
+        </div>
+        <div class="field">
+          <label for="titleFormat">Default title</label>
+          <input class="ctrl" id="titleFormat" placeholder="{ticker}">
+          <div class="hint">Fills in when Title is blank · {ticker} {tickers} {chart}</div>
+        </div>
+        <div class="row2">
+          <input class="ctrl" id="kitName" placeholder="Kit name" data-nopreview>
+          <button class="ghost" id="saveKit" type="button">Save kit</button>
+        </div>
+        <button class="ghost" id="deleteKit" type="button" style="margin-top:8px" hidden>
+          Delete kit</button>
+        <div class="hint" id="kitErr" style="color:var(--red)" hidden></div>
       </div>
-      <div class="field">
-        <label for="titleFormat">Default title</label>
-        <input class="ctrl" id="titleFormat" placeholder="{ticker}">
-        <div class="hint">Fills in when Title is blank · {ticker} {tickers} {chart}</div>
-      </div>
-      <div class="row2">
-        <input class="ctrl" id="kitName" placeholder="Kit name" data-nopreview>
-        <button class="ghost" id="saveKit" type="button">Save kit</button>
-      </div>
-      <button class="ghost" id="deleteKit" type="button" style="margin-top:8px" hidden>
-        Delete kit</button>
-      <div class="hint" id="kitErr" style="color:var(--red)" hidden></div>
-    </div>
+    </details>
   </aside>
 
   <!-- ------------------------------------------------------------ main -->
@@ -637,9 +694,54 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
     [...$("#ranges").children].forEach(x=>x.setAttribute("aria-pressed", x===b));
     applyRange(); schedule();
   });
-  applyChart(); applyRange(); schedule(); pollJobs();
+  applyChart(); applyRange(); restoreSections(); schedule(); pollJobs();
   fetch("/api/presets").then(r=>r.json()).then(k=>drawKits(k, ""));
 });
+
+/* ---------- rail sections ---------- */
+// What each collapsed section says it is set to. Read off the same state the config is
+// built from rather than from the DOM where there's a choice, so a digest can't drift from
+// what the render will actually do.
+const segLabel = id => ($(id).querySelector('[aria-pressed="true"]') || {}).textContent || "";
+const named = (list, id) => ((state.meta[list] || []).find(x => x.id === id) || {}).label || "";
+
+const SECTIONS = [
+  ["gChart",  () => named("charts", state.chart)],
+  ["gData",   () => [$("#tickers").value.trim(),
+                     state.range === CUSTOM ? "Custom dates" : named("ranges", state.range)]
+                    .filter(Boolean).join(" · ")],
+  ["gMotion", () => `${+$("#duration").value}s + ${+$("#hold").value}s · ` +
+                    segLabel("#easingSeg").toLowerCase()],
+  ["gCamera", () => named("cameras", state.camera)],
+  ["gOutput", () => [named("themes", state.theme), state.aspect, segLabel("#qualitySeg"),
+                     state.transparent ? "transparent" : null].filter(Boolean).join(" · ")],
+  ["gLabels", () => ["title", "subtitle", "footer"].map(k => $("#" + k).value.trim())
+                    .filter(Boolean).join(" · ") || "Defaults"],
+  ["gKit",    () => $("#kit").value || "None"],
+];
+const SECTION_KEY = "rolltape.sections";
+
+function digests(){
+  SECTIONS.forEach(([id, text]) => { $("#d" + id.slice(1)).textContent = text(); });
+}
+
+// Which sections are open is a preference, not app state — a channel's theme and footer are
+// set once, so re-expanding them on every reload is exactly the scrolling this removes.
+// localStorage throws rather than no-ops in a few privacy modes, hence the guards.
+function saveSections(){
+  const open = {};
+  SECTIONS.forEach(([id]) => { open[id] = $("#" + id).open; });
+  try{ localStorage.setItem(SECTION_KEY, JSON.stringify(open)); } catch(e){}
+}
+function restoreSections(){
+  let saved = {};
+  try{ saved = JSON.parse(localStorage.getItem(SECTION_KEY)) || {}; } catch(e){}
+  SECTIONS.forEach(([id]) => {
+    const el = $("#" + id);
+    if (typeof saved[id] === "boolean") el.open = saved[id];
+    el.addEventListener("toggle", saveSections);
+  });
+}
 
 /* ---------- brand kit ---------- */
 function kitFields(){
@@ -664,6 +766,7 @@ function drawKits(kits, selected){
   Object.keys(state.kits).sort().forEach(n => sel.add(new Option(n, n)));
   sel.value = state.kits[selected] ? selected : "";
   $("#deleteKit").hidden = !sel.value;
+  digests();
 }
 
 function applyKit(name){
@@ -923,6 +1026,9 @@ function slate(){
     ? "Alpha channel, ProRes 4444 MOV — large, drops straight into an editor"
     : "Theme colour, H.264 MP4";
   $("#frame").classList.toggle("alpha", !!state.transparent);
+  // Every control routes here — seg buttons, the slate cycles, and any .ctrl through
+  // schedule() — so this is the one place the collapsed summaries have to be refreshed.
+  digests();
 }
 
 /* ---------- preview ---------- */
