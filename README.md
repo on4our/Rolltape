@@ -231,6 +231,12 @@ footer then names Yahoo rather than FMP, which is the honest answer. Under
 `ROLLTAPE_LICENSED_ONLY=1` there is nothing to fall through to and the render fails with a
 message naming the horizon.
 
+**A moving average eats into that five years.** Averages are fetched warm, which means
+pulling history from before the chart's left edge — 314 days for a 200-day line, 89 for a
+50-day. That run-up counts against the horizon, so the deepest chart FMP will serve *with a
+200-day average* starts about 4.1 years back rather than 5. Past that it falls through to
+Yahoo and still draws correctly; it just stops being a licensed render.
+
 If you upgrade to a plan with deeper history, set `ROLLTAPE_FMP_HISTORY_YEARS` to match —
 that is the whole change, no code edit.
 

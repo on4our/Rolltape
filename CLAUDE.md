@@ -358,6 +358,13 @@ draining the queue is still what bounds CPU, not the lock.
   through to Yahoo, draws in full, and the footer stops naming FMP — correct, and
   surprising if you are watching which source answered. Under `LICENSED_ONLY` the same
   render fails instead.
+- **A moving average spends part of the horizon.** `_fetch_with_ma()` pulls its run-up from
+  before the chart's start, and `_covers()` sees that earlier date rather than the one on
+  screen — so a 200-day average costs 314 days of the five years and the deepest chart FMP
+  will serve with one is about 4.1 years, not 5. It falls through to Yahoo and still draws
+  correctly; it just quietly stops being a licensed render, which matters under
+  `LICENSED_ONLY` where it fails instead. Checking the visible start rather than the fetched
+  one would be wrong — the run-up is a real request and the plan really cannot serve it.
 - **FMP's individual plans do not cover displaying data to end users or the public**, which
   is what every render is. That needs their Data Display and Licensing Agreement, quoted
   rather than listed, and it is unresolved. Twelve Data is wired and tested as the
