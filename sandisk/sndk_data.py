@@ -116,37 +116,17 @@ TECH = {
 
 
 # --- derived series the charts draw from -----------------------------------
-def revenue_bridge():
-    """Quarterly revenue, as a bridge from Q1 to Q4 of FY2026.
+def segment_composition():
+    """FY2026 revenue as its three segments stacking up to the reported total.
 
-    Every value is a reported quarterly revenue figure or the difference between two of
-    them, so the bridge closes on Q4's reported revenue by construction rather than by
-    plugging a residual.
+    The one shape here that earns a bridge: these are parts of a whole, so the bars
+    genuinely sum to the total the last one names. A quarterly series does not — four
+    quarters of revenue are four separate figures, and stepping between them would land
+    on Q4 while looking like it was accumulating toward the year.
     """
-    rows = [{"label": QUARTERS[0]["label"], "value": QUARTERS[0]["revenue"],
-             "kind": "start"}]
-    for prev, cur in zip(QUARTERS, QUARTERS[1:]):
-        rows.append({"label": cur["label"],
-                     "value": cur["revenue"] - prev["revenue"], "kind": "delta"})
-    rows.append({"label": "Q4 FY26 revenue", "value": QUARTERS[-1]["revenue"],
-                 "kind": "total"})
-    return rows
-
-
-def margin_bridge():
-    """Non-GAAP gross margin across FY2026, in percentage points.
-
-    Percentage points add, which is what makes this a legitimate bridge — the underlying
-    margins would not be. Same construction rule as the revenue bridge: each step is the
-    difference between two reported figures.
-    """
-    rows = [{"label": QUARTERS[0]["label"], "value": QUARTERS[0]["gross_margin"],
-             "kind": "start"}]
-    for prev, cur in zip(QUARTERS, QUARTERS[1:]):
-        rows.append({"label": cur["label"],
-                     "value": round(cur["gross_margin"] - prev["gross_margin"], 1),
-                     "kind": "delta"})
-    rows.append({"label": "Q4 margin", "value": QUARTERS[-1]["gross_margin"],
+    rows = [{"label": s["name"], "value": s["revenue"], "kind": "delta"}
+            for s in SEGMENTS_FY2026]
+    rows.append({"label": "FY2026 revenue", "value": FY2026["revenue"],
                  "kind": "total"})
     return rows
 
@@ -201,5 +181,6 @@ if __name__ == "__main__":
           f"(quarters sum to {sum(q['gaap_ni'] for q in QUARTERS):,})")
     print(f"  FY2025 revenue base   {FY2025_REVENUE:>7,} $M "
           f"(segments imply {seg_fy25:,.0f})")
-    print(f"  Revenue bridge closes on {revenue_bridge()[-1]['value']:,} $M")
-    print(f"  Margin bridge closes on {margin_bridge()[-1]['value']}%")
+    comp = segment_composition()
+    print(f"  Segment bridge closes on {comp[-1]['value']:,} $M "
+          f"(parts sum to {sum(r['value'] for r in comp[:-1]):,})")

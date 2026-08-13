@@ -293,7 +293,7 @@ const qLabels = q.map((x) => x.label);
     "The acceleration is the point: $2.31B → $3.03B → $5.95B → $8.97B.\n\n" +
     "Two thirds of the year's revenue arrived in the second half. And Q4 on its own " +
     "($8.97B) was larger than the entire prior fiscal year (about $7.4B).\n\n" +
-    "Cut to: 01-revenue-build.mp4"
+    "Cut to: 01-quarterly-revenue.mp4"
   );
 }
 

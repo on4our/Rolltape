@@ -58,26 +58,25 @@ def configs():
     """Every clip in the set, keyed by output filename."""
     out = {}
 
-    # 1. The acceleration. Quarterly revenue from Q1 to Q4 of FY2026 — a bridge because
-    # the story is the *steps*, not the four levels: two thirds of the year's growth
-    # arrived in the last two quarters.
-    out["01-revenue-build"] = dict(LOOK, **{
-        "chart": "waterfall",
-        "rows": _bridge_rows(sndk.revenue_bridge()),
+    # 1. The acceleration. Four quarters side by side rather than a bridge between them:
+    # quarterly revenues are four separate figures, not components of one total, and
+    # stepping from Q1 to Q4 would land on Q4 while looking like it was accumulating
+    # toward the $20.25B year.
+    out["01-quarterly-revenue"] = dict(LOOK, **{
+        "chart": "bars",
+        "rows": [{"label": q["label"], "value": round(q["revenue"] / 1000, 2)}
+                 for q in sndk.QUARTERS],
+        "unit": "B", "decimals": 2,
         "title": "Sandisk quarterly revenue, FY2026",
-        "subtitle": "Q1 to Q4 — the quarter got 3.9x bigger",
-        "duration": 9.0, "hold": 2.0,
+        "subtitle": "$ billions — Q4 was 3.9x Q1",
+        "duration": 7.0, "hold": 2.0,
     })
 
-    # 2. The mix. The three segments sum to the reported year, so this is a composition
-    # rather than a bridge — legitimate for exactly that reason.
+    # 2. The mix, and the one chart here that is genuinely a bridge: the three segments
+    # are parts of a whole, so they close on the reported year by construction.
     out["02-segment-mix"] = dict(LOOK, **{
         "chart": "waterfall",
-        "rows": _bridge_rows(
-            [{"label": s["name"], "value": s["revenue"], "kind": "delta"}
-             for s in sndk.SEGMENTS_FY2026]
-            + [{"label": "FY2026 revenue", "value": sndk.FY2026["revenue"],
-                "kind": "total"}]),
+        "rows": _bridge_rows(sndk.segment_composition()),
         "title": "Where the FY2026 revenue came from",
         "subtitle": "Datacenter grew 437% year over year",
         "duration": 8.0, "hold": 2.0,

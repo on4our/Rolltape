@@ -51,9 +51,17 @@ price feed needed:
 
 | Clip | Chart | Cut it in at |
 |---|---|---|
-| `01-revenue-build` | Waterfall | Slide 4 |
+| `01-quarterly-revenue` | Bars | Slide 4 |
 | `02-segment-mix` | Waterfall | Slide 7 |
 | `03-gross-margin` | Bars | Slide 5 |
+
+Only the segment chart is a bridge, and only because its three bars are parts of one
+whole that sum to the reported year. Quarterly revenue and quarterly margin are each
+four separate figures rather than components of a total, so they are drawn as plain
+comparisons — a bridge between them would land on Q4 while looking like it was
+accumulating toward the full year. Note that the bars chart always sorts by value, so
+with revenue and margin both rising every quarter these read newest-first, top to
+bottom.
 
 **Not rendered here** — these need a daily price series for SNDK, which could not be
 reached from the machine this was built on. Their configs are written to `configs/`,
