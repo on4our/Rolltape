@@ -33,6 +33,10 @@ import sndk_data as sndk                          # noqa: E402
 
 OUT_DIR = os.path.join(HERE, "renders")
 CFG_DIR = os.path.join(HERE, "configs")
+# Poster frames for the clips embedded in the deck. `save_still` at 1.0 is the last frame
+# of the reveal, so a viewer that will not play video sees the finished chart rather than
+# a play button — and it is the real frame, not a mock of it.
+POSTER_DIR = os.path.join(HERE, "posters")
 
 # One look across every clip in the set. Midnight is the darkest of the four themes and
 # the deck is built on the same background, so the slideshow and the animations cut
@@ -153,6 +157,7 @@ def main():
 
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(CFG_DIR, exist_ok=True)
+    os.makedirs(POSTER_DIR, exist_ok=True)
 
     todo = dict(configs())
     if args.with_price:
@@ -188,6 +193,11 @@ def main():
             print(f"FAILED — {exc}")
             failed.append(name)
             continue
+        # The deck embeds this clip and needs a cover at output resolution. Written from
+        # the same config, so it cannot drift from the video it stands in for.
+        with open(os.path.join(POSTER_DIR, f"{name}.png"), "wb") as fh:
+            renderers.save_still(cfg, fh, at=1.0, quality=args.quality,
+                                 res=cfg["resolution"])
         print(f"{time.time() - started:.0f}s, {os.path.getsize(path) / 1e6:.1f} MB")
 
     print(f"\nrenders in {OUT_DIR}")

@@ -39,7 +39,9 @@ pres.layout = "LAYOUT_WIDE"; // 13.3 x 7.5 — must be set before any slide is a
 pres.author = "Rolltape";
 pres.title = "Sandisk (SNDK) — FY2026";
 
-const W = 13.3, H = 7.5, M = 0.62;
+// W is a hair under the real slide width so every margin calculation stays conservative;
+// FULL_W is the true edge, for the full-bleed video slides only.
+const W = 13.3, FULL_W = 13.3333, H = 7.5, M = 0.62;
 
 // --- helpers ---------------------------------------------------------------
 function slide(dark = true) {
@@ -91,6 +93,26 @@ function stat(s, o) {
     x: o.x + 0.24, y: o.y + o.h * 0.64, w: o.w - 0.48, h: o.h * 0.32,
     fontSize: 12, color: C.muted, fontFace: FONT, margin: 0, valign: "top",
   });
+}
+
+// A whole slide of one animated clip, full bleed. The renders are 1920x1080 and the
+// slide is 13.333 x 7.5in, which is the same ratio, so nothing is cropped or letterboxed.
+//
+// The cover is the clip's own final frame, rendered at output resolution by the same
+// `save_still()` the thumbnail export uses. That matters for more than looks: a viewer
+// that will not play embedded media — a PDF export, Google Slides, a phone — still shows
+// the finished chart rather than a grey play button.
+function videoSlide(clip, notes) {
+  const s = slide();
+  const cover = fs.readFileSync(path.join(__dirname, "posters", clip + ".png"));
+  s.addMedia({
+    type: "video",
+    path: path.join(__dirname, "renders", clip + ".mp4"),
+    cover: "image/png;base64," + cover.toString("base64"),
+    x: 0, y: 0, w: FULL_W, h: H,
+  });
+  s.addNotes(notes);
+  return s;
 }
 
 function footnote(s, text) {
@@ -297,6 +319,11 @@ const qLabels = q.map((x) => x.label);
   );
 }
 
+videoSlide("01-quarterly-revenue",
+  "The animated version of the slide before it. Let it run and talk over it — the bars " +
+  "stagger in over about five seconds and hold for two.\n\n" +
+  "$2.31B, $3.03B, $5.95B, $8.97B. Q4 alone was bigger than the whole of FY2025.");
+
 // ===========================================================================
 // 5. Margin expansion
 // ===========================================================================
@@ -343,6 +370,11 @@ const qLabels = q.map((x) => x.label);
     "Cut to: 03-gross-margin.mp4"
   );
 }
+
+videoSlide("03-gross-margin",
+  "Margin expansion, animated. 29.9% to 84.6% across four quarters.\n\n" +
+  "This is the one to linger on — it is the whole explanation for why earnings went up " +
+  "far faster than revenue did.");
 
 // ===========================================================================
 // 6. Earnings
@@ -429,6 +461,11 @@ const qLabels = q.map((x) => x.label);
     "Cut to: 02-segment-mix.mp4"
   );
 }
+
+videoSlide("02-segment-mix",
+  "The segment bridge, animated: Datacenter, then Edge, then Consumer, stacking up to " +
+  "the reported $20.25B.\n\n" +
+  "Worth saying out loud that these three are the whole company — that is why they add up.");
 
 // ===========================================================================
 // 8. Why it happened

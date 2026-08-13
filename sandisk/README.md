@@ -4,7 +4,7 @@ Two deliverables for one video segment, built from the same figures:
 
 | | What it is |
 |---|---|
-| `SanDisk-SNDK-FY2026.pptx` | 12-slide deck, dark, with speaker notes on every slide |
+| `SanDisk-SNDK-FY2026.pptx` | 15-slide deck, dark, speaker notes throughout, clips embedded |
 | `renders/*.mp4` | Animated charts, rendered through Rolltape itself |
 
 Both draw from `sndk_data.py`, so they cannot disagree with each other.
@@ -13,9 +13,14 @@ Both draw from `sndk_data.py`, so they cannot disagree with each other.
 
 ```bash
 python sndk_data.py                        # reconcile the figures — do this first
-python render_charts.py --quality final    # the animated charts
-node build_deck.js                         # the deck
+python render_charts.py --quality final    # the animated charts, and their poster frames
+node build_deck.js                         # the deck, with the clips embedded
+python add_transitions.py                  # fade between slides
 ```
+
+Order matters: `build_deck.js` embeds the files in `renders/` and `posters/`, so the
+render step has to have run. `add_transitions.py` edits the finished package, so it goes
+last — rebuilding the deck drops the transitions and it has to run again.
 
 `build_deck.js` reads `data.json`, which is written from `sndk_data.py`:
 
@@ -27,18 +32,35 @@ python -c "import json,sndk_data as s; json.dump({k:getattr(s,k) for k in \
 
 ## What is in the deck
 
-1. Title — revenue up 175%, stock down 30%
-2. The company — spinoff, size, FY2026 headline figures
-3. What the share price did — high, recent level, drawdown
-4. Revenue quarter by quarter — the acceleration
-5. Gross margin — 29.9% to 84.6%
-6. Earnings per share — $0.75 to $43.97
-7. Segment mix — Datacenter, Edge, Consumer
-8. Why the numbers moved — demand, BiCS10, HBF
-9. Guidance — Q1 FY2027
-10. Valuation — forward P/E, net cash, targets
-11. The argument — bull and bear from the same figures
-12. Close — three numbers
+| # | Slide |
+|---|---|
+| 1 | Title — revenue up 175%, stock down 30% |
+| 2 | The company — spinoff, size, FY2026 headline figures |
+| 3 | What the share price did — high, recent level, drawdown |
+| 4 | Revenue quarter by quarter — the acceleration |
+| **5** | **▶ animated: quarterly revenue** |
+| 6 | Gross margin — 29.9% to 84.6% |
+| **7** | **▶ animated: gross margin** |
+| 8 | Earnings per share — $0.75 to $43.97 |
+| 9 | Segment mix — Datacenter, Edge, Consumer |
+| **10** | **▶ animated: segment bridge** |
+| 11 | Why the numbers moved — demand, BiCS10, HBF |
+| 12 | Guidance — Q1 FY2027 |
+| 13 | Valuation — forward P/E, net cash, targets |
+| 14 | The argument — bull and bear from the same figures |
+| 15 | Close — three numbers |
+
+Each animated slide sits directly after the static one that sets its numbers up, so the
+beat is: introduce the figures, then play the motion. The clips are full bleed — they are
+1920x1080 and the slide is 13.333 x 7.5in, the same ratio, so nothing is cropped.
+
+**The videos are click-to-play, not autoplay.** PowerPoint stores autoplay in a slide
+timing tree that pptxgenjs does not write, and hand-authoring one risks the repair prompt
+that a malformed deck triggers — not worth it for a setting you can change in two clicks:
+select the video, *Playback* tab, *Start: Automatically*. Do it on slides 5, 7 and 10.
+
+Every slide carries a medium fade. `python add_transitions.py --style push` or `wipe`
+swaps it, `--style none` skips it, and `--speed slow|med|fast` changes the timing.
 
 Speaker notes carry the talking points and the figures behind each slide, including
 the two places where you should be careful on air (the disputed 12 August close, and
@@ -49,11 +71,14 @@ guidance being an estimate rather than a result).
 Rendered here, from reported figures typed into the renderer's manual-row path — no
 price feed needed:
 
-| Clip | Chart | Cut it in at |
+| Clip | Chart | Embedded on |
 |---|---|---|
-| `01-quarterly-revenue` | Bars | Slide 4 |
-| `02-segment-mix` | Waterfall | Slide 7 |
-| `03-gross-margin` | Bars | Slide 5 |
+| `01-quarterly-revenue` | Bars | Slide 5 |
+| `03-gross-margin` | Bars | Slide 7 |
+| `02-segment-mix` | Waterfall | Slide 10 |
+
+They are in the deck *and* on disk as MP4s, so you can either present the deck or pull
+the clips into an editor — same files either way.
 
 Only the segment chart is a bridge, and only because its three bars are parts of one
 whole that sum to the reported year. Quarterly revenue and quarterly margin are each
@@ -105,14 +130,15 @@ Two things are deliberately absent:
   disagreed on — the 12 August close — is printed as a range rather than to the cent.
 - **GAAP cost and expense lines.** The published margins are non-GAAP; subtracting a
   non-GAAP margin from GAAP revenue would give a bridge that closes arithmetically and
-  means nothing. Both bridges are built only from figures reported on the same basis.
+  means nothing. The one bridge here is built only from figures reported on the same basis.
 
 ## Re-running after the next earnings release
 
 Add a dict to `QUARTERS`, update `FY2026`/`SEGMENTS_*`/`GUIDANCE_*`, run
-`python sndk_data.py` until it reconciles, then rebuild. Nothing else is hard-coded —
-the deck's charts, the ramp on the title slide and both bridges all derive from that
-list.
+`python sndk_data.py` until it reconciles, then rebuild (all four steps — the clips are
+embedded, so a stale render would stay in the deck otherwise). Nothing else is
+hard-coded: the deck's charts, the ramp on the title slide and the segment bridge all
+derive from that list.
 
 ## Tools
 

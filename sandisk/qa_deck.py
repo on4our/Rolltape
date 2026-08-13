@@ -80,9 +80,17 @@ def main(path):
             w, h = inches(sp.width), inches(sp.height)
             label = (text_of(sp)[:34] or sp.shape_type.__str__()).replace("\n", " ")
 
+            # A shape covering the whole slide is a deliberate full bleed — the embedded
+            # clips are exactly this — so the margin rule does not apply to it. It still
+            # has to fit, which the off-slide check above enforces.
+            full_bleed = (x <= 0.01 and y <= 0.01
+                          and w >= sw - 0.02 and h >= sh - 0.02)
+
             # off the slide entirely, or inside the margin
             if x < -0.01 or y < -0.01 or x + w > sw + 0.01 or y + h > sh + 0.01:
                 found.append(f"OFF-SLIDE  {label!r} at ({x:.2f},{y:.2f}) {w:.2f}x{h:.2f}")
+            elif full_bleed:
+                pass
             elif x < MARGIN - 0.01 or y < MARGIN - 0.01 or \
                     x + w > sw - MARGIN + 0.01 or y + h > sh - MARGIN + 0.01:
                 # the footnote sits low on purpose; everything else should clear the margin
