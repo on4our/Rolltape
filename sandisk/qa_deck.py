@@ -11,8 +11,11 @@ conservative enough to catch a genuine overflow. Widths are deliberately over-es
 so a warning here can be a false alarm but a silent pass should not hide a real one.
 """
 
+import io
 import math
+import os
 import sys
+import zipfile
 
 from pptx import Presentation
 from pptx.util import Emu
@@ -63,6 +66,59 @@ def overlap(a, b):
     ox = min(ax2, bx2) - max(ax1, bx1)
     oy = min(ay2, by2) - max(ay1, by1)
     return (ox, oy) if ox > 0.02 and oy > 0.02 else None
+
+
+SCHEMA = ("/root/.claude/skills/synced/pptx/scripts/office/schemas/"
+          "ISO-IEC29500-4_2016/pml.xsd")
+
+
+def schema_check(path):
+    """Validate every slide part against the PresentationML schema.
+
+    Worth doing separately because the bundled pptx validator does not look at
+    `<p:timing>` at all — a deliberately malformed timing tree passes it — and the
+    autoplay this deck adds lives entirely in there. This catches it.
+
+    Two notes on reading the output. The schema is the Strict one, and a .pptx is
+    Transitional, so a handful of attributes legitimately differ in form: pptxgenjs
+    writes `buSzPct val="100000"` where Strict wants `"100%"`. Those are pre-existing and
+    PowerPoint reads them fine, so they are reported separately rather than as failures.
+    Everything else is a real problem.
+    """
+    try:
+        from lxml import etree
+    except ImportError:
+        print("lxml not installed — skipping schema check")
+        return 0
+    if not os.path.exists(SCHEMA):
+        print(f"schema not found at {SCHEMA} — skipping")
+        return 0
+
+    cwd = os.getcwd()
+    os.chdir(os.path.dirname(SCHEMA))
+    try:
+        schema = etree.XMLSchema(etree.parse(os.path.basename(SCHEMA)))
+    finally:
+        os.chdir(cwd)
+
+    real, known = 0, 0
+    with zipfile.ZipFile(path) as z:
+        for name in sorted(z.namelist()):
+            if not (name.startswith("ppt/slides/slide") and name.endswith(".xml")):
+                continue
+            doc = etree.parse(io.BytesIO(z.read(name)))
+            if schema.validate(doc):
+                continue
+            for err in schema.error_log:
+                if "buSzPct" in err.message or "buSzTx" in err.message:
+                    known += 1
+                    continue
+                real += 1
+                print(f"    SCHEMA  {name}: {err.message[:150]}")
+
+    print(f"schema: {real} real issue(s)"
+          + (f", {known} Strict-vs-Transitional difference(s) ignored" if known else ""))
+    return real
 
 
 def main(path):
@@ -125,7 +181,8 @@ def main(path):
             for line in found:
                 print("   ", line)
 
-    print(f"\n{issues} item(s) to look at.")
+    print(f"\n{issues} geometry item(s) to look at.")
+    issues += schema_check(path)
     return 0 if issues == 0 else 1
 
 

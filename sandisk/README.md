@@ -15,12 +15,13 @@ Both draw from `sndk_data.py`, so they cannot disagree with each other.
 python sndk_data.py                        # reconcile the figures — do this first
 python render_charts.py --quality final    # the animated charts, and their poster frames
 node build_deck.js                         # the deck, with the clips embedded
-python add_transitions.py                  # fade between slides
+python finish_deck.py                      # transitions + autoplay
 ```
 
 Order matters: `build_deck.js` embeds the files in `renders/` and `posters/`, so the
-render step has to have run. `add_transitions.py` edits the finished package, so it goes
-last — rebuilding the deck drops the transitions and it has to run again.
+render step has to have run. `finish_deck.py` edits the finished package, so it goes
+last — rebuilding the deck drops both the transitions and the autoplay, and it has to
+run again.
 
 `build_deck.js` reads `data.json`, which is written from `sndk_data.py`:
 
@@ -54,13 +55,22 @@ Each animated slide sits directly after the static one that sets its numbers up,
 beat is: introduce the figures, then play the motion. The clips are full bleed — they are
 1920x1080 and the slide is 13.333 x 7.5in, the same ratio, so nothing is cropped.
 
-**The videos are click-to-play, not autoplay.** PowerPoint stores autoplay in a slide
-timing tree that pptxgenjs does not write, and hand-authoring one risks the repair prompt
-that a malformed deck triggers — not worth it for a setting you can change in two clicks:
-select the video, *Playback* tab, *Start: Automatically*. Do it on slides 5, 7 and 10.
+**The clips play on their own.** `finish_deck.py` writes the `<p:timing>` tree that
+PowerPoint uses for *Start: Automatically* — pptxgenjs does not write one, and without it
+an embedded video waits for a click. Since each poster is the clip's own final frame, a
+click-to-play slide looks exactly like a finished static chart, which is the confusing
+state this removes.
 
-Every slide carries a medium fade. `python add_transitions.py --style push` or `wipe`
-swaps it, `--style none` skips it, and `--speed slow|med|fast` changes the timing.
+That tree could not be tested in PowerPoint itself here (no PowerPoint, and LibreOffice
+cannot open a pptx in this container), so it was checked the next best way: every slide
+part validates against the PresentationML schema, and the check was confirmed to catch a
+deliberately malformed timing tree first — see `qa_deck.py`. If a copy of PowerPoint
+still starts a clip on click, it is a two-click fix — select the video, *Playback* tab,
+*Start: Automatically* — and `python finish_deck.py --no-autoplay` goes back to that
+behaviour deliberately.
+
+Every slide carries a medium fade. `--style push` or `wipe` swaps it, `--style none`
+skips it, `--speed slow|med|fast` changes the timing.
 
 Speaker notes carry the talking points and the figures behind each slide, including
 the two places where you should be careful on air (the disputed 12 August close, and
@@ -142,8 +152,11 @@ derive from that list.
 
 ## Tools
 
-`qa_deck.py` checks the deck's geometry: shapes off-slide or inside the margin, text
-boxes that overlap, and text too long for its box. `preview_deck.py` lays the finished
+`qa_deck.py` checks two things. The geometry — shapes off-slide or inside the margin,
+text boxes that overlap, text too long for its box — and then every slide part against
+the PresentationML schema. The second half is there because the bundled pptx validator
+does not inspect `<p:timing>` at all: a deliberately broken timing tree passes it, which
+was verified before relying on the schema pass instead. `preview_deck.py` lays the finished
 pptx out as HTML for a visual look — LibreOffice could not open a pptx in the container
 this was built in, so the usual convert-to-images route was unavailable. Charts show as
 labelled placeholders there; trust it for layout, not for the last pixel.
