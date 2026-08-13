@@ -1,0 +1,65 @@
+{
+  "chart": "waterfall",
+  "tickers": [],
+  "range": "custom",
+  "start": "2024-01-01",
+  "end": null,
+  "interval": "1d",
+  "sessions": null,
+  "duration": 9.0,
+  "hold": 2.0,
+  "easing": "cubic",
+  "camera": "locked",
+  "camera_travel": "standard",
+  "camera_y": "track",
+  "theme": "midnight",
+  "aspect": "16:9",
+  "quality": "final",
+  "fps": 60,
+  "resolution": 1080,
+  "preset": "auto",
+  "title": "Sandisk quarterly revenue, FY2026",
+  "subtitle": "Q1 to Q4 \u2014 the quarter got 3.9x bigger",
+  "footer": "Source: Sandisk quarterly results, FY2026",
+  "normalize": true,
+  "max_candles": 90,
+  "metric": "return",
+  "bridge": "income",
+  "statement": "annual",
+  "periods": 5,
+  "rows": [
+    {
+      "label": "Q1 FY26",
+      "value": 2310000000,
+      "kind": "start"
+    },
+    {
+      "label": "Q2 FY26",
+      "value": 720000000,
+      "kind": "delta"
+    },
+    {
+      "label": "Q3 FY26",
+      "value": 2920000000,
+      "kind": "delta"
+    },
+    {
+      "label": "Q4 FY26",
+      "value": 3015000000,
+      "kind": "delta"
+    },
+    {
+      "label": "Q4 FY26 revenue",
+      "value": 8965000000,
+      "kind": "total"
+    }
+  ],
+  "annotations": [],
+  "auto_annotations": [],
+  "unit": "",
+  "decimals": 1,
+  "transparent": false,
+  "log_scale": false,
+  "ma": [],
+  "ma_lag": "none"
+}

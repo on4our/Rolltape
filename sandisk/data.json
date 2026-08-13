@@ -1,0 +1,129 @@
+{
+  "COMPANY": {
+    "name": "Sandisk Corporation",
+    "ticker": "SNDK",
+    "exchange": "NASDAQ",
+    "hq": "Milpitas, California",
+    "ceo": "David Goeckeler (Chairman & CEO)",
+    "employees": "10,000+",
+    "fy2026_ended": "3 July 2026",
+    "spinoff": "Spun out of Western Digital, February 2025"
+  },
+  "QUARTERS": [
+    {
+      "label": "Q1 FY26",
+      "ended": "2025-10-03",
+      "revenue": 2310,
+      "gaap_ni": 112,
+      "gaap_eps": 0.75,
+      "nongaap_eps": 1.22,
+      "gross_margin": 29.9
+    },
+    {
+      "label": "Q2 FY26",
+      "ended": "2026-01-02",
+      "revenue": 3030,
+      "gaap_ni": 803,
+      "gaap_eps": 5.15,
+      "nongaap_eps": 6.2,
+      "gross_margin": 51.1
+    },
+    {
+      "label": "Q3 FY26",
+      "ended": "2026-04-03",
+      "revenue": 5950,
+      "gaap_ni": 3615,
+      "gaap_eps": 23.03,
+      "nongaap_eps": null,
+      "gross_margin": 78.4
+    },
+    {
+      "label": "Q4 FY26",
+      "ended": "2026-07-03",
+      "revenue": 8965,
+      "gaap_ni": 6900,
+      "gaap_eps": 43.97,
+      "nongaap_eps": 39.25,
+      "gross_margin": 84.6
+    }
+  ],
+  "FY2026": {
+    "revenue": 20248,
+    "revenue_growth_pct": 175,
+    "gaap_ni": 11430,
+    "gaap_eps": 73.76
+  },
+  "FY2025_REVENUE": 7363,
+  "SEGMENTS_FY2026": [
+    {
+      "name": "Datacenter",
+      "revenue": 5153,
+      "yoy_pct": 437
+    },
+    {
+      "name": "Edge",
+      "revenue": 12160,
+      "yoy_pct": 195
+    },
+    {
+      "name": "Consumer",
+      "revenue": 2935,
+      "yoy_pct": 29
+    }
+  ],
+  "SEGMENTS_Q4": [
+    {
+      "name": "Datacenter",
+      "revenue": 2977,
+      "qoq_pct": 103
+    },
+    {
+      "name": "Edge",
+      "revenue": 5432,
+      "qoq_pct": 48
+    },
+    {
+      "name": "Consumer",
+      "revenue": 556,
+      "qoq_pct": -32
+    }
+  ],
+  "GUIDANCE_Q1_FY27": {
+    "revenue_low": 10300,
+    "revenue_high": 10800,
+    "nongaap_eps_low": 44.0,
+    "nongaap_eps_high": 46.0
+  },
+  "PRICE": {
+    "debut_date": "2025-02-24",
+    "all_time_high": 2354.39,
+    "all_time_high_date": "2026-06-22",
+    "recent_close_range": [
+      1271.05,
+      1344.29
+    ],
+    "recent_close_date": "2026-08-12",
+    "drawdown_from_high_pct": 30
+  },
+  "VALUATION": {
+    "forward_pe": 5.9,
+    "peg": 0.14,
+    "shares_out_m": 149.0,
+    "market_cap_b_range": [
+      180.7,
+      188.2
+    ],
+    "cash_b": 4.76,
+    "net_cash_b": 6.54,
+    "net_cash_per_share": 43.89,
+    "analyst_target_avg": 2053.5,
+    "analyst_count": 23,
+    "analyst_rating": "Strong Buy"
+  },
+  "TECH": {
+    "bics10": "BiCS10 1Tb TLC sampling \u2014 >29 Gb/mm2, bit density up 59%",
+    "hbf": "High Bandwidth Flash with SK hynix \u2014 first OCP spec, Aug 2026",
+    "hbf_spec": "Up to 512GB per stack, up to 3TB/s",
+    "datacenter_mix": "Datacenter ~12% of bits a year ago, 38% of the portfolio exiting FY26"
+  }
+}

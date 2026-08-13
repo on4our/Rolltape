@@ -1,0 +1,11 @@
+# QA scratch — regenerate with preview_deck.py and shoot.py
+preview.html
+preview-*.png
+stills/
+shoot.py
+
+# npm brings pptxgenjs in for build_deck.js
+node_modules/
+package-lock.json
+
+__pycache__/

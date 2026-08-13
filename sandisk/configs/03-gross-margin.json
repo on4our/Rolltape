@@ -1,0 +1,56 @@
+{
+  "chart": "bars",
+  "tickers": [],
+  "range": "custom",
+  "start": "2024-01-01",
+  "end": null,
+  "interval": "1d",
+  "sessions": null,
+  "duration": 7.0,
+  "hold": 2.0,
+  "easing": "cubic",
+  "camera": "locked",
+  "camera_travel": "standard",
+  "camera_y": "track",
+  "theme": "midnight",
+  "aspect": "16:9",
+  "quality": "final",
+  "fps": 60,
+  "resolution": 1080,
+  "preset": "auto",
+  "title": "Non-GAAP gross margin by quarter",
+  "subtitle": "FY2026: 29.9% to 84.6%",
+  "footer": "Source: Sandisk quarterly results, FY2026",
+  "normalize": true,
+  "max_candles": 90,
+  "metric": "return",
+  "bridge": "income",
+  "statement": "annual",
+  "periods": 5,
+  "rows": [
+    {
+      "label": "Q1 FY26",
+      "value": 29.9
+    },
+    {
+      "label": "Q2 FY26",
+      "value": 51.1
+    },
+    {
+      "label": "Q3 FY26",
+      "value": 78.4
+    },
+    {
+      "label": "Q4 FY26",
+      "value": 84.6
+    }
+  ],
+  "annotations": [],
+  "auto_annotations": [],
+  "unit": "%",
+  "decimals": 1,
+  "transparent": false,
+  "log_scale": false,
+  "ma": [],
+  "ma_lag": "none"
+}
