@@ -14,6 +14,7 @@ from unittest import mock
 import app
 import data
 import fundamentals
+import presets
 import renderers
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -332,10 +333,11 @@ class OutputNamingTests(unittest.TestCase):
 
 
 class SafeAreaTests(unittest.TestCase):
-    """The short-form guides: what /api/meta publishes, and that it stays advisory.
+    """The short-form safe areas: the table, and the two ways a config uses it.
 
-    The rule worth pinning is the negative one — these are drawn over the preview in the
-    browser and no renderer reads them, so a guide cannot reach a render or a saved still.
+    There are two separate things here and keeping them apart is the point. `fit` is a
+    render setting that moves the composition inside the chrome. The *guides* are a preview
+    overlay that only shows where the chrome falls, and they still never reach a render.
     """
 
     def setUp(self):
@@ -343,9 +345,10 @@ class SafeAreaTests(unittest.TestCase):
         with open(os.path.join(HERE, "templates", "index.html")) as fh:
             self.html = fh.read()
 
-    def test_every_profile_in_the_table_is_published_with_its_four_insets(self):
+    def test_every_profile_is_published_with_its_four_insets(self):
+        # Four, not three: "all" is derived and served alongside the measured ones.
         self.assertEqual([s["id"] for s in self.meta["safe_areas"]],
-                         list(renderers.SAFE_AREAS))
+                         [*renderers.SAFE_AREAS, renderers.FIT_ALL])
         for area in self.meta["safe_areas"]:
             with self.subTest(area=area["id"]):
                 self.assertTrue(area["label"])
@@ -356,27 +359,47 @@ class SafeAreaTests(unittest.TestCase):
                 self.assertLess(area["top"] + area["bottom"], 0.6)
                 self.assertLess(area["left"] + area["right"], 0.4)
 
-    def test_no_renderer_reads_the_table(self):
-        # The layout deliberately does not move for the chrome — a chart that repositioned
-        # itself would be a different chart from the 16:9 one beside it in the same video.
-        # SAFE_AREAS is therefore declared and never consulted, and this is what keeps it
-        # that way.
-        with open(os.path.join(HERE, "renderers.py")) as fh:
-            body = fh.read()
-        self.assertEqual(body.count("SAFE_AREAS"), 1)
+    def test_all_is_the_worst_edge_of_each_app(self):
+        # Derived rather than a fourth row to maintain: a clip that clears every app's
+        # chrome is one that clears the deepest inset on each side.
+        union = renderers.safe_area(renderers.FIT_ALL)
+        for edge in ("top", "right", "bottom", "left"):
+            with self.subTest(edge=edge):
+                self.assertEqual(union[edge],
+                                 max(a[edge] for a in renderers.SAFE_AREAS.values()))
+
+    def test_the_whole_frame_is_the_default_and_has_no_insets(self):
+        self.assertIsNone(renderers.safe_area(renderers.FIT_NONE))
+        self.assertEqual(cfg()["fit"], renderers.FIT_NONE)
+
+    def test_a_fit_needs_a_vertical_frame(self):
+        # The insets were measured off a 9:16 screen, so applying them to another shape
+        # would inset a composition against numbers describing a different frame.
+        for aspect in ("16:9", "1:1"):
+            with self.subTest(aspect=aspect):
+                with self.assertRaises(ValueError):
+                    cfg(aspect=aspect, fit="tiktok")
+        self.assertEqual(cfg(aspect="9:16", fit="tiktok")["fit"], "tiktok")
+
+    def test_an_unknown_fit_is_refused(self):
+        with self.assertRaises(ValueError):
+            cfg(aspect="9:16", fit="snapchat")
+
+    def test_a_kit_can_carry_the_fit(self):
+        # Which app a channel posts to is picked once, which is what a brand kit is for.
+        self.assertIn("fit", presets.FIELDS)
 
     def test_the_guides_are_never_part_of_the_posted_config(self):
-        # config() is what both /api/preview and /api/render are sent. The guide state
-        # living outside it is what makes "a guide cannot end up in a render" structural
-        # rather than something to remember.
+        # The overlay state is the thing being kept out, not the fit. config() is what both
+        # /api/preview and /api/render are sent, so a guide living outside it is what makes
+        # "a guide cannot end up in a render" structural rather than remembered.
         posted = re.search(r"function config\(\)\{(.*?)\n\}", self.html, re.S)
         self.assertIsNotNone(posted)
         self.assertNotIn("guides", posted.group(1))
-        self.assertNotIn("safe_area", posted.group(1))
+        # And the render setting is in there, because that one does belong.
+        self.assertIn("fit", posted.group(1))
 
     def test_clean_config_ignores_a_posted_guide(self):
-        # And the server agrees: an API caller who sends one gets it dropped rather than
-        # rendered.
         self.assertNotIn("guides", cfg(guides="tiktok"))
 
 

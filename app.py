@@ -289,6 +289,18 @@ def clean_config(raw):
     # Same reasoning for the averages: they arrived with the price line before there was a
     # lag to ask for, and "none" is that render.
     ma_lag = _one_of(raw.get("ma_lag"), renderers.MA_LAG, "none", "Average lag")
+    # Which app's chrome the composition should keep clear of. "full" is the whole frame
+    # and the default, so a config written before this existed renders as it always did.
+    aspect = raw.get("aspect", "16:9")
+    fit = _one_of(raw.get("fit"), renderers.FITS, renderers.FIT_NONE, "Frame fit")
+    if fit != renderers.FIT_NONE and aspect != "9:16":
+        # The insets were measured off a vertical screen, so applying them to a 16:9 or
+        # square frame would inset a composition against numbers describing a different
+        # shape. Refused rather than approximated, for the reason every other pairing in
+        # this function is.
+        raise ValueError(
+            "Fitting the layout to an app's safe area needs a 9:16 frame — those insets "
+            "are measured off a vertical screen.")
     # The waterfall reads fiscal periods rather than a date window, so its three settings
     # are checked here and the renderer is handed concrete ones — same as the tier
     # resolving fps and resolution before anything downstream can re-derive them.
@@ -346,7 +358,8 @@ def clean_config(raw):
         "camera_travel": travel,
         "camera_y": camera_y,
         "theme": raw.get("theme", "midnight"),
-        "aspect": raw.get("aspect", "16:9"),
+        "aspect": aspect,
+        "fit": fit,
         "quality": quality,
         "fps": fps,
         "resolution": resolution,
@@ -580,7 +593,12 @@ def meta():
         # moves for them. The interface draws them over a vertical frame so the overlap
         # with each app's own chrome is visible while there is still time to shorten a
         # title. See SAFE_AREAS in renderers.py for why they stay advisory.
-        "safe_areas": [{"id": k, **v} for k, v in renderers.SAFE_AREAS.items()],
+        # Four profiles, not three: "all" is derived in renderers.safe_area() and served
+        # alongside the rest, so the guides in the browser read the same numbers the
+        # renderer composes against instead of deriving a union of their own.
+        "safe_areas": [{"id": f, **renderers.safe_area(f)}
+                       for f in renderers.FITS if renderers.safe_area(f)],
+        "fits": list(renderers.FITS),
         "min_clip": renderers.MIN_CLIP,
         "presets": list(renderers.PRESETS),
         "auto_preset": {k: v["preset"] for k, v in renderers.ENCODE.items()},

@@ -258,10 +258,28 @@ none of it is in the render. Choosing one shades the part of the frame that app 
 and outlines what survives. **All** is the union of the three, for a clip going to more
 than one of them.
 
-These are guides and nothing more. The layout does not move for them, and no renderer even
-reads them: they are drawn over the preview in the browser, so one can never end up in a
-render or a saved frame. What they are for is noticing that your title is sitting under
-TikTok's caption block while there is still time to shorten it.
+The guides only *show* you the problem. **Fit to app**, in the same Output section, is what
+does something about it: pick an app there and the title, chart, axes and footer all move
+inside that app's safe area, so its buttons and captions cover background rather than
+anything you need read. Off is the default and the whole frame, exactly as before.
+
+Turn both on for the same app and you can see the result — everything inside the dashed
+box. Two things worth knowing before you leave it on:
+
+- **The chart gets smaller**, and on TikTok noticeably so: it only leaves 56% of the frame,
+  almost all of the loss off the bottom. That is right in the app, where the caption block
+  covers the space, and bottom-heavy anywhere without chrome over it. A clip going somewhere
+  with no overlay wants Off.
+- **The frame still renders edge to edge.** Fitting moves the composition, never the canvas
+  — there is no letterboxing, and the background fills all 1080×1920.
+
+A fit only applies to 9:16, since the insets were measured off a vertical screen; the picker
+disappears on other frames and the app drops the setting rather than letting it become an
+error. And because it's a set-once channel decision, a brand kit remembers it alongside your
+theme and footer.
+
+The guides themselves never reach a render. They are drawn over the preview in the browser,
+so one can't end up in a video or a saved frame even by accident.
 
 Treat the numbers as "about here" rather than a spec — every one of those layouts moves
 with an app update. They live in `SAFE_AREAS` at the top of `renderers.py`, four fractions
