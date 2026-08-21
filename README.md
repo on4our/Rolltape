@@ -376,6 +376,8 @@ examples.py     The three charts the landing page shows
 signups.py      Email capture, to a list provider or a local file
 templates/      The interface, the landing page, and the pricing page at /pricing
 outputs/        Rendered MP4s land here
+Dockerfile      Container image, for Railway and anything else that runs one
+railway.json    Railway's build and health settings, one replica deliberately
 ```
 
 Income statements are cached in the same directory and stamped with the day they were

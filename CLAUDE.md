@@ -48,7 +48,14 @@ outputs/        Rendered MP4s
 test_*.py       The suite — see Tests below
 ```
 
-Deployment support sits off to the side and nothing local reads it: `Dockerfile`.
+Deployment support sits off to the side and nothing local reads it: `Dockerfile` and
+`railway.json`. Two numbers in those are load-bearing rather than tuning. `--workers 1`
+is the one above; `numReplicas: 1` is the same fact one level out, because a second
+container is a second registry exactly as a second worker process is. And every path the
+app writes to is pointed under `/data` so one mounted volume holds them — brand kits
+most of all, since their default sits beside the source and a redeploy replaces that
+layer, which would take every saved kit with it. `railway.json` carries no comments
+because it cannot; this paragraph is where they live.
 
 Two directories hold no code the app runs. `docs/` is the commercial plan — `pricing.md`,
 `acquisition.md`, `revenue-projection.md` — and `scripts/revenue_model.py` regenerates
