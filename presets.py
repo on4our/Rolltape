@@ -19,7 +19,9 @@ import config
 # Reentrant because save() and delete() read under the same lock they write under.
 _LOCK = threading.RLock()
 
-FIELDS = ("theme", "footer", "title_format")
+# `fit` belongs here for the same reason theme does: which app a channel posts to is
+# picked once and then never thought about again.
+FIELDS = ("theme", "footer", "title_format", "fit")
 
 MAX_KITS = 50
 MAX_NAME = 40

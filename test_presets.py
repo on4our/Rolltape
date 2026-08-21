@@ -14,7 +14,8 @@ import app
 import config
 import presets
 
-KIT = {"theme": "carbon", "footer": "@rolltape", "title_format": "{ticker} weekly"}
+KIT = {"theme": "carbon", "footer": "@rolltape", "title_format": "{ticker} weekly",
+       "fit": "shorts"}
 
 
 class PresetStoreTests(unittest.TestCase):
@@ -72,6 +73,19 @@ class PresetStoreTests(unittest.TestCase):
             presets.save("x" * (presets.MAX_NAME + 1), KIT)
         with self.assertRaises(ValueError):
             presets.save("Channel", {**KIT, "footer": "x" * (presets.MAX_FIELD + 1)})
+
+    def test_a_kit_carries_which_app_the_channel_posts_to(self):
+        # A fit is a set-once channel setting exactly as the theme is, which is the whole
+        # argument for it being in a kit rather than typed per render.
+        presets.save("Channel", KIT)
+        self.assertEqual(presets.all_kits()["Channel"]["fit"], "shorts")
+
+    def test_a_kit_saved_before_there_were_fits_still_loads(self):
+        # Every field is optional at rest — _clean fills a missing one with "". The client
+        # reads that back as the whole frame, which is the framing such a kit was saved
+        # under in the first place.
+        presets.save("Old", {"theme": "carbon", "footer": "@rolltape"})
+        self.assertEqual(presets.all_kits()["Old"]["fit"], "")
 
     def test_the_file_is_valid_json_on_disk(self):
         presets.save("Channel", KIT)

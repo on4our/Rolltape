@@ -94,6 +94,28 @@ SAFE_AREAS = {
               "top": 0.06, "right": 0.15, "bottom": 0.22, "left": 0.03},
 }
 
+# What a config may ask the layout to fit itself to. "full" is the whole frame and the
+# default, so every config written before this existed renders exactly as it did.
+FIT_NONE = "full"
+FIT_ALL = "all"
+FITS = (FIT_NONE, *SAFE_AREAS, FIT_ALL)
+
+
+def safe_area(name):
+    """One app's insets, the union of every app's for `all`, or None for the whole frame.
+
+    The union is derived rather than a fourth row in SAFE_AREAS: clearing every app's
+    chrome is clearing the worst of each edge, which is arithmetic and not a number for
+    anyone to keep in step. Served through /api/meta as well, so the guides in the browser
+    read the same four profiles the renderer composes against instead of deriving their
+    own and drifting.
+    """
+    if name == FIT_ALL:
+        return {"label": "All three",
+                **{edge: max(a[edge] for a in SAFE_AREAS.values())
+                   for edge in ("top", "right", "bottom", "left")}}
+    return SAFE_AREAS.get(name)
+
 # "final" used preset=slow, but slow's extra reference/lookahead frames were getting
 # ffmpeg OOM-killed on small container hosts (and took ~70s for a 7.5s clip). At CRF 16
 # the visual difference from medium is not worth either cost. "max" keeps slow for the
@@ -139,6 +161,10 @@ class Ctx:
     preset: str
     dpi: int = 100
     transparent: bool = False
+    # A SAFE_AREAS key, "all", or FIT_NONE for the whole frame. The frame is still rendered
+    # edge to edge either way — this narrows where the *composition* is allowed to go, so a
+    # phone's own chrome covers background rather than a title.
+    fit: str = FIT_NONE
 
     @property
     def s(self) -> float:
@@ -148,6 +174,66 @@ class Ctx:
     @property
     def tall(self) -> bool:
         return self.h > self.w
+
+    @property
+    def fitted(self) -> bool:
+        """Whether anything narrowed the composition.
+
+        Both mappings below return their input untouched when this is false — not merely
+        equal to it but the same float. Deriving the identity through the arithmetic gives
+        0.30000000000000004 where a renderer had 0.3, and "an existing config renders
+        exactly as it did" is a claim about the pixels rather than about the intent.
+        """
+        return safe_area(self.fit) is not None
+
+    @property
+    def box(self):
+        """(x0, y0, w, h) in figure coordinates — the region the composition may use.
+
+        The whole frame unless a fit profile narrowed it. Figure coordinates put y=0 at the
+        bottom, so the table's `top` inset comes off the height rather than the origin.
+        """
+        area = safe_area(self.fit)
+        if not area:
+            return (0.0, 0.0, 1.0, 1.0)
+        return (area["left"], area["bottom"],
+                1.0 - area["left"] - area["right"],
+                1.0 - area["top"] - area["bottom"])
+
+    # Both of these preserve margins rather than scaling them, and that is the whole
+    # subtlety of fitting a layout. The margins in a plot rect exist to hold text — axis
+    # labels down the left, series labels off the line ends — and the fonts deliberately do
+    # not shrink with the box, because a narrower frame on a phone wants text larger
+    # relative to the chart rather than smaller. Scale the margins down and the text stays
+    # the same size, so a line-end label grows straight out through the edge of the box and
+    # into the chrome the fit existed to clear. Keeping them absolute spends the difference
+    # on the plot area instead, which is the part that can afford it.
+    def at(self, x, y):
+        """Map a point given against the whole frame into the composition box.
+
+        Each coordinate keeps its distance from whichever edge it is nearer, so an anchor
+        written as "7% in from the left" stays 7% of the *frame* in from the box's left.
+        """
+        if not self.fitted:
+            return x, y
+        x0, y0, w, h = self.box
+        return (x0 + x if x <= 0.5 else x0 + w - (1 - x),
+                y0 + y if y <= 0.5 else y0 + h - (1 - y))
+
+    def rect(self, rect):
+        """Map a [left, bottom, w, h] axes rect into the composition box.
+
+        The four margins keep their absolute size and the plot area gives up the rest. The
+        floor is a guard for a box narrower than its own margins, which no profile in
+        SAFE_AREAS comes close to.
+        """
+        if not self.fitted:
+            return list(rect)
+        x0, y0, w, h = self.box
+        left, bottom, rw, rh = rect
+        right, top = 1.0 - left - rw, 1.0 - bottom - rh
+        return [x0 + left, y0 + bottom,
+                max(w - left - right, 0.05), max(h - bottom - top, 0.05)]
 
     @property
     def bg(self) -> str:
@@ -161,7 +247,7 @@ class Ctx:
 
 
 def make_ctx(theme_name, aspect, quality, fps=None, res=None, transparent=False,
-             preset=None) -> Ctx:
+             preset=None, fit=None) -> Ctx:
     theme = THEMES.get(theme_name, THEMES["midnight"])
     enc = ENCODE.get(quality, ENCODE["final"])
     sizes = SIZES.get(aspect, SIZES["16:9"])
@@ -170,8 +256,12 @@ def make_ctx(theme_name, aspect, quality, fps=None, res=None, transparent=False,
     # stays in charge unless someone deliberately overrode it.
     if preset in (None, "auto") or preset not in PRESETS:
         preset = enc["preset"]
+    # Anything unrecognised composes against the whole frame, which is the framing every
+    # chart had before there was a fit at all.
+    if fit not in FITS:
+        fit = FIT_NONE
     return Ctx(theme=theme, w=w, h=h, fps=int(fps or enc["fps"]),
-               crf=enc["crf"], preset=preset, transparent=bool(transparent))
+               crf=enc["crf"], preset=preset, transparent=bool(transparent), fit=fit)
 
 
 # ---------------------------------------------------------------------------
@@ -583,26 +673,42 @@ def _footer_text(footer):
 
 
 def _titles(fig, ctx, title, subtitle, footer):
+    """Title, subtitle and footer, placed against the composition box.
+
+    Every position here is written against the whole frame and mapped through ctx.at, so a
+    fitted render is the same composition moved inward rather than a second set of numbers
+    to keep in step with these. Font sizes deliberately do not shrink with the box: a
+    narrower frame on a phone wants text that is *larger* relative to the chart, not
+    smaller, and ctx.s already scales them against the output resolution.
+    """
     t = ctx.theme
     top = 0.955 if not ctx.tall else 0.965
     if title:
-        fig.text(0.07, top, title, color=t["text"], fontsize=34 * ctx.s,
+        x, y = ctx.at(0.07, top)
+        fig.text(x, y, title, color=t["text"], fontsize=34 * ctx.s,
                  fontweight="bold", va="top")
     if subtitle:
-        fig.text(0.07, top - (0.052 if not ctx.tall else 0.030), subtitle,
-                 color=t["muted"], fontsize=17 * ctx.s, va="top",
+        x, y = ctx.at(0.07, top - (0.052 if not ctx.tall else 0.030))
+        fig.text(x, y, subtitle, color=t["muted"], fontsize=17 * ctx.s, va="top",
                  fontfamily=MONO_STACK)
     footer = _footer_text(footer)
     if footer:
-        fig.text(0.93, 0.035, footer, color=t["muted"], fontsize=13 * ctx.s,
+        x, y = ctx.at(0.93, 0.035)
+        fig.text(x, y, footer, color=t["muted"], fontsize=13 * ctx.s,
                  ha="right", va="center", alpha=0.8)
 
 
 def _plot_area(ctx, has_title):
-    """Axes rect tuned per aspect ratio, leaving room for right-edge labels."""
+    """Axes rect tuned per aspect ratio, leaving room for right-edge labels.
+
+    Mapped through the composition box for the reason _titles is: one set of numbers,
+    narrowed when a fit asks for it, identical when nothing did.
+    """
     if ctx.tall:
-        return [0.15, 0.13, 0.71, 0.76 if has_title else 0.80]
-    return [0.07, 0.11, 0.79, 0.70 if has_title else 0.78]
+        rect = [0.15, 0.13, 0.71, 0.76 if has_title else 0.80]
+    else:
+        rect = [0.07, 0.11, 0.79, 0.70 if has_title else 0.78]
+    return ctx.rect(rect)
 
 
 def _span_days(index):
@@ -2078,7 +2184,8 @@ def render_race(cfg, ctx, out, progress=None, still=None):
         val_txt[c] = ax.text(0, 0, "", color=colors[c], fontsize=17 * ctx.s,
                              fontweight="bold", va="center", ha="left",
                              fontfamily=MONO_STACK, zorder=4)
-    clock = fig.text(0.90, 0.16, "", color=t["muted"], fontsize=30 * ctx.s,
+    clock_x, clock_y = ctx.at(0.90, 0.16)
+    clock = fig.text(clock_x, clock_y, "", color=t["muted"], fontsize=30 * ctx.s,
                      ha="right", va="center", fontfamily=MONO_STACK, alpha=0.55)
 
     pos = np.arange(n, dtype=float)[::-1]  # smoothed row positions
@@ -2353,7 +2460,7 @@ def render(cfg, out_path, progress=None):
     datasrc.reset_sources()
     ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"),
                    cfg.get("quality", "final"), cfg.get("fps"), cfg.get("resolution"),
-                   cfg.get("transparent", False), cfg.get("preset"))
+                   cfg.get("transparent", False), cfg.get("preset"), cfg.get("fit"))
     return CHARTS[kind]["fn"](cfg, ctx, out_path, progress=progress)
 
 
@@ -2375,7 +2482,8 @@ def save_still(cfg, fileobj, at=0.72, quality="draft", dpi=None, res=None):
     # Reset here too, so the preview footer matches what the render will produce.
     datasrc.reset_sources()
     ctx = make_ctx(cfg.get("theme", "midnight"), cfg.get("aspect", "16:9"), quality,
-                   res=res, transparent=cfg.get("transparent", False))
+                   res=res, transparent=cfg.get("transparent", False),
+                   fit=cfg.get("fit"))
     fig = CHARTS[kind]["fn"](cfg, ctx, None, still=at)
     try:
         fig.savefig(fileobj, format="png", dpi=dpi or ctx.dpi, facecolor=ctx.bg)

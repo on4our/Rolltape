@@ -162,7 +162,8 @@ path instead of a test-only one.
 - `test_camera.py` — the planned limits behind each move.
 - `test_render_job.py` — the two-process protocol, the inherited cache, and preview latency
   under load.
-- `test_presets.py` — brand kit persistence and the title template.
+- `test_presets.py` — brand kit persistence, the title template, and that a kit saved
+  before a field existed still loads.
 - `test_landing.py` — the landing page, the showcase stills and email capture.
 - `test_tickers.py` — the symbol lookup and the series endpoint behind the ticker field.
 - `test_economic.py` — every place a FRED symbol has to behave differently from a ticker:
@@ -526,30 +527,55 @@ follows for the renderers. Three things are load-bearing rather than taste:
   vocabularies; the swatch dots are the only place a theme's colours appear in the chrome,
   and they arrive from `/api/meta` as data.
 
-**Safe-area guides are drawn in the browser and nowhere else.** `SAFE_AREAS` in
-`renderers.py` is four fractional insets per short-form app — the caption block and handle
-along the bottom, the action column up the right edge, the progress bar across the top —
-served through `/api/meta` and drawn as an overlay on the preview image when the frame is
-9:16. Three rules, and the first two are the whole reason it is built this way:
+**Short-form safe areas do two separate jobs, and keeping them separate is the point.**
+`SAFE_AREAS` in `renderers.py` is four fractional insets per app — the caption block and
+handle along the bottom, the action column up the right edge, the progress bar across the
+top. Two things read it, and they are not the same feature:
 
-- **No renderer reads the table and no layout moves for it.** A chart that repositioned
-  itself to clear the chrome would be a different chart from the 16:9 one beside it in the
-  same video, and the full frame is still the right framing for a clip going somewhere with
-  no overlay at all. The guides make the overlap *visible* while there is still time to
-  shorten a title; they don't decide anything. `SafeAreaTests` fails if `SAFE_AREAS` is ever
-  read a second time in `renderers.py`.
-- **The guide state never reaches `config()`.** It lives in `state.guides` and
-  `localStorage`, beside which sections are open rather than beside the settings — so a
-  guide cannot end up in a render or a saved still, structurally rather than by remembering
-  to strip it. A test pins that too.
-- **The overlay sizes to the image, not the viewport.** A 9:16 render is far narrower than
-  the box it sits in, so guides on the box would mark the wrong edges entirely — hence the
-  `.shot` wrapper the preview builds around its `<img>`.
+- **`fit`** is a render setting. It narrows where the *composition* may go, so the app's own
+  chrome covers background instead of a title. `full` is the default and the whole frame.
+- **The guides** are a preview overlay drawn in the browser. They only show where the chrome
+  falls. Their state lives in `state.guides` and `localStorage`, never in `config()`, so a
+  guide cannot reach a render or a saved still — structurally rather than by remembering to
+  strip it, and a test pins that.
 
-The numbers are approximate by nature and the comment above them says so: every one of those
-layouts moves with an app update. "All" is the union of the rest, derived rather than a
-fourth row to maintain — same reasoning as `_pillar_color()` deriving a colour instead of
-adding a hex. A fourth platform is an entry in the table and no other edit.
+An earlier version of this file said no renderer may read the table and no layout moves for
+it. That was wrong in practice: the guides did their job and what they showed was a default
+9:16 framing with its title under the progress bar and its date axis under the caption
+block. The reasoning that survives is narrower — nothing moves *unless asked*, and the
+default is untouched.
+
+Four things hold the fit up:
+
+- **One seam.** `Ctx.box` is the region the composition may use, and `Ctx.at()`/`Ctx.rect()`
+  map into it. `_titles()` and `_plot_area()` are the only callers that matter, and all
+  seven charts already go through both — so fitting cost no per-renderer edits at all. The
+  race's clock is the one thing placed in figure coordinates outside those two.
+- **Unfitted is untouched, down to the float.** Both mappings return their input when
+  `ctx.fitted` is false, rather than deriving the identity through the arithmetic — which
+  gives `0.30000000000000004` where a renderer had `0.3`. "Renders exactly as it did" is a
+  claim about pixels, not intent.
+- **Margins keep their absolute size; the plot area gives up the room.** This is the
+  subtle one. Fonts deliberately do not shrink with the box, because a narrower frame on a
+  phone wants text *larger* relative to the chart. So a margin scaled down while its text
+  stayed put lets a line-end label grow straight out through the edge of the box and into
+  the chrome the fit existed to clear. The comparison chart is what found this.
+- **A fit needs a 9:16 frame.** The insets were measured off a vertical screen, so
+  `clean_config()` refuses one on any other aspect rather than insetting a composition
+  against numbers describing a different shape. The interface drops the fit when you leave
+  9:16, so changing frame can't turn into an error message.
+
+`safe_area()` returns one app's insets, the union for `all`, or None for the whole frame.
+The union is derived rather than a fourth row to maintain — same reasoning as
+`_pillar_color()` deriving a colour instead of adding a hex — and it is served through
+`/api/meta` alongside the measured three, so the guides read the same four profiles the
+renderer composes against instead of deriving their own and drifting. A fourth app is an
+entry in the table and no other edit.
+
+The numbers are approximate by nature: every one of those layouts moves with an app update.
+`FitTests` is the enforceable half — it draws each chart fitted and asserts the four bands
+hold nothing but background, with a guard test proving an unfitted render really would have
+put something there.
 
 **Two rails, and both collapse.** The settings are split twice over, on two axes that don't
 line up — which is why neither split alone was enough.
@@ -627,7 +653,9 @@ load. Anything laid over a `.wrap` sets `padding-top`/`padding-bottom` rather th
 shorthand, which would reset the horizontal padding `.wrap` owns and put text against the
 bezel on a phone.
 
-**Brand kits.** A kit is theme, footer and a default title template. The client applies a
+**Brand kits.** A kit is theme, footer, a default title template and which app the
+channel posts to (`fit`) — all four picked once and then never thought about again,
+which is the test for whether something belongs in a kit. The client applies a
 kit to its own form state and sends the resolved values, so the server never needs to know
 which kit is active — `presets.py` is just where they are kept. The one exception is the
 title template: `format_title()` fills it in `clean_config()`, so the preview and the
@@ -726,10 +754,16 @@ draining the queue is still what bounds CPU, not the lock.
   trim really does make them faster.
 - **The safe-area insets are read off each app rather than published by one.** Nobody
   documents these, so they were measured, and every one of those layouts moves with an app
-  update. The failure mode is quiet in the mild direction — a guide that is slightly wrong
-  puts a title slightly closer to the chrome than intended — but it is the same shape as the
-  event parsers below: worth one look at the real apps before anyone leans on them at the
-  pixel. Nothing renders differently either way, which is most of why this is a footnote.
+  update. This stopped being a footnote when `fit` shipped: the numbers now move the
+  composition rather than only drawing a guide over it, so a wrong inset is a wrong render
+  and not merely a misleading overlay. Same shape as the event parsers below — worth one
+  look at the real apps before anyone leans on them at the pixel.
+- **A fitted render is a visibly smaller chart**, and on TikTok much smaller: the union
+  leaves 56% of the frame, almost all of the loss off the bottom. That is correct in the app
+  and looks bottom-heavy anywhere without chrome over it, so a clip going somewhere with no
+  overlay wants `full`. There is no way to say "fit the text but let the chart ink bleed",
+  which is what a hand-built short-form graphic would do; it needs per-renderer work rather
+  than the one seam `Ctx.box` gives.
 - Charts with moving averages cache separately from the same chart without them, because
   the run-up fetch changes the start date and so the cache key. Harmless, just surprising
   if you're watching `.cache/`.
@@ -835,8 +869,9 @@ replacing them — the revenue waterfall, the first chart here drawn from someth
 other than prices, which is what `fundamentals.py` exists for, and the two halves of
 short-form: the clip trim, which cuts a shorter file out of a take without re-timing it
 (`plan_shot()` and `Shot` in `renderers.py`, one seam all seven renderers read their frame
-list from), and the safe-area guides, which show what each app's chrome will cover on a
-9:16 frame without moving the layout for it.
+list from), and the short-form safe areas — `fit` composing a render inside one app's
+chrome through `Ctx.box`, and the guides showing where that chrome falls without the
+render having to move for them.
 
 Two things the waterfall opens up that are not on the list above because they are one
 fetcher each now rather than a module: a `pe` or `margin` metric on the bar chart, which

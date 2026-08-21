@@ -1073,5 +1073,90 @@ class ClipTrimTests(GeneratedDataCase):
         self.assertEqual(self.shot(cut).at(0.0), 6)
 
 
+class FitTests(GeneratedDataCase):
+    """Fitting the composition inside an app's safe area.
+
+    The claim is narrow and checkable: with a fit set, nothing the viewer needs to read is
+    drawn where that app will put its own chrome. So these tests look at the pixels in the
+    four bands and assert they are still plain background — the frame is rendered edge to
+    edge either way, and what moves is the composition, not the canvas.
+    """
+
+    VERTICAL = {"aspect": "9:16"}
+
+    def bg(self, cfg):
+        hexes = renderers.THEMES[cfg.get("theme", "midnight")]["bg"].lstrip("#")
+        return np.array([int(hexes[i:i + 2], 16) for i in (0, 2, 4)])
+
+    def ink_in_bands(self, cfg, profile):
+        """Fraction of each safe-area band holding something other than the background."""
+        img = draw(cfg)[:, :, :3]
+        area = renderers.safe_area(profile)
+        h, w = img.shape[:2]
+        top, bottom = round(area["top"] * h), round(area["bottom"] * h)
+        left, right = round(area["left"] * w), round(area["right"] * w)
+        bands = {"top": img[:top, :], "bottom": img[h - bottom:, :],
+                 "left": img[top:h - bottom, :left],
+                 "right": img[top:h - bottom, w - right:]}
+        bg = self.bg(cfg)
+        # A tolerance rather than equality: the encoder is not involved here, but a glow or
+        # an antialiased edge lands a couple of levels off the flat colour.
+        return {name: float((np.abs(band - bg).sum(axis=2) > 12).mean())
+                for name, band in bands.items() if band.size}
+
+    def test_every_chart_keeps_its_composition_out_of_the_chrome(self):
+        for chart in CHART_FIXTURES:
+            for profile in ("shorts", "tiktok", renderers.FIT_ALL):
+                with self.subTest(chart=chart, fit=profile):
+                    cfg = self.cfg(chart, **self.VERTICAL, fit=profile)
+                    for band, ink in self.ink_in_bands(cfg, profile).items():
+                        self.assertEqual(
+                            ink, 0.0,
+                            f"{chart} draws into {profile}'s {band} band, which that app "
+                            f"covers with its own chrome")
+
+    def test_without_a_fit_the_chrome_really_would_cover_something(self):
+        # The guard on the test above. If an unfitted 9:16 render happened to leave those
+        # bands empty anyway, fitting would be proving nothing.
+        cfg = self.cfg("line", **self.VERTICAL)
+        bands = self.ink_in_bands(cfg, "tiktok")
+        self.assertGreater(bands["bottom"], 0.05, "the date axis should be in the way")
+        self.assertGreater(bands["top"], 0.0, "the title should be in the way")
+
+    def test_the_whole_frame_is_still_painted(self):
+        # Fitting moves the composition, never the canvas. A render that letterboxed itself
+        # into the safe box would read as a mistake on a phone, where the chrome is drawn
+        # over the video rather than beside it.
+        cfg = self.cfg("line", **self.VERTICAL, fit="tiktok")
+        img = draw(cfg)
+        self.assertEqual(img[:, :, 3].min(), 255, "a corner went transparent")
+        corner = img[2, 2, :3]
+        np.testing.assert_array_equal(corner, self.bg(cfg))
+
+    def test_the_default_composes_against_the_whole_frame(self):
+        # ctx.box is the identity when nothing asked for a fit, which is what makes every
+        # config written before this existed render exactly as it did.
+        ctx = renderers.make_ctx("midnight", "9:16", "draft")
+        self.assertEqual(ctx.fit, renderers.FIT_NONE)
+        self.assertEqual(ctx.box, (0.0, 0.0, 1.0, 1.0))
+        self.assertEqual(ctx.at(0.25, 0.75), (0.25, 0.75))
+        self.assertEqual(ctx.rect([0.1, 0.2, 0.3, 0.4]), [0.1, 0.2, 0.3, 0.4])
+
+    def test_a_fitted_box_is_the_frame_less_its_insets(self):
+        ctx = renderers.make_ctx("midnight", "9:16", "draft", fit="tiktok")
+        area = renderers.SAFE_AREAS["tiktok"]
+        x0, y0, w, h = ctx.box
+        self.assertAlmostEqual(x0, area["left"])
+        self.assertAlmostEqual(y0, area["bottom"])
+        self.assertAlmostEqual(w, 1 - area["left"] - area["right"])
+        self.assertAlmostEqual(h, 1 - area["top"] - area["bottom"])
+
+    def test_an_unknown_fit_composes_against_the_whole_frame(self):
+        # make_ctx is reachable without clean_config — a renderer called directly is a path
+        # the module supports — so it falls back rather than raising on a bad name.
+        self.assertEqual(renderers.make_ctx("midnight", "9:16", "draft", fit="snap").box,
+                         (0.0, 0.0, 1.0, 1.0))
+
+
 if __name__ == "__main__":
     unittest.main()
