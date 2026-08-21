@@ -124,6 +124,51 @@ def _one_of(value, options, default, label):
     return value
 
 
+def _seconds(value, label):
+    """A number of seconds that isn't negative, or None when the field is empty."""
+    if value in (None, ""):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a number of seconds.") from None
+    if value < 0:
+        raise ValueError(f"{label} cannot be negative.")
+    return value
+
+
+def resolve_clip(raw, duration, hold):
+    """Resolve the in and out points into a bounded pair of seconds, or no trim at all.
+
+    A trim is a slice of the take rather than a shorter take — see the Clip trim section in
+    renderers.py — so both points are measured against the whole `duration + hold` the rest
+    of the config describes, and neither of them changes it.
+
+    The out point is clamped to the end of the clip rather than refused, for the same reason
+    _clamp_start clamps a window the interval can't reach: the reveal is a field of its own,
+    so trimming to 8s and then shortening the reveal to 5s is an ordinary thing to do and
+    should render the clip that exists rather than an error message. The in point is not
+    clamped, because one past the end names no frames at all and there is nothing sensible
+    to draw instead.
+
+    Absent, both come back as the untrimmed pair — the config an API caller who has never
+    heard of a trim posts, rendering exactly what it always did.
+    """
+    total = duration + hold
+    start = _seconds(raw.get("clip_in"), "Clip in") or 0.0
+    end = _seconds(raw.get("clip_out"), "Clip out")
+    if end is None and not start:
+        return 0.0, None
+    end = min(total if end is None else end, total)
+    if start >= end:
+        raise ValueError(
+            f"A clip has to end after it starts, and this one runs {total:g}s in total — "
+            f"in at {start:g}s, out at {end:g}s.")
+    if end - start < renderers.MIN_CLIP:
+        raise ValueError(f"A clip has to be at least {renderers.MIN_CLIP:g}s long.")
+    return start, end
+
+
 def format_title(fmt, chart, tickers):
     """Fill a brand kit's default title.
 
@@ -276,6 +321,10 @@ def clean_config(raw):
                 "an economic series is published monthly or quarterly. Pick another "
                 "metric.")
 
+    duration = max(float(raw.get("duration", 6)), 0.5)
+    hold = max(float(raw.get("hold", 1.5)), 0.0)
+    clip_in, clip_out = resolve_clip(raw, duration, hold)
+
     cfg = {
         "chart": chart,
         "tickers": tickers,
@@ -286,8 +335,12 @@ def clean_config(raw):
         "end": window["end"],
         "interval": interval,
         "sessions": window["sessions"],
-        "duration": max(float(raw.get("duration", 6)), 0.5),
-        "hold": max(float(raw.get("hold", 1.5)), 0.0),
+        "duration": duration,
+        "hold": hold,
+        # Where this render starts and stops inside that reveal-plus-hold. Both are None
+        # and 0.0 unless somebody asked, and the renderers plan the whole clip either way.
+        "clip_in": clip_in,
+        "clip_out": clip_out,
         "easing": raw.get("easing", "out"),
         "camera": camera,
         "camera_travel": travel,
@@ -323,13 +376,26 @@ def clean_config(raw):
     return cfg
 
 
-def slug(cfg, ext=None):
+def slug(cfg, job_id=None, ext=None):
+    """Name the file a render lands in.
+
+    Two things beyond the chart and the tickers, both because cutting several clips out of
+    one take is the ordinary way to use the trim. The window goes in the name when there is
+    one, so "which of these is the 2 to 5 second cut" is answerable without opening them.
+    And the job id goes in, because the stamp is only good to the second: three clips queued
+    back to back off one config used to be one file written three times, each render quietly
+    replacing the last.
+    """
     base = "-".join(cfg["tickers"][:3]) or cfg["chart"]
-    name = f"{cfg['chart']}_{base}_{time.strftime('%m%d-%H%M%S')}"
+    parts = [cfg["chart"], base, time.strftime("%m%d-%H%M%S")]
+    if cfg.get("clip_out") is not None:
+        parts.append(f"{cfg['clip_in']:g}-{cfg['clip_out']:g}s")
+    if job_id:
+        parts.append(job_id[:6])
     # The container follows the codec, and the codec follows the alpha setting — ask
     # renderers rather than deciding it twice.
     ext = ext or renderers.output_extension(cfg["transparent"])
-    return re.sub(r"[^A-Za-z0-9_.-]", "", name) + ext
+    return re.sub(r"[^A-Za-z0-9_.-]", "", "_".join(parts)) + ext
 
 
 # ---------------------------------------------------------------------------
@@ -491,8 +557,6 @@ def meta():
         "max_periods": fundamentals.MAX_PERIODS,
         "travels": list(renderers.TRAVELS),
         "ma_lags": list(renderers.MA_LAGS),
-        "sizes": {a: {str(r): list(s) for r, s in rs.items()}
-                  for a, rs in renderers.SIZES.items()},
         "resolutions": list(renderers.RESOLUTIONS),
         "fps_choices": list(renderers.FPS_CHOICES),
         "tiers": {k: {"fps": v["fps"], "res": v["res"]}
@@ -512,6 +576,12 @@ def meta():
         },
         "sizes": {a: {q: list(s) for q, s in qs.items()}
                   for a, qs in renderers.SIZES.items()},
+        # Guides for the preview and nothing more: no renderer reads these and no layout
+        # moves for them. The interface draws them over a vertical frame so the overlap
+        # with each app's own chrome is visible while there is still time to shorten a
+        # title. See SAFE_AREAS in renderers.py for why they stay advisory.
+        "safe_areas": [{"id": k, **v} for k, v in renderers.SAFE_AREAS.items()],
+        "min_clip": renderers.MIN_CLIP,
         "presets": list(renderers.PRESETS),
         "auto_preset": {k: v["preset"] for k, v in renderers.ENCODE.items()},
         # A public instance is where someone is deciding whether to buy, so that is where
@@ -665,12 +735,14 @@ def start_render():
     jobstore.create({
         "id": job_id,
         "cfg": cfg,
-        "file": slug(cfg),
+        "file": slug(cfg, job_id),
         "label": cfg["title"] or " ".join(cfg["tickers"]) or cfg["chart"],
         "chart": renderers.CHARTS[cfg["chart"]]["label"],
         "status": "queued",
         "progress": 0,
-        "total": int((cfg["duration"] + cfg["hold"]) * cfg["fps"]),
+        # What the render will actually write, trim included — asked of renderers so a
+        # queued job can't disagree with the frame count the child reports a moment later.
+        "total": renderers.frame_count(cfg),
         "created": time.time(),
         "url": None,
         "error": None,

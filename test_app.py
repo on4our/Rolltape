@@ -14,6 +14,7 @@ from unittest import mock
 import app
 import data
 import fundamentals
+import renderers
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -223,6 +224,160 @@ class MetaTests(unittest.TestCase):
                          list(fundamentals.BRIDGES))
         self.assertEqual([s["id"] for s in self.meta["statements"]],
                          list(fundamentals.PERIODS))
+
+
+class ClipTrimConfigTests(unittest.TestCase):
+    """The in and out points, which decide how much of a take comes out as a file.
+
+    A trim is a window on `duration + hold` rather than a re-timing of it, so the two
+    numbers it is bounded against are the ones already in the config. Nothing here draws
+    anything — see test_render.ClipTrimTests for the property that makes the window a real
+    slice of the same take.
+    """
+
+    def test_a_config_that_never_mentions_a_clip_is_untrimmed(self):
+        # The whole point of the defaults: an API caller written before there was a trim
+        # posts exactly this, and has to keep getting the file it always got.
+        c = cfg(duration=6, hold=1.5)
+        self.assertEqual((c["clip_in"], c["clip_out"]), (0.0, None))
+
+    def test_both_points_come_back_as_seconds(self):
+        c = cfg(duration=6, hold=1.5, clip_in=2, clip_out=5)
+        self.assertEqual((c["clip_in"], c["clip_out"]), (2.0, 5.0))
+
+    def test_an_in_point_alone_runs_to_the_end_of_the_clip(self):
+        c = cfg(duration=6, hold=1.5, clip_in=2)
+        self.assertEqual((c["clip_in"], c["clip_out"]), (2.0, 7.5))
+
+    def test_an_out_point_past_the_end_is_clamped_rather_than_refused(self):
+        # Same reasoning as _clamp_start: the reveal is a field of its own, so trimming to
+        # 8s and then shortening the reveal is an ordinary thing to do and should render
+        # the clip that exists.
+        self.assertEqual(cfg(duration=6, hold=1.5, clip_out=99)["clip_out"], 7.5)
+
+    def test_an_out_point_on_the_end_leaves_the_clip_untrimmed(self):
+        c = cfg(duration=6, hold=1.5, clip_out=7.5)
+        self.assertEqual(c["clip_out"], 7.5)
+
+    def test_an_in_point_past_the_end_is_refused(self):
+        # Unlike the out point this cannot be clamped: it names no frames at all, and
+        # there is nothing sensible to draw instead.
+        with self.assertRaises(ValueError):
+            cfg(duration=6, hold=1.5, clip_in=9)
+
+    def test_a_clip_shorter_than_the_floor_is_refused(self):
+        with self.assertRaises(ValueError):
+            cfg(duration=6, hold=1.5, clip_in=2, clip_out=2 + renderers.MIN_CLIP / 2)
+
+    def test_a_negative_or_unreadable_point_is_refused(self):
+        for bad in ({"clip_in": -1}, {"clip_out": -0.5}, {"clip_out": "soon"},
+                    {"clip_in": "2s"}):
+            with self.subTest(**bad):
+                with self.assertRaises(ValueError):
+                    cfg(duration=6, hold=1.5, **bad)
+
+    def test_the_trim_does_not_move_the_reveal_or_the_hold(self):
+        # If it did, a trim would just be a shorter render — which the two fields above it
+        # already are, and which is the thing this is not.
+        c = cfg(duration=6, hold=1.5, clip_in=2, clip_out=5)
+        self.assertEqual((c["duration"], c["hold"]), (6.0, 1.5))
+
+
+class OutputNamingTests(unittest.TestCase):
+    """slug(), which decides what a finished render is called.
+
+    Cutting several clips out of one take is the ordinary way to use the trim, so the two
+    things that matter here are that the files can be told apart and that they cannot
+    overwrite each other.
+    """
+
+    def test_two_renders_queued_in_the_same_second_get_different_files(self):
+        # The stamp is only good to the second, so this was one file written twice — the
+        # second render replacing the first with no sign it had happened.
+        c = cfg(duration=6, hold=1.5)
+        self.assertNotEqual(app.slug(c, "aaaaaaaaaa"), app.slug(c, "bbbbbbbbbb"))
+
+    def test_a_trimmed_render_names_its_window(self):
+        name = app.slug(cfg(duration=6, hold=1.5, clip_in=2, clip_out=5), "abcdef1234")
+        self.assertIn("2-5s", name)
+
+    def test_an_untrimmed_render_names_no_window(self):
+        # Nothing was cut, so there is no window to disambiguate and the name stays the
+        # shape it has always been.
+        self.assertNotIn("s_", app.slug(cfg(duration=6, hold=1.5), "abcdef1234")
+                         .replace("_0821", ""))
+
+    def test_the_container_still_follows_the_alpha_setting(self):
+        self.assertTrue(app.slug(cfg(transparent=False), "a1b2c3").endswith(".mp4"))
+        self.assertTrue(app.slug(cfg(transparent=True), "a1b2c3").endswith(".mov"))
+
+    def test_a_queued_job_reports_the_frames_it_will_actually_write(self):
+        # Queuing really does start the worker on these, so the render itself is stubbed
+        # out: this module draws nothing and reaches no network, and the numbers being
+        # checked are the ones set at creation anyway. Without the stub the child would go
+        # looking for prices.
+        body = {"chart": "line", "tickers": ["AAPL"], "start": "2024-01-01",
+                "duration": 6, "hold": 1.5, "fps": 60, "quality": "final"}
+        with mock.patch.object(app.render_job, "run"):
+            client = app.app.test_client()
+            full = client.post("/api/render", json=body).get_json()["id"]
+            cut = client.post("/api/render",
+                              json={**body, "clip_in": 2, "clip_out": 5}).get_json()["id"]
+            rows = {j["id"]: j for j in client.get("/api/jobs").get_json()}
+        # 7.5s at 60fps, against the 3s the trim asked for.
+        self.assertEqual(rows[full]["total"], 450)
+        self.assertEqual(rows[cut]["total"], 180)
+        # And the two are not about to land on the same file.
+        self.assertNotEqual(rows[full]["file"], rows[cut]["file"])
+
+
+class SafeAreaTests(unittest.TestCase):
+    """The short-form guides: what /api/meta publishes, and that it stays advisory.
+
+    The rule worth pinning is the negative one — these are drawn over the preview in the
+    browser and no renderer reads them, so a guide cannot reach a render or a saved still.
+    """
+
+    def setUp(self):
+        self.meta = app.app.test_client().get("/api/meta").get_json()
+        with open(os.path.join(HERE, "templates", "index.html")) as fh:
+            self.html = fh.read()
+
+    def test_every_profile_in_the_table_is_published_with_its_four_insets(self):
+        self.assertEqual([s["id"] for s in self.meta["safe_areas"]],
+                         list(renderers.SAFE_AREAS))
+        for area in self.meta["safe_areas"]:
+            with self.subTest(area=area["id"]):
+                self.assertTrue(area["label"])
+                for edge in ("top", "right", "bottom", "left"):
+                    self.assertGreater(area[edge], 0)
+                # An inset large enough to swallow the frame would be a measurement error
+                # rather than a guide.
+                self.assertLess(area["top"] + area["bottom"], 0.6)
+                self.assertLess(area["left"] + area["right"], 0.4)
+
+    def test_no_renderer_reads_the_table(self):
+        # The layout deliberately does not move for the chrome — a chart that repositioned
+        # itself would be a different chart from the 16:9 one beside it in the same video.
+        # SAFE_AREAS is therefore declared and never consulted, and this is what keeps it
+        # that way.
+        with open(os.path.join(HERE, "renderers.py")) as fh:
+            body = fh.read()
+        self.assertEqual(body.count("SAFE_AREAS"), 1)
+
+    def test_the_guides_are_never_part_of_the_posted_config(self):
+        # config() is what both /api/preview and /api/render are sent. The guide state
+        # living outside it is what makes "a guide cannot end up in a render" structural
+        # rather than something to remember.
+        posted = re.search(r"function config\(\)\{(.*?)\n\}", self.html, re.S)
+        self.assertIsNotNone(posted)
+        self.assertNotIn("guides", posted.group(1))
+        self.assertNotIn("safe_area", posted.group(1))
+
+    def test_clean_config_ignores_a_posted_guide(self):
+        # And the server agrees: an API caller who sends one gets it dropped rather than
+        # rendered.
+        self.assertNotIn("guides", cfg(guides="tiktok"))
 
 
 class RailSectionTests(unittest.TestCase):

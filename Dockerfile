@@ -25,19 +25,30 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn \
 
 COPY . .
 
-# Defaults suit a host with no volume attached. Mount one and point these at it to keep
-# renders and the price cache across restarts.
+# Everything the app writes goes under /data, so one mounted volume keeps the lot across a
+# restart and nothing durable is left sitting in an image layer that a redeploy replaces.
+#
+# Brand kits are the one that actually loses data. config.py calls them "the one bit of
+# state meant to survive a restart", and their default path is beside the source — which on
+# a container host is inside the image, so a redeploy silently takes every saved kit with
+# it. Renders and the price cache merely get slower to miss; a kit is gone.
 #
 # Not set here, deliberately: ROLLTAPE_FMP_KEY is a secret and belongs in the host's secret
 # store rather than an image layer. A deploy that serves anyone but its owner wants
 # ROLLTAPE_LICENSED_ONLY=1 alongside it, and ROLLTAPE_FMP_HISTORY_YEARS set to match the
 # plan being paid for — see the README. ROLLTAPE_FRED_KEY goes the same way; without it the
 # economic symbols are simply not offered and every price chart works as before.
+#
+# ROLLTAPE_SIGNUPS is not set either, and that is not an oversight: a public host should be
+# posting signups to a list provider through ROLLTAPE_SIGNUP_URL. The file fallback is for a
+# laptop, and on a container it collects addresses until the next redeploy discards them.
 ENV ROLLTAPE_OUT_DIR=/data/outputs \
     ROLLTAPE_CACHE_DIR=/data/.cache \
+    ROLLTAPE_PRESETS=/data/presets.json \
+    ROLLTAPE_EXAMPLES_DIR=/data/.examples \
     MPLCONFIGDIR=/tmp/matplotlib \
     PYTHONUNBUFFERED=1
-RUN mkdir -p /data/outputs /data/.cache /tmp/matplotlib
+RUN mkdir -p /data/outputs /data/.cache /data/.examples /tmp/matplotlib
 
 # Index the fonts at build time so the first render doesn't pay for the font scan.
 RUN python -c "import matplotlib.font_manager"

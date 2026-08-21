@@ -28,7 +28,7 @@ fallback. An ffmpeg already on PATH still wins when there is one.
 ```
 app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
-renderers.py    Seven chart types + themes + easing + camera + ffmpeg export
+renderers.py    Seven chart types + themes + easing + camera + clip trim + ffmpeg export
 data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, FRED off to
                 one side for economic series, CSV cache, the corporate events the timeline
                 marks by itself, and the symbol search behind the ticker field
@@ -48,7 +48,14 @@ outputs/        Rendered MP4s
 test_*.py       The suite — see Tests below
 ```
 
-Deployment support sits off to the side and nothing local reads it: `Dockerfile`.
+Deployment support sits off to the side and nothing local reads it: `Dockerfile` and
+`railway.json`. Two numbers in those are load-bearing rather than tuning. `--workers 1`
+is the one above; `numReplicas: 1` is the same fact one level out, because a second
+container is a second registry exactly as a second worker process is. And every path the
+app writes to is pointed under `/data` so one mounted volume holds them — brand kits
+most of all, since their default sits beside the source and a redeploy replaces that
+layer, which would take every saved kit with it. `railway.json` carries no comments
+because it cannot; this paragraph is where they live.
 
 Two directories hold no code the app runs. `docs/` is the commercial plan — `pricing.md`,
 `acquisition.md`, `revenue-projection.md` — and `scripts/revenue_model.py` regenerates
@@ -148,7 +155,9 @@ path instead of a test-only one.
 - `test_fundamentals.py` — the statement fetch and, more importantly, the bridge
   arithmetic: that every bridge lands on the total it names, under a missing line, an
   overshooting expense split, and a loss.
-- `test_render.py` — the export path: backgrounds, date labelling, stills, every theme, and
+- `test_render.py` — the export path: backgrounds, date labelling, stills, every theme, the
+  clip trim — that a trimmed frame is pixel-identical to the same frame of the untrimmed
+  take, swept over every chart and every camera move — and
   the timeline's callout layout.
 - `test_camera.py` — the planned limits behind each move.
 - `test_render_job.py` — the two-process protocol, the inherited cache, and preview latency
@@ -424,6 +433,51 @@ framing exactly, which is why adding this changed no existing output — `extent
 `rest_y` are how a renderer tells the camera what its own resting frame was. Charts built
 from ranked rows (`bars`, `race`) have no plane to move over and never construct one.
 
+**The clip trim is a slice of the take, never a re-plan of it.** `clip_in` and `clip_out`
+decide which frames of an animation get written out, and nothing else about the render
+changes: the easing, the camera, the average lag and the race's settling rows are all still
+planned against the whole `duration + hold`. That is the entire point. Re-planning the
+window would just be a shorter render, which the reveal and hold fields already do — what
+slicing gives you is the middle of a long pull back moving at the speed a long pull back
+moves, which is the shot you cannot otherwise ask for.
+
+So frame k of a trimmed render is the same picture as frame `in + k` of the untrimmed one.
+`ClipTrimTests` pins that across every chart in `CHART_FIXTURES` and every camera move, by
+drawing the two frames and comparing pixels. Four things hold it up:
+
+- **One seam, not seven.** `plan_shot()` returns a `Shot`, and every renderer takes its
+  frame list and its scrub position from that one object rather than from `n_frames + hold`
+  and `int(n_frames * still)`. Another knob on which frames come out is an edit there, not
+  in seven `FuncAnimation` calls.
+- **Seconds, not fractions or frames.** Same rule as the average lag and every camera move,
+  one level out: the preview draws at the draft tier's 30fps and the render at 60, so a trim
+  in frames would put them on different moments of the same clip. `plan_shot` converts
+  against `ctx.fps` rather than `cfg["fps"]` for exactly that reason.
+- **An untrimmed config is untouched, down to the rounding.** `Shot.at()` returns literally
+  `int(n_frames * still)` when nothing was trimmed, because every saved scrub position and
+  every thumbnail already points at that frame. Trimmed, it spans the frames the clip
+  contains — still skipping the hold while there is a reveal to spend the scrubber on, and
+  taking the whole window when the trim starts after the reveal has ended.
+- **The race has to be caught up.** It is the one renderer that accumulates: its rows ease
+  towards each new rank rather than being placed at one, so a trimmed clip drawn cold would
+  open with every row in its first-frame position and snap into order on the second.
+  `Shot.warm()` replays the frames before the in-point, and it is a no-op everywhere else —
+  every other renderer draws frame i from i alone.
+
+Two things outside the renderers follow from the same fact — that cutting several clips out
+of one take is the ordinary way to use this. `slug()` puts the window and the job id in the
+filename, because the stamp is only good to the second and three clips off one config used
+to be one file written three times, each render silently replacing the last. And
+`renderers.frame_count()` is what a queued job reports as its total, so the number on screen
+before the child starts is the number of frames it is actually going to write — one function
+rather than the arithmetic repeated in `app.py` and drifting from `plan_shot`.
+
+`clean_config()` bounds both points against `duration + hold` and refuses an out point that
+isn't after its in point, so `plan_shot` is arithmetic rather than validation. The out point
+clamps and the in point refuses, for the same asymmetry `_clamp_start` has: an out point
+past the end still names a clip that exists, and an in point past the end names no frames at
+all.
+
 **The ticker field.** Two endpoints sit behind it and they answer different questions.
 
 `/api/search` is the typeahead. `data.search()` merges a built-in symbol list with Yahoo's
@@ -471,6 +525,31 @@ follows for the renderers. Three things are load-bearing rather than taste:
 - Nothing here reaches into `THEMES`. Chart colour and interface colour are separate
   vocabularies; the swatch dots are the only place a theme's colours appear in the chrome,
   and they arrive from `/api/meta` as data.
+
+**Safe-area guides are drawn in the browser and nowhere else.** `SAFE_AREAS` in
+`renderers.py` is four fractional insets per short-form app — the caption block and handle
+along the bottom, the action column up the right edge, the progress bar across the top —
+served through `/api/meta` and drawn as an overlay on the preview image when the frame is
+9:16. Three rules, and the first two are the whole reason it is built this way:
+
+- **No renderer reads the table and no layout moves for it.** A chart that repositioned
+  itself to clear the chrome would be a different chart from the 16:9 one beside it in the
+  same video, and the full frame is still the right framing for a clip going somewhere with
+  no overlay at all. The guides make the overlap *visible* while there is still time to
+  shorten a title; they don't decide anything. `SafeAreaTests` fails if `SAFE_AREAS` is ever
+  read a second time in `renderers.py`.
+- **The guide state never reaches `config()`.** It lives in `state.guides` and
+  `localStorage`, beside which sections are open rather than beside the settings — so a
+  guide cannot end up in a render or a saved still, structurally rather than by remembering
+  to strip it. A test pins that too.
+- **The overlay sizes to the image, not the viewport.** A 9:16 render is far narrower than
+  the box it sits in, so guides on the box would mark the wrong edges entirely — hence the
+  `.shot` wrapper the preview builds around its `<img>`.
+
+The numbers are approximate by nature and the comment above them says so: every one of those
+layouts moves with an app update. "All" is the union of the rest, derived rather than a
+fourth row to maintain — same reasoning as `_pillar_color()` deriving a colour instead of
+adding a hex. A fourth platform is an entry in the table and no other edit.
 
 **Two rails, and both collapse.** The settings are split twice over, on two axes that don't
 line up — which is why neither split alone was enough.
@@ -635,6 +714,22 @@ draining the queue is still what bounds CPU, not the lock.
   is the one frame you cannot preview or save as a thumbnail. Widening the mapping would
   move the frame every existing scrub position points at, so it wants doing deliberately
   rather than as a side effect.
+- **A trimmed scrub and an untrimmed one do not mean the same thing**, deliberately. With
+  no trim, `Shot.at()` is the expression it always was, edge above included. With one, it
+  spans the frames the clip actually contains — so moving the in point moves the frame every
+  scrub position points at. That is right for a preview whose job is to show what the render
+  will produce, and surprising if you were treating the scrubber as an absolute position in
+  the animation.
+- **Trimming a bar race saves the encode and none of the drawing.** Its rows accumulate, so
+  `Shot.warm()` has to replay every frame before the in point, and drawing the frames is
+  where a render's time actually goes. The other six charts skip the frames outright and a
+  trim really does make them faster.
+- **The safe-area insets are read off each app rather than published by one.** Nobody
+  documents these, so they were measured, and every one of those layouts moves with an app
+  update. The failure mode is quiet in the mild direction — a guide that is slightly wrong
+  puts a title slightly closer to the chrome than intended — but it is the same shape as the
+  event parsers below: worth one look at the real apps before anyone leans on them at the
+  pixel. Nothing renders differently either way, which is most of why this is a footnote.
 - Charts with moving averages cache separately from the same chart without them, because
   the run-up fetch changes the start date and so the cache key. Harmless, just surprising
   if you're watching `.cache/`.
@@ -736,8 +831,12 @@ one hard blocker in front of charging anybody, symbol suggestions in the ticker 
 with `/api/series` behind them, economic series from FRED behind that same field, the
 timeline's automatic callouts — earnings, splits and dividends looked up per kind through
 `data.events()`, laid out by `plan_callouts()`, and merged with the typed ones rather than
-replacing them — and the revenue waterfall, the first chart here drawn from something
-other than prices, which is what `fundamentals.py` exists for.
+replacing them — the revenue waterfall, the first chart here drawn from something
+other than prices, which is what `fundamentals.py` exists for, and the two halves of
+short-form: the clip trim, which cuts a shorter file out of a take without re-timing it
+(`plan_shot()` and `Shot` in `renderers.py`, one seam all seven renderers read their frame
+list from), and the safe-area guides, which show what each app's chrome will cover on a
+9:16 frame without moving the layout for it.
 
 Two things the waterfall opens up that are not on the list above because they are one
 fetcher each now rather than a module: a `pe` or `margin` metric on the bar chart, which

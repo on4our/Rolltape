@@ -69,6 +69,31 @@ SIZES = {
 RESOLUTIONS = (720, 1080, 1440)
 FPS_CHOICES = (30, 60)
 
+# Short-form apps lay their own chrome over the frame: a caption block and a handle along
+# the bottom, a column of action buttons up the right edge, a progress bar and a back arrow
+# across the top. None of it is in the render, all of it covers part of it, and the numbers
+# differ per app — TikTok's caption block is roughly half again the height of the one on
+# Shorts.
+#
+# These are guides and nothing else. No renderer reads this table and no layout moves for
+# it. A chart that repositioned itself to clear the chrome would be a different chart from
+# the 16:9 one beside it in the same video, and the full frame is still the right framing
+# for a clip going somewhere with no overlay at all. What the table is for is making the
+# overlap visible in the preview, while there is still time to shorten a title.
+#
+# Insets are fractions of the frame — of the width for left and right, of the height for top
+# and bottom — read off each app at 1080x1920. They are approximate by nature: every one of
+# these layouts moves with an app update, so treat them as "about here" rather than as a
+# spec, and re-measure before trusting one at the pixel.
+SAFE_AREAS = {
+    "shorts": {"label": "YouTube Shorts",
+               "top": 0.055, "right": 0.14, "bottom": 0.175, "left": 0.03},
+    "tiktok": {"label": "TikTok",
+               "top": 0.055, "right": 0.15, "bottom": 0.26, "left": 0.03},
+    "reels": {"label": "Instagram Reels",
+              "top": 0.06, "right": 0.15, "bottom": 0.22, "left": 0.03},
+}
+
 # "final" used preset=slow, but slow's extra reference/lookahead frames were getting
 # ffmpeg OOM-killed on small container hosts (and took ~70s for a 7.5s clip). At CRF 16
 # the visual difference from medium is not worth either cost. "max" keeps slow for the
@@ -174,6 +199,109 @@ def _plan(duration, hold, fps, easing, dense_n):
 def _densify(x, y, n):
     xd = np.linspace(x[0], x[-1], n)
     return xd, np.interp(xd, x, y)
+
+
+# ---------------------------------------------------------------------------
+# Clip trim
+# ---------------------------------------------------------------------------
+# A trim is a slice of the take, never a re-plan of it. The easing, the camera, the average
+# lag and the race's settling rows are all planned against the whole `duration + hold`
+# above; the trim only decides which of those frames get written out. That is the entire
+# point of it — re-planning the window would just be a shorter render, which the reveal and
+# hold fields already do, and the shot you cannot otherwise ask for is the middle of a long
+# pull-back moving at the speed a long pull-back moves.
+#
+# So frame k of a trimmed render is the same picture as frame `in + k` of the untrimmed one,
+# and `ClipTrimTests` pins exactly that. It is also why the in and out points are seconds
+# rather than fractions: like the average lag and every camera move, a time is frame-rate
+# independent, so the 30fps preview trims at the same moment the 60fps render does.
+
+# Below this a clip is a handful of frames rather than a clip. Enforced in clean_config()
+# with everything else, and named here because that is where the frame arithmetic lives.
+MIN_CLIP = 0.2
+
+
+@dataclass
+class Shot:
+    """Which frames a render writes out, and where a preview scrub lands inside them."""
+
+    frames: range   # absolute frame indices, in draw order
+    n_frames: int   # length of the reveal, whether or not all of it is in shot
+    total: int      # length of the untrimmed clip: reveal + hold
+
+    @property
+    def trimmed(self) -> bool:
+        return len(self.frames) != self.total
+
+    def at(self, still) -> int:
+        """Absolute frame index for a 0..1 preview scrub.
+
+        Untrimmed, this is the expression it has always been, down to the rounding: every
+        saved scrub position and every thumbnail already points at that frame, and so does
+        the known edge where the scrub tops out on the first hold frame.
+
+        Trimmed, it spans what the clip contains. Still the reveal rather than reveal plus
+        hold where there is any reveal in shot — every hold frame is identical on a locked
+        camera, so including them would spend the end of the scrubber on one picture — and
+        the whole window when the trim starts after the reveal has finished, because then
+        there is nothing else to scrub.
+        """
+        still = float(np.clip(still, 0.0, 1.0))
+        if not self.trimmed:
+            return int(self.n_frames * still)
+        first, last = self.frames[0], self.frames[-1]
+        if first < self.n_frames:
+            last = min(last, self.n_frames)
+        return first + int((last - first) * still)
+
+    def warm(self, draw, step=1):
+        """Replay the frames before the in-point, for a renderer that accumulates.
+
+        Only the race needs this: its rows ease towards each new rank rather than being
+        placed at it, so a trimmed clip drawn cold would open with every row in its
+        first-frame position and snap into order on the second. Every other renderer draws
+        frame i from i alone and never calls this.
+
+        The cost is that trimming a race saves the encode and none of the drawing, which is
+        where a render's time actually goes.
+        """
+        for f in range(0, self.frames[0], step):
+            draw(f)
+
+
+def plan_shot(cfg, fps, n_frames, hold):
+    """Resolve `clip_in`/`clip_out` into the frames of this animation to write out.
+
+    clean_config() has already bounded both and rejected an out point that isn't after the
+    in point, so what is left here is the conversion to frames. Renderers pass `ctx.fps`
+    rather than `cfg["fps"]`, because a preview draws at the draft tier's frame rate and has
+    to land on the same moment the render will.
+    """
+    total = n_frames + hold
+    start = int(round(float(cfg.get("clip_in") or 0.0) * fps))
+    out = cfg.get("clip_out")
+    end = total if out in (None, "") else int(round(float(out) * fps))
+    # A clip is at least two frames whatever the arithmetic came to, the same floor _plan()
+    # puts under a reveal: FuncAnimation over an empty range writes a file with no frames in
+    # it, which fails somewhere less obvious than here.
+    start = max(0, min(start, total - 2))
+    end = max(start + 2, min(end, total))
+    return Shot(frames=range(start, end), n_frames=n_frames, total=total)
+
+
+def frame_count(cfg, fps=None):
+    """How many frames a config will write out, trim included.
+
+    app.py puts this on a job the moment it is queued, before the child process has reported
+    a single frame — so it has to agree with what plan_shot decides once the render starts,
+    which is why it goes through the same function rather than repeating the arithmetic and
+    drifting from it.
+    """
+    fps = int(fps or cfg.get("fps") or ENCODE["final"]["fps"])
+    # The same two lines every renderer opens with, and _plan's own floor under the reveal.
+    n_frames = max(int(float(cfg.get("duration", 6)) * fps), 2)
+    hold = int(float(cfg.get("hold", 0)) * fps)
+    return len(plan_shot(cfg, fps, n_frames, hold).frames)
 
 
 # ---------------------------------------------------------------------------
@@ -1148,6 +1276,7 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     xd, yd = _densify(x, y, dense_n)
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    cfg["easing"], dense_n)
+    shot = plan_shot(cfg, ctx.fps, n_frames, hold)
 
     mas = _align_ma(ma_series, df.index)
     ma_vals = [(p, _dense_ma(x, mas[p], xd)) for p in periods]
@@ -1218,9 +1347,9 @@ def render_line(cfg, ctx, out, progress=None, still=None):
         return ()
 
     if still is not None:
-        draw(int(n_frames * still))
+        draw(shot.at(still))
         return fig
-    anim = FuncAnimation(fig, draw, frames=n_frames + hold, interval=1000 / ctx.fps)
+    anim = FuncAnimation(fig, draw, frames=shot.frames, interval=1000 / ctx.fps)
     return _export(fig, anim, out, ctx, progress)
 
 
@@ -1243,6 +1372,7 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
     series = {c: np.interp(xd, x, vals[c].to_numpy(float)) for c in vals.columns}
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    cfg["easing"], dense_n)
+    shot = plan_shot(cfg, ctx.fps, n_frames, hold)
 
     allv = np.concatenate(list(series.values()))
     log = _log_ok(cfg, float(allv.min()))
@@ -1312,9 +1442,9 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
         return ()
 
     if still is not None:
-        draw(int(n_frames * still))
+        draw(shot.at(still))
         return fig
-    anim = FuncAnimation(fig, draw, frames=n_frames + hold, interval=1000 / ctx.fps)
+    anim = FuncAnimation(fig, draw, frames=shot.frames, interval=1000 / ctx.fps)
     return _export(fig, anim, out, ctx, progress)
 
 
@@ -1357,6 +1487,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
 
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    cfg["easing"], n + 1)
+    shot = plan_shot(cfg, ctx.fps, n_frames, hold)
 
     # The averages were computed on daily closes above, before any rollup — so a "50-day"
     # line still means fifty days on a chart whose candles are weeks.
@@ -1481,9 +1612,9 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
         return ()
 
     if still is not None:
-        draw(int(n_frames * still))
+        draw(shot.at(still))
         return fig
-    anim = FuncAnimation(fig, draw, frames=n_frames + hold, interval=1000 / ctx.fps)
+    anim = FuncAnimation(fig, draw, frames=shot.frames, interval=1000 / ctx.fps)
     return _export(fig, anim, out, ctx, progress)
 
 
@@ -1549,6 +1680,7 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
 
     n_frames = max(int(cfg["duration"] * ctx.fps), 2)
     hold = int(cfg["hold"] * ctx.fps)
+    shot = plan_shot(cfg, ctx.fps, n_frames, hold)
     stagger = 0.35  # fraction of the reveal spent staggering bar starts
 
     t = ctx.theme
@@ -1608,9 +1740,9 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
         return ()
 
     if still is not None:
-        draw(int(n_frames * still))
+        draw(shot.at(still))
         return fig
-    anim = FuncAnimation(fig, draw, frames=n_frames + hold, interval=1000 / ctx.fps)
+    anim = FuncAnimation(fig, draw, frames=shot.frames, interval=1000 / ctx.fps)
     return _export(fig, anim, out, ctx, progress)
 
 
@@ -1771,6 +1903,7 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     xd, yd = _densify(x, y, dense_n)
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    cfg["easing"], dense_n)
+    shot = plan_shot(cfg, ctx.fps, n_frames, hold)
 
     mas = _align_ma(ma_series, df.index)
     ma_vals = [(p, _dense_ma(x, mas[p], xd)) for p in periods]
@@ -1888,9 +2021,9 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
         return ()
 
     if still is not None:
-        draw(int(n_frames * still))
+        draw(shot.at(still))
         return fig
-    anim = FuncAnimation(fig, draw, frames=n_frames + hold, interval=1000 / ctx.fps)
+    anim = FuncAnimation(fig, draw, frames=shot.frames, interval=1000 / ctx.fps)
     return _export(fig, anim, out, ctx, progress)
 
 
@@ -1914,6 +2047,7 @@ def render_race(cfg, ctx, out, progress=None, still=None):
     mat = np.vstack([np.interp(xd, x, vals[c].to_numpy(float)) for c in names])
     n_frames, hold, cut, _ = _plan(cfg["duration"], cfg["hold"], ctx.fps,
                                    "linear", dense_n)
+    shot = plan_shot(cfg, ctx.fps, n_frames, hold)
 
     t = ctx.theme
     n = len(names)
@@ -1973,10 +2107,13 @@ def render_race(cfg, ctx, out, progress=None, still=None):
         return ()
 
     if still is not None:
-        for f in range(0, int(n_frames * still), 3):
+        for f in range(0, shot.at(still), 3):
             draw(f)
         return fig
-    anim = FuncAnimation(fig, draw, frames=n_frames + hold, interval=1000 / ctx.fps)
+    # The rows ease towards each rank rather than being placed at it, so a trimmed
+    # clip has to be caught up to its in-point before the first frame it writes.
+    shot.warm(draw)
+    anim = FuncAnimation(fig, draw, frames=shot.frames, interval=1000 / ctx.fps)
     return _export(fig, anim, out, ctx, progress)
 
 
@@ -2095,6 +2232,7 @@ def render_waterfall(cfg, ctx, out, progress=None, still=None):
 
     n_frames = max(int(cfg["duration"] * ctx.fps), 2)
     hold = int(cfg["hold"] * ctx.fps)
+    shot = plan_shot(cfg, ctx.fps, n_frames, hold)
     # Bars start in sequence across this share of the reveal and the last one finishes on
     # the final frame, so the clip ends on the completed bridge however many bars it has.
     lead = 0.72
@@ -2183,9 +2321,9 @@ def render_waterfall(cfg, ctx, out, progress=None, still=None):
         return ()
 
     if still is not None:
-        draw(int(n_frames * still))
+        draw(shot.at(still))
         return fig
-    anim = FuncAnimation(fig, draw, frames=n_frames + hold, interval=1000 / ctx.fps)
+    anim = FuncAnimation(fig, draw, frames=shot.frames, interval=1000 / ctx.fps)
     return _export(fig, anim, out, ctx, progress)
 
 

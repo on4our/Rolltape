@@ -903,5 +903,175 @@ class WrapTests(unittest.TestCase):
         self.assertEqual(renderers._wrap("R&D", 14, 2), "R&D")
 
 
+class ShotPlanTests(unittest.TestCase):
+    """plan_shot's arithmetic — which frames of a planned animation get written out.
+
+    No drawing here: this is the frame maths on its own, and ClipTrimTests below is the
+    part that proves those frames are the same pictures the untrimmed take would have
+    shown at the same moments.
+    """
+
+    def shot(self, fps=60, duration=6.0, hold=1.5, **clip):
+        cfg = appmod.clean_config({**BASE, "chart": "line", "tickers": ["NVDA"],
+                                   "duration": duration, "hold": hold, **clip})
+        ctx = renderers.make_ctx("midnight", "16:9", "final", fps=fps)
+        return renderers.plan_shot(cfg, ctx.fps, int(duration * fps), int(hold * fps))
+
+    def test_no_trim_writes_the_whole_clip(self):
+        s = self.shot()
+        self.assertEqual(s.frames, range(0, 450))
+        self.assertFalse(s.trimmed)
+
+    def test_the_points_are_seconds_into_the_reveal_and_hold(self):
+        s = self.shot(clip_in=2, clip_out=5)
+        self.assertEqual(s.frames, range(120, 300))
+        self.assertTrue(s.trimmed)
+
+    def test_the_same_seconds_are_cut_whatever_the_frame_rate(self):
+        # The preview draws at the draft tier's 30fps and the render at 60. A trim
+        # expressed in frames would put them on different moments of the same clip; this
+        # is the same rule the average lag and every camera move already follow.
+        for fps in (30, 60):
+            with self.subTest(fps=fps):
+                s = self.shot(fps=fps, clip_in=2, clip_out=5)
+                self.assertEqual((s.frames[0] / fps, (s.frames[-1] + 1) / fps), (2.0, 5.0))
+
+    def test_a_clip_is_never_shorter_than_two_frames(self):
+        # FuncAnimation over an empty range writes a file with no frames in it, which fails
+        # somewhere much less obvious than here. clean_config's own floor already keeps a
+        # posted config well clear of this, so the raw dict is the point: a renderer called
+        # directly is a path the module supports, and the guard is what makes it safe.
+        ctx = renderers.make_ctx("midnight", "16:9", "draft")
+        for clip in ({"clip_in": 0.40, "clip_out": 0.41}, {"clip_in": 99},
+                     {"clip_in": 0.5, "clip_out": 0.5}):
+            with self.subTest(**clip):
+                s = renderers.plan_shot(clip, ctx.fps, 15, 0)   # a 0.5s reveal, no hold
+                self.assertGreaterEqual(len(s.frames), 2)
+                self.assertLessEqual(s.frames[-1], 14)
+
+    def test_an_untrimmed_scrub_lands_exactly_where_it_always_did(self):
+        # Every saved scrub position and every thumbnail already points at this frame, so
+        # adding a trim has to leave the mapping alone down to the rounding.
+        s = self.shot()
+        for t in (0.0, 0.05, 0.25, 0.5, 0.75, 1.0):
+            with self.subTest(at=t):
+                self.assertEqual(s.at(t), int(s.n_frames * t))
+
+    def test_a_trimmed_scrub_spans_the_frames_the_clip_contains(self):
+        s = self.shot(clip_in=2, clip_out=5)
+        self.assertEqual(s.at(0.0), s.frames[0])
+        self.assertEqual(s.at(1.0), s.frames[-1])
+
+    def test_a_clip_trimmed_into_the_hold_scrubs_the_hold(self):
+        # The scrub skips the hold while there is a reveal to spend it on, because every
+        # hold frame is the same picture on a locked camera. A clip that starts after the
+        # reveal has finished has nothing else to offer.
+        s = self.shot(clip_in=6.2, clip_out=7.5)
+        self.assertGreaterEqual(s.frames[0], s.n_frames)
+        self.assertEqual((s.at(0.0), s.at(1.0)), (s.frames[0], s.frames[-1]))
+
+    def test_warm_replays_from_the_first_frame_up_to_the_in_point(self):
+        # The race is the one renderer whose rows accumulate: they ease towards each rank
+        # rather than being placed at it, so a trimmed clip drawn cold would open with
+        # every row in its first-frame position and snap into order on the second.
+        seen = []
+        self.shot(clip_in=2, clip_out=5).warm(seen.append)
+        self.assertEqual(seen, list(range(0, 120)))
+
+    def test_warm_does_nothing_to_an_untrimmed_clip(self):
+        seen = []
+        self.shot().warm(seen.append)
+        self.assertEqual(seen, [])
+
+    def test_frame_count_agrees_with_the_shot_the_render_will_plan(self):
+        # app.py puts this on a job the moment it is queued, before the child has reported
+        # a frame. Two spellings of the same arithmetic would show one total on a queued
+        # job and a different one a second later.
+        for clip in ({}, {"clip_in": 2}, {"clip_in": 2, "clip_out": 5},
+                     {"clip_out": 3}):
+            for fps in (30, 60):
+                with self.subTest(fps=fps, **clip):
+                    cfg = appmod.clean_config({**BASE, "chart": "line",
+                                               "tickers": ["NVDA"], "duration": 6,
+                                               "hold": 1.5, "fps": fps, **clip})
+                    self.assertEqual(renderers.frame_count(cfg),
+                                     len(self.shot(fps=fps, **clip).frames))
+
+    def test_frame_count_follows_the_trim(self):
+        cfg = appmod.clean_config({**BASE, "chart": "line", "tickers": ["NVDA"],
+                                   "duration": 6, "hold": 1.5, "fps": 60,
+                                   "clip_in": 2, "clip_out": 5})
+        self.assertEqual(renderers.frame_count(cfg), 180)
+
+
+class ClipTrimTests(GeneratedDataCase):
+    """That a trim is a slice of the take rather than a re-timing of it.
+
+    This is the property the whole feature rests on: frame k of a trimmed render is the
+    same picture as frame `in + k` of the untrimmed one. It is what makes the middle of a
+    long pull-back available as a short clip — re-planning the window would just be a
+    shorter render, which the reveal and hold fields already do.
+
+    Drawn as stills rather than encoded, so it costs two frames per chart and not two
+    clips.
+    """
+
+    # save_still draws at the draft tier, which is 30fps, and BASE is a 1.0s reveal with a
+    # 0.2s hold — so 30 reveal frames and 6 of hold. Trimming to 0.2..0.8s keeps frames
+    # 6..23, and frame 15 is inside both.
+    FPS, REVEAL, HOLD = 30, 30, 6
+    TRIM = {"clip_in": 0.2, "clip_out": 0.8}
+    TARGET = 15
+
+    def shot(self, cfg):
+        ctx = renderers.make_ctx("midnight", "16:9", "draft")
+        self.assertEqual(ctx.fps, self.FPS)
+        return renderers.plan_shot(cfg, ctx.fps, self.REVEAL, self.HOLD)
+
+    def scrub_for(self, shot, frame):
+        """The 0..1 scrub position that lands on `frame`.
+
+        Searched rather than solved: at() rounds, and a test that reproduced the rounding
+        would pass on a mapping that had drifted from the one the preview actually uses.
+        """
+        for i in range(1001):
+            if shot.at(i / 1000) == frame:
+                return i / 1000
+        self.fail(f"no scrub position reaches frame {frame} of {shot.frames}")
+
+    def frame_at(self, cfg, frame):
+        return draw(cfg, at=self.scrub_for(self.shot(cfg), frame))
+
+    def test_every_chart_draws_a_trimmed_frame_exactly_as_the_full_take_did(self):
+        for chart in CHART_FIXTURES:
+            with self.subTest(chart=chart):
+                full = self.cfg(chart)
+                cut = self.cfg(chart, **self.TRIM)
+                self.assertEqual(self.shot(cut).frames, range(6, 24))
+                np.testing.assert_array_equal(
+                    self.frame_at(full, self.TARGET), self.frame_at(cut, self.TARGET),
+                    f"{chart}: the trim re-planned the take instead of slicing it")
+
+    def test_a_camera_move_keeps_the_speed_it_was_planned_at(self):
+        # The move is the reason to trim at all: the camera is planned against the whole
+        # reveal, so the slice shows it partway through rather than restarting it inside
+        # the shorter window.
+        for move in ("pullback", "follow", "push"):
+            with self.subTest(camera=move):
+                full = self.cfg("line", camera=move)
+                cut = self.cfg("line", camera=move, **self.TRIM)
+                np.testing.assert_array_equal(
+                    self.frame_at(full, self.TARGET), self.frame_at(cut, self.TARGET),
+                    f"{move}: the trim re-planned the camera")
+
+    def test_the_trim_moves_the_frame_it_opens_on(self):
+        # The guard on the three tests above: if a trimmed render simply drew the same
+        # thing as an untrimmed one, they would pass without proving anything.
+        full = self.cfg("line")
+        cut = self.cfg("line", **self.TRIM)
+        self.assertFalse(np.array_equal(draw(full, at=0.0), draw(cut, at=0.0)))
+        self.assertEqual(self.shot(cut).at(0.0), 6)
+
+
 if __name__ == "__main__":
     unittest.main()

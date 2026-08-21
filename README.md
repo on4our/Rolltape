@@ -249,6 +249,24 @@ default, and the control only appears once you've asked for an average.
 The slate in the top bar always shows exactly what you're about to produce: resolution,
 frame rate, frame count, running time and codec.
 
+### Safe areas on a vertical frame
+
+Pick 9:16 and a **Safe areas** row appears under the preview. YouTube Shorts, TikTok and
+Reels each lay their own chrome over your video — a caption block and a handle along the
+bottom, a column of action buttons up the right edge, a progress bar across the top — and
+none of it is in the render. Choosing one shades the part of the frame that app will cover
+and outlines what survives. **All** is the union of the three, for a clip going to more
+than one of them.
+
+These are guides and nothing more. The layout does not move for them, and no renderer even
+reads them: they are drawn over the preview in the browser, so one can never end up in a
+render or a saved frame. What they are for is noticing that your title is sitting under
+TikTok's caption block while there is still time to shorten it.
+
+Treat the numbers as "about here" rather than a spec — every one of those layouts moves
+with an app update. They live in `SAFE_AREAS` at the top of `renderers.py`, four fractions
+per app, and adding a fourth platform needs no other change.
+
 ## Overlays
 
 Set **Background** to Transparent and the chart comes out with a real alpha channel —
@@ -307,6 +325,41 @@ size of a move rather than its shape.
 Bar comparison and the bar race have no camera. The rows are the composition, and there is
 no plane to move over, so the controls disappear for those two.
 
+### Clipping a shorter file out of a take
+
+**Clip in** and **Clip out** pick which seconds of the animation actually come out as a
+file. Leave them blank and you get the whole thing, which is what every render did before
+they existed.
+
+The thing to understand is that a clip is a *slice of the take*, not a shorter take. Set a
+20-second reveal with a pull back and clip 6 to 12, and you get six seconds of a camera
+still moving at the speed a 20-second pull back moves — the middle of the shot, arriving
+already in motion and leaving still in motion. Shortening the reveal to six seconds instead
+would give you a completely different clip: a whole pull back, hurried.
+
+That is the shot you cannot otherwise ask for, and it is why the two numbers do not touch
+the reveal and hold above them. Frame for frame, a trimmed render is identical to the same
+frames of the untrimmed one.
+
+Both are seconds measured from the start of the clip, and both are bounded by
+`duration + hold`. An out point past the end is pulled back to it, so trimming to 8s and
+then shortening the reveal renders the clip that exists rather than an error. An in point
+past the end is refused, because it names no frames at all.
+
+The slate reports the file you are about to get, so it counts the trimmed frames and shows
+the trimmed running time. The Motion section's summary is where the trim itself is written
+down, so a clip set once and collapsed doesn't go missing.
+
+Files are named for the window they came from, so a take cut three ways gives you three
+files you can tell apart — `line_NVDA_0821-142233_2-5s_a1b2c3.mp4`. The trailing id is the
+job's, and it is there because the timestamp only goes to the second: three clips queued
+back to back would otherwise be one file written three times.
+
+One cost worth knowing: on the **bar race**, trimming saves the encode and none of the
+drawing. Its rows ease towards each new rank rather than being placed at one, so a trimmed
+clip has to be caught up to its in point before the first frame it writes — and drawing the
+frames is where a render's time actually goes.
+
 ## Files
 
 ```
@@ -323,6 +376,8 @@ examples.py     The three charts the landing page shows
 signups.py      Email capture, to a list provider or a local file
 templates/      The interface, the landing page, and the pricing page at /pricing
 outputs/        Rendered MP4s land here
+Dockerfile      Container image, for Railway and anything else that runs one
+railway.json    Railway's build and health settings, one replica deliberately
 ```
 
 Income statements are cached in the same directory and stamped with the day they were
