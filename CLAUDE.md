@@ -28,7 +28,8 @@ fallback. An ffmpeg already on PATH still wins when there is one.
 ```
 app.py          Flask routes, single-threaded render queue, config validation
 render_job.py   Both sides of the render subprocess — spawner and child entry point
-renderers.py    Seven chart types + themes + easing + camera + clip trim + ffmpeg export
+renderers.py    Seven chart types + themes + easing + the entrance + camera + clip trim +
+                ffmpeg export
 data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, FRED off to
                 one side for economic series, CSV cache, the corporate events the timeline
                 marks by itself, and the symbol search behind the ticker field
@@ -129,7 +130,7 @@ locked camera hides travel and vertical.
 ## Tests
 
 ```bash
-python -m unittest              # all 440, about 20 seconds
+python -m unittest              # all 531, about 45 seconds
 python -m unittest test_camera  # one module
 ```
 
@@ -160,6 +161,13 @@ path instead of a test-only one.
   take, swept over every chart and every camera move — and
   the timeline's callout layout.
 - `test_camera.py` — the planned limits behind each move.
+- `test_motion.py` — the easing curves as arithmetic (that every one of them spans exactly
+  0 to 1, which is what lets `_plan` index data with the result and lets a spring overshoot
+  without moving where a bar lands) and the entrance as pixels. Most of the second half is
+  one assertion wearing different hats: a still drawn cold at a late frame has to be the
+  frame a still render produces, because a stage that accumulated its alphas would still be
+  at nothing there. "The entrance is planned" and "a late still is unchanged" are the same
+  test.
 - `test_render_job.py` — the two-process protocol, the inherited cache, and preview latency
   under load.
 - `test_presets.py` — brand kit persistence, the title template, and that a kit saved
@@ -404,6 +412,67 @@ before animating so the line head moves smoothly rather than hopping between dai
 Any time-based motion should be frame-rate independent — see the race renderer's
 `1 - exp(-11/fps)` smoothing rather than a fixed per-frame constant.
 
+`EASINGS` is the registry and `/api/meta` serves it, so another curve is one entry and no
+edit in the browser. Every curve in it is **monotone and lands on exactly 0 and 1**, and
+that is a contract rather than a coincidence: `_plan` turns the eased value straight into an
+index into the price series, so a curve finishing at 0.999 stops the reveal a bar short and
+one that overshoots asks for a price that does not exist. Clipping the overshoot back would
+park the head at the right edge for as long as the ring lasted, which reads as a render that
+froze. Overshoot therefore belongs to how something *settles into a place it already has* —
+`_spring` and the entrance below — and never to the reveal.
+
+`easing` is the one field in `clean_config()` deliberately left unchecked while `motion`
+beside it is validated. `ease()` has always fallen through to "out" for a name it does not
+know, so an API caller with a typo has been getting that render for as long as there has
+been an API; tightening it is roadmap item 1's job, alongside theme and aspect, and it is a
+decision about that caller rather than about easing. Nothing had ever posted `motion`, so
+there was nobody to break by checking it.
+
+**The entrance.** Left alone, every chart is fully composed on its first frame: the title,
+the grid and the axis are simply there and only the data moves. `Stage` is what brings them
+on instead, and `motion` picks the style — `none`, `fade`, `rise`, `kinetic`. It follows the
+camera's two rules for the camera's two reasons, and there is a third that is its own.
+
+- **Planned, not accumulated.** The whole cascade is worked out before the first frame and
+  read back by index, because `still=` has to answer for frame 200 without drawing the 199
+  before it. An accumulated stage would hand the still export a different picture than the
+  video and would put frame k of a trimmed clip somewhere other than frame in+k of the take.
+- **`none` touches nothing at all.** Not an alpha of 1.0 written over an artist that had
+  none — which would quietly promote the footer off its own 0.8 — but nothing whatsoever:
+  it collects no artists and never asks an axes for its ticks, because asking *builds* them
+  and drags the locator forward to a point where a chart may not have set its limits yet.
+- **Everything is home before the reveal ends, and `apply` restores the artist's own base
+  value rather than arriving back at it through the arithmetic.** So the last frame is
+  identical across styles, which is what keeps a thumbnail meaning the same thing whichever
+  one drew it. `STAGE_MAX` squeezes the cascade rather than truncating it when the reveal is
+  too short to hold it — the same guard `ma_lag` carries, for the same reason.
+
+Two things `kinetic` adds past the entrance, and each has a rule attached.
+
+*A bar may overshoot its level; a number may never overshoot its value.* `Stage.settle()` is
+the seam the bar and waterfall charts grow through, and under kinetic it returns `_spring`.
+Every figure printed beside a springing bar is read off `min(h, 1.0)` instead — a revenue
+that reads high for four frames and then corrects itself is wrong in the direction nobody
+checks, on the one chart whose whole claim is that the number matches the filing.
+
+*The composition never moves for a motion style.* A settling bar has to stay inside a frame
+that was sized before anything moved, and the choice was to open the frame up or to scale
+the overshoot to the room already there. It has to be the second, or a kinetic bridge would
+be composed differently from its own thumbnail. `settle_room()` measures that room off the
+limits the chart already set and `settle()` mixes the spring back toward the plain easing by
+it — a damped spring is a gentler settle, not one that stops short of its own number. Only a
+bar as tall as the whole frame ever runs out of sky, which is exactly the waterfall's opening
+revenue pillar.
+
+**The head reacts to an event, not to every bar.** `pulse_track()` gives the line and
+timeline charts a decaying kick on the frame the reveal draws a new high — but `_breakouts()`
+only counts a high that had to be *won back*, because every bar of a rising series is a new
+high and reacting to all of them is a permanently larger marker rather than a reaction. The
+give-back is measured as a share of the series' own range rather than of its level, since an
+economic series can sit at or below zero and a percentage of that is not a distance. The
+decay is a time constant, so the beat lasts as long in the 30fps preview as in the 60fps
+render.
+
 **The x axis depends on the interval.** Daily bars go on a real date axis; intraday bars go
 on their *position*, with the timestamps moved onto the tick labels. This is not a style
 preference — five-minute bars across a week are about two thirds overnight by wall clock,
@@ -602,6 +671,10 @@ subject of the render is now within a screen of itself. Four things hold:
   rather than by rail, so moving a section between rails is a markup change and nothing
   else. `RailSectionTests` in `test_app.py` fails if a new section misses either half, if
   a rail ends up empty, or if a set-once section drifts back into the left rail.
+- A named choice that needs a sentence gets a `<select>` and a hint rather than a
+  segmented track: the camera move established that shape and easing and entrance now
+  follow it, both built from the registries `/api/meta` publishes so their prose and their
+  behaviour come from one place. A seg is for two to four labels that explain themselves.
 - Digests read from `state` where there is a choice, not from the DOM, so the summary
   cannot disagree with what the render will do. `slate()` refreshes them, and every control
   already routes through it — that is the one call site, not a listener per field.
@@ -751,6 +824,32 @@ draining the queue is still what bounds CPU, not the lock.
   suggesting itself until someone edits the tuple, which is the price of having the field
   answer offline and on the first keystroke. Yahoo is the authority for everything past it,
   so the list stays short rather than trying to be a directory.
+- **The entrance stages the chrome and not the data.** `Stage` moves the title, subtitle,
+  footer and axis furniture; the line, the candles, the callouts and the live readout are
+  never touched, because they are the thing the reveal is already animating. It shows at
+  exactly one moment: on frame 0 of a line chart the price readout is on screen before the
+  grid it sits over has faded up. Staging it would mean a fifth layer per renderer against
+  the one seam `_titles` gives, and by frame 2 it is moot.
+- **`kinetic` is `rise` on three of the seven charts.** Comparison, candlesticks and the
+  race have no value that settles and no single reveal head to react with, so the springs
+  and the pulse have nothing to attach to there. Honest rather than ideal — a candle
+  popping as it lands is the obvious next one, and it needs per-renderer work on a
+  `PolyCollection` rather than an entry in a registry.
+- **A kinetic line or timeline does not end on the same frame a still one does**, unlike
+  every other chart. The head can still be mid-reaction when the reveal ends, which is a
+  reaction working rather than chrome that failed to land — but it does mean the thumbnail
+  claim ("the last frame is the same picture in every style") holds for five charts and not
+  seven.
+- **The reveal's easing bunches the head's reactions.** Under `out` the first frames cover a
+  large share of the series, so several breakouts can map to consecutive frames and the kick
+  reads as a sustained larger marker rather than as separate beats. `smooth` and `linear`
+  spread them out. Nothing is wrong with the data; the reveal is simply moving fastest
+  exactly where the events are densest on screen.
+- **One boxed-in bar damps the spring for the whole chart.** `settle_room()` takes the
+  minimum across bars, so a waterfall's opening revenue pillar — which is the entire y range
+  by construction — pulls every other bar's overshoot down with it. Per-bar amplitudes would
+  fix it and would also mean bars on one chart settling with visibly different springs,
+  which reads as a bug rather than as a decision.
 - Bar race row ordering can look unsettled if a rank flips in the final frames. Longer
   hold masks it.
 - Cancelling only works on a queued job. Killing an in-flight render is now a matter of
@@ -874,7 +973,11 @@ Near term, in rough priority order.
    `_yahoo`, and Yahoo and Stooq adjust differently enough to change the total return
    being narrated — see the note in the README.
 
-Done since this list was last rewritten: the Stooq fallback, renders out of process,
+Done since this list was last rewritten: the motion styles — `EASINGS` as a registry with a
+smootherstep curve in it, and `Stage` bringing the frame's own furniture on rather than
+having it there from the first frame, with `kinetic` adding a spring under a settling bar
+and a reveal head that reacts when the line takes out a high it had lost — the Stooq
+fallback, renders out of process,
 intraday intervals, date-range presets, camera moves, log price axes with moving
 averages, the encoder preset (`final` moved from `slow` to `medium`, with an
 Auto/Faster/Slower override in the UI), brand kits, the landing page with email

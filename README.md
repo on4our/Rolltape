@@ -314,10 +314,40 @@ Reveal length plus hold equals total video length. The hold freezes the finished
 so you have room to talk over it before cutting away. Six seconds of reveal and one and
 a half of hold is a sensible default; shorten the reveal for a punchier cut.
 
-Easing controls how the reveal decelerates. **Ease out** starts fast and settles — the
-right choice most of the time. **Both ends** eases in and out, which suits slow
-atmospheric shots. **Linear** is for bar races, where constant speed reads as elapsed
-time.
+**Easing** controls how the reveal decelerates. **Ease out** starts fast and settles — the
+right choice most of the time. **Smooth** starts from a standstill and stops at one, with
+nothing abrupt anywhere in between; it is the calmest of them and the one to reach for on a
+long reveal. **Both ends** eases in and out and suits slow atmospheric shots. **Exponential**
+spends most of the range in the first moments. **Linear** is for bar races, where constant
+speed reads as elapsed time.
+
+### Entrance
+
+Easing is the reveal's own clock. **Entrance** is what the rest of the frame does around
+it — and left alone, the answer is nothing. The title, the grid and the axis are simply
+there from the first frame, and only the data moves. That is the honest reading of a chart
+and it is also what makes an otherwise good clip look like a plot rather than a piece of
+motion design.
+
+- **Off** — the frame fully composed from frame one, and the default. Every render made
+  before this existed looks exactly as it did.
+- **Fade on** — the grid comes up, then the title, then the subtitle, then the footer, each
+  a beat behind the last. About half a second end to end.
+- **Rise** — the same cascade with the type lifting into place as it arrives.
+- **Kinetic** — rise with a little overshoot, plus two things that react rather than merely
+  arrive. Bars on the comparison and waterfall charts settle *past* the value and come back
+  to it. And on the line and timeline charts the head of the reveal kicks each time the
+  price takes out a high it had given ground from, then relaxes.
+
+Two things hold whichever you pick. The entrance is always finished well before the reveal
+is, so the last frame — the one you screenshot for a thumbnail — is the same picture in
+every style. And the composition never moves for a style: a bar that would overshoot
+through the top of the frame gets a gentler spring rather than a taller frame, so a kinetic
+waterfall is framed exactly like a still one.
+
+Kinetic never lets a *number* overshoot. The bar goes past its level for a few frames; the
+figure printed beside it does not, because a revenue that reads high and then corrects
+itself is the kind of error nobody watching would think to check.
 
 ## Camera
 
@@ -383,7 +413,7 @@ frames is where a render's time actually goes.
 ```
 app.py          Flask server, render queue, job tracking
 render_job.py   Runs one render in a child process, and reports progress back
-renderers.py    All seven chart types, themes, easing, camera moves, export
+renderers.py    All seven chart types, themes, easing, entrances, camera moves, export
 data.py         FMP, Twelve Data, Yahoo and Stooq price fetches, in order, FRED for
                 economic series, the disk cache, and the symbol search
 fundamentals.py Income statements from FMP and Yahoo, and the waterfall's bridges

@@ -289,6 +289,12 @@ def clean_config(raw):
     # Same reasoning for the averages: they arrived with the price line before there was a
     # lag to ask for, and "none" is that render.
     ma_lag = _one_of(raw.get("ma_lag"), renderers.MA_LAG, "none", "Average lag")
+    # And the same again for the entrance. "none" is a frame fully composed on its first
+    # frame, which is what every chart here did before a stage existed to bring it on.
+    # Checked rather than shrugged at, unlike `easing` below, only because nothing has been
+    # posting this field yet — there is no caller relying on a quiet fallback.
+    motion = _one_of(raw.get("motion"), renderers.MOTIONS, renderers.MOTION_NONE,
+                     "Motion style")
     # Which app's chrome the composition should keep clear of. "full" is the whole frame
     # and the default, so a config written before this existed renders as it always did.
     aspect = raw.get("aspect", "16:9")
@@ -353,7 +359,13 @@ def clean_config(raw):
         # and 0.0 unless somebody asked, and the renderers plan the whole clip either way.
         "clip_in": clip_in,
         "clip_out": clip_out,
+        # Unvalidated, deliberately: `ease()` has always fallen through to "out" for a name
+        # it doesn't know, so an API caller sending a typo has been getting that render for
+        # as long as there has been an API. Tightening it is roadmap item 1's job, together
+        # with theme, aspect and metric, and it is a decision about that caller rather than
+        # about easing.
         "easing": raw.get("easing", "out"),
+        "motion": motion,
         "camera": camera,
         "camera_travel": travel,
         "camera_y": camera_y,
@@ -570,6 +582,13 @@ def meta():
                    for k, v in datasrc.RANGES.items()],
         "cameras": [{"id": k, "label": v["label"], "desc": v["desc"]}
                     for k, v in renderers.CAMERAS.items()],
+        # The two halves of how a chart moves: the reveal's time remap, and what the rest
+        # of the frame does around it. Both served rather than spelled out in the markup so
+        # a new curve or a new style is an entry in the registry and no edit in the browser.
+        "easings": [{"id": k, "label": v["label"], "desc": v["desc"]}
+                    for k, v in renderers.EASINGS.items()],
+        "motions": [{"id": k, "label": v["label"], "desc": v["desc"]}
+                    for k, v in renderers.MOTIONS.items()],
         "event_kinds": [{"id": k, "label": v["label"], "desc": v["desc"]}
                         for k, v in datasrc.EVENT_KINDS.items()],
         "bridges": [{"id": k, "label": v["label"], "desc": v["desc"]}

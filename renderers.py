@@ -267,6 +267,29 @@ def make_ctx(theme_name, aspect, quality, fps=None, res=None, transparent=False,
 # ---------------------------------------------------------------------------
 # Motion helpers
 # ---------------------------------------------------------------------------
+# The reveal's time remap: normalised time in, progress along the series out. Every curve
+# here is monotone and lands on exactly 0 and 1 at its ends, and both properties are
+# load-bearing rather than tidy. `_plan` turns the result straight into an index into the
+# data, so a curve that overshot would be asking for prices past the last one there is, and
+# clipping it back would park the head at the right edge for as long as the ring lasted —
+# which reads as a render that froze rather than as a flourish. Overshoot belongs to how a
+# thing settles into a place it already has, which is `_spring` below and the motion styles
+# that reach for it.
+EASINGS = {
+    "out": {"label": "Ease out",
+            "desc": "Quickest off the mark, coasting into the last frames."},
+    "smooth": {"label": "Smooth",
+               "desc": "Eased at both ends and through the change between them, with no "
+                       "kick at the start and no snap at the finish."},
+    "inout": {"label": "Both ends",
+              "desc": "Eased in and out, with the speed through the middle."},
+    "expo": {"label": "Exponential",
+             "desc": "Most of the range in the first moments, then a long approach."},
+    "linear": {"label": "Linear",
+               "desc": "One speed from the first frame to the last."},
+}
+
+
 def ease(name, t):
     t = np.clip(t, 0.0, 1.0)
     if name == "linear":
@@ -275,7 +298,64 @@ def ease(name, t):
         return np.where(t < 0.5, 4 * t**3, 1 - (-2 * t + 2) ** 3 / 2)
     if name == "expo":
         return np.where(t >= 1.0, 1.0, 1 - np.power(2, -10 * t))
+    if name == "smooth":
+        # Smootherstep, and it is aimed at both of the others in turn. "out" leaves the
+        # first frame at full speed, which is the kick you see when a reveal seems to have
+        # been running before you looked at it. "inout" fixes that end and then buys a
+        # different problem: it is two cubics meeting in the middle, and its acceleration
+        # flips sign across that join, which is the little snap halfway through a long
+        # reveal. One quintic has neither — velocity and acceleration both start and finish
+        # at zero, and nothing is discontinuous in between.
+        return t * t * t * (t * (t * 6 - 15) + 10)
     return 1.0 - (1.0 - t) ** 3  # "out"
+
+
+# A settle that goes past its mark and comes back — the one motion nobody produces by hand
+# and everybody recognises. The frequency is pinned at three quarters of a cycle so the
+# curve is *at* the target exactly when the settle ends: cos(3pi/2) is zero, so `_spring(1)`
+# is 1.0 to the float and a bar's last frame is the same height whichever style drew it.
+# That leaves the decay as the only number to taste, and it sets how far past the mark the
+# single overshoot goes.
+_SPRING_FREQ = 1.5 * np.pi
+_SPRING_DECAY = 3.6      # ~12% past the mark at the peak, back on it by the end
+
+
+def _spring(t):
+    """0 to 1 with one overshoot on the way, landing exactly on 1."""
+    t = np.clip(np.asarray(t, dtype=float), 0.0, 1.0)
+    return 1.0 - np.exp(-_SPRING_DECAY * t) * np.cos(_SPRING_FREQ * t)
+
+
+# How far past the mark that actually goes, measured off the curve rather than written down
+# beside it — a chart that has to leave room for the overshoot asks here, so changing the
+# decay above moves the headroom with it instead of silently clipping a bar.
+SPRING_PEAK = float(_spring(np.linspace(0.0, 1.0, 2001)).max())
+
+
+def settle_room(lo, hi, bases, tops):
+    """How much of that overshoot the frame can already hold, as a 0..1 share.
+
+    A settling bar goes past its own level, and the frame it would go past it in was sized
+    before anything moved. The choice is to open the frame up to hold a fixed overshoot, or
+    to scale the overshoot to the room already there — and it has to be the second, because
+    the first would mean a kinetic render composed differently from a still one and a
+    bridge that no longer matches its own thumbnail. So the composition is never touched by
+    a motion style, and the spring takes whatever is going spare.
+
+    Usually that is all of it. Only a bar as tall as the frame itself — a waterfall's
+    opening revenue pillar, which is the whole y range by construction — ever runs out of
+    sky, and there the spring simply softens rather than clipping through the ceiling.
+    """
+    over = SPRING_PEAK - 1.0
+    room = 1.0
+    for base, top in zip(np.atleast_1d(bases), np.atleast_1d(tops)):
+        base, top = float(base), float(top)
+        need = abs(top - base) * over
+        if need <= 0:
+            continue
+        spare = (float(hi) - top) if top >= base else (top - float(lo))
+        room = min(room, max(spare, 0.0) / need)
+    return float(np.clip(room, 0.0, 1.0))
 
 
 def _plan(duration, hold, fps, easing, dense_n):
@@ -638,6 +718,270 @@ class Camera:
         return float(self.x1[i])
 
 
+# ---------------------------------------------------------------------------
+# Stage
+# ---------------------------------------------------------------------------
+# Left alone, every chart below is fully composed on its first frame. The title, the grid
+# and the axis are simply *there*, and only the data moves. That is the honest reading of a
+# chart, and it is also the single thing that makes these clips look drawn rather than
+# directed: a motion-designed piece brings its furniture on too, one layer at a time, and
+# then gets out of the way.
+#
+# `Stage` is that entrance, and it follows the camera's two rules for the camera's two
+# reasons. The whole cascade is planned before the first frame, because `still=` has to
+# answer for frame 200 without drawing the 199 before it — an entrance accumulated frame to
+# frame would hand the still export a different picture than the video, and would put frame
+# k of a trimmed clip somewhere other than frame in+k of the take. And `none` is the
+# default and touches no artist at all: not an alpha of 1.0 written over something that
+# had none, which would quietly promote the footer off its own 0.8, but nothing whatsoever.
+# So every config written before this renders exactly as it did.
+#
+# The other property worth keeping is at the far end. Every layer is home well before the
+# reveal ends, and `apply` puts the artist's own base value back rather than arriving at it
+# through the arithmetic — so the entrance leaves no trace on the last frame, which is what
+# keeps a thumbnail meaning the same thing whichever style drew it.
+#
+# That claim is about the entrance and not about the whole style. `kinetic` also reacts, and
+# a line chart's head can still be mid-kick when the reveal ends — so its last frame is not
+# the still render's, deliberately. Five of the seven charts have nothing to react with and
+# are identical there.
+MOTION_NONE = "none"
+MOTIONS = {
+    MOTION_NONE: {"label": "Off",
+                  "desc": "The frame is fully composed from the first frame. Only the "
+                          "data moves."},
+    "fade": {"label": "Fade on",
+             "desc": "Grid, title and subtitle fade up in sequence over the opening beat."},
+    "rise": {"label": "Rise",
+             "desc": "The same cascade, with the type lifting into place as it arrives."},
+    "kinetic": {"label": "Kinetic",
+                "desc": "Rise with an overshoot, values that settle past their mark, and a "
+                        "reveal head that reacts when the line takes out a high."},
+}
+
+# Which layer arrives when, in seconds from the first frame, and how long each one spends
+# arriving. Seconds rather than frames or fractions of the reveal, for the reason the clip
+# trim and the average lag are: the preview draws at the draft tier's 30fps and the render
+# at 60, and a cascade measured in frames would run at half the speed in one of them.
+#
+# The order is what the eye needs first. The frame comes up before anything is written on
+# it, then the title, then the line under it, then the credit nobody is waiting for.
+STAGE_CUES = {"frame": 0.00, "title": 0.10, "subtitle": 0.20, "footer": 0.30}
+STAGE_RUN = 0.55       # seconds one layer spends arriving
+STAGE_RISE = 0.020     # how far type travels on the way in, as a share of frame height
+# The whole cascade is squeezed to fit this share of the reveal — the same guard the average
+# lag carries, for the same reason. An entrance sized for a comfortable clip is most of a
+# two-second one, and squeezing rather than truncating keeps the last layer landing and the
+# order readable.
+STAGE_MAX = 0.35
+
+
+class Stage:
+    """When each layer of the composition arrives, planned once and read back by index.
+
+    `texts` is what `_titles` drew, keyed by layer; `axes` is every axes whose furniture
+    should come up with the frame. A renderer builds one of these after its axes are styled
+    and calls `apply(i)` from its draw loop, which is the same two-line shape the camera
+    already has.
+    """
+
+    def __init__(self, cfg, ctx, n_frames, hold_frames, *, texts=None, axes=()):
+        style = cfg.get("motion", MOTION_NONE)
+        self.style = style if style in MOTIONS else MOTION_NONE
+        self.easing = cfg.get("easing", "out")
+        self.on = self.style != MOTION_NONE
+        # Kinetic is the only style that reaches past the entrance: it is what puts the
+        # spring under a settling value and the reaction under the reveal head.
+        self.reactive = self.style == "kinetic"
+        self.frames = max(n_frames + hold_frames, 1)
+        self._rise = STAGE_RISE if self.style in ("rise", "kinetic") else 0.0
+        # Off costs nothing at all, not even the reading. Asking an axes for its tick
+        # artists builds them, which drags the locator forward to a point where a chart may
+        # not have set its limits yet — so a stage that is never going to move must not ask.
+        self._axes = [a for a in axes if a is not None] if self.on else []
+        self._texts = ({k: v for k, v in (texts or {}).items() if v is not None}
+                       if self.on else {})
+        self._home = {k: v.get_position() for k, v in self._texts.items()}
+        self._alpha = {k: v.get_alpha() for k, v in self._texts.items()}
+        self._furniture = None
+        self._track = self._plan(ctx.fps, n_frames)
+        # First frame by which every layer is home. Past it `apply` has nothing left to do
+        # but put the base values back, which is idempotent — so once it has done that
+        # once it can stop, and a long render pays for the entrance rather than for every
+        # frame after it. Purely an optimisation: the picture is the same either way.
+        self._settled = self._settle_frame()
+        self._at = -1
+
+    # -- planning ----------------------------------------------------------
+    def _plan(self, fps, n_frames):
+        """One (ramp, alpha, travel) triple per layer, staggered and eased."""
+        if not self.on:
+            return {}
+        span = max(STAGE_CUES.values()) + STAGE_RUN
+        squeeze = min(1.0, (max(n_frames, 1) / float(fps)) * STAGE_MAX / span)
+        clock = np.arange(self.frames, dtype=float) / float(fps)
+        out = {}
+        for name, cue in STAGE_CUES.items():
+            t = np.clip((clock - cue * squeeze) / (STAGE_RUN * squeeze), 0.0, 1.0)
+            # Alpha always rides the smooth curve: a spring on opacity would ask for more
+            # than fully opaque and clamp there, which is a stall rather than an overshoot.
+            # Travel is where kinetic earns its name — the type goes a little past its
+            # resting position and settles onto it.
+            out[name] = (t, ease("smooth", t),
+                         _spring(t) if self.reactive else ease("smooth", t))
+        return out
+
+    def _settle_frame(self):
+        if not self.on:
+            return 0
+        return int(max((np.argmax(t >= 1.0) if t[-1] >= 1.0 else self.frames - 1)
+                       for t, _, _ in self._track.values()))
+
+    def _base(self):
+        """The alphas each axes' furniture already had, one number per group.
+
+        Captured per group rather than per artist because matplotlib rebuilds tick artists
+        whenever the limits change — which a moving camera does on every single frame — so
+        the objects captured here would be stale by the second one. `apply` re-reads the
+        artists on each frame and writes these numbers onto whatever it finds.
+
+        Read on the first frame drawn rather than at construction, which is the first
+        moment the axes is holding the limits it means to. Nothing has touched these alphas
+        by then — this class is the only thing that ever does — so the numbers are the
+        chart's own either way, and taking them here costs no tick build that the frame was
+        not about to pay for anyway.
+        """
+        out = []
+        for ax in self._axes:
+            grid = ax.get_xgridlines() + ax.get_ygridlines()
+            labels = ax.get_xticklabels() + ax.get_yticklabels()
+            out.append({"ax": ax,
+                        "grid": grid[0].get_alpha() if grid else None,
+                        "label": labels[0].get_alpha() if labels else None,
+                        "spine": {k: s.get_alpha() for k, s in ax.spines.items()}})
+        return out
+
+    # -- per frame ---------------------------------------------------------
+    @staticmethod
+    def _level(base, k, done):
+        """`base` scaled to k of the way in, or the base itself once it has arrived.
+
+        Handed back untouched at the end rather than reconstructed, so an artist that
+        started with no alpha at all finishes with no alpha at all — the difference between
+        "renders as it did" and "renders near enough".
+        """
+        if done:
+            return base
+        return (1.0 if base is None else base) * k
+
+    def apply(self, i):
+        """Bring frame `i` of the entrance onto the artists it belongs to."""
+        if not self.on:
+            return
+        i = min(max(int(i), 0), self.frames - 1)
+        if i >= self._settled and self._at >= self._settled:
+            return
+        self._at = i
+        if self._furniture is None:
+            self._furniture = self._base()
+        for name, art in self._texts.items():
+            ramp, alpha, travel = self._track[name]
+            done = ramp[i] >= 1.0
+            art.set_alpha(self._level(self._alpha[name], float(alpha[i]), done))
+            if self._rise:
+                x, y = self._home[name]
+                art.set_position((x, y) if done
+                                 else (x, y - self._rise * (1.0 - float(travel[i]))))
+        ramp, alpha, _ = self._track["frame"]
+        done, k = ramp[i] >= 1.0, float(alpha[i])
+        for f in self._furniture:
+            ax = f["ax"]
+            for ln in ax.get_xgridlines() + ax.get_ygridlines():
+                ln.set_alpha(self._level(f["grid"], k, done))
+            for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+                lbl.set_alpha(self._level(f["label"], k, done))
+            for key, sp in ax.spines.items():
+                sp.set_alpha(self._level(f["spine"].get(key), k, done))
+
+    def settle(self, local, room=1.0):
+        """How far a value has arrived, for the charts whose bars grow into place.
+
+        The reveal's own easing everywhere except kinetic, which lets the bar go past its
+        number and come back. A bar is the one thing on these charts that can honestly
+        overshoot: it already knows where it is going and is only arriving there, unlike a
+        reveal, which would be inventing data it does not have.
+
+        `room` is how much of the overshoot the frame can hold — see `settle_room`. Below
+        1 the curve is mixed back towards the plain easing rather than truncated, so both
+        ends still land exactly where they did: a damped spring is a gentler settle, not a
+        settle that stops short of its own number.
+        """
+        base = float(ease(self.easing, local))
+        if not self.reactive:
+            return base
+        room = float(np.clip(room, 0.0, 1.0))
+        if room >= 1.0:
+            return float(_spring(local))
+        return base * (1.0 - room) + float(_spring(local)) * room
+
+
+# ---------------------------------------------------------------------------
+# Reaction
+# ---------------------------------------------------------------------------
+_PULSE_DIP = 0.04    # ground the series must give back before a new high counts as a beat
+_PULSE_TAU = 0.30    # seconds a kick takes to fade
+_PULSE_GAIN = 0.55   # how much bigger the head gets at the top of one
+
+
+def _breakouts(values, dip=_PULSE_DIP):
+    """Indices at which the series takes out a high it had given ground from.
+
+    Every bar of a rising series is a new high, and reacting to all of them is a bigger
+    marker rather than a reaction. What reads as an event is the record that had to be won
+    back — so a high only counts once the series has given up `dip` of its own range since
+    the last one. A share of the range rather than of the level, because an economic series
+    can sit at or below zero and a percentage of that is not a distance.
+    """
+    v = np.asarray(values, float)
+    if len(v) < 2:
+        return []
+    step = (float(np.max(v)) - float(np.min(v))) * dip
+    if step <= 0:
+        return []
+    hits, peak, trough, armed = [], v[0], v[0], False
+    for i in range(1, len(v)):
+        if v[i] > peak:
+            if armed:
+                hits.append(i)
+                armed = False
+            peak = trough = v[i]
+        else:
+            trough = min(trough, v[i])
+            armed = armed or trough <= peak - step
+    return hits
+
+
+def pulse_track(values, cut, frames, fps):
+    """A decaying kick on each frame the reveal draws a high it had lost ground from.
+
+    Planned like everything else here — a pure function of the frame index, so a still at
+    frame 200 answers without drawing the 199 before it and frame k of a trimmed clip is
+    still frame in+k of the take. The decay is a time constant rather than a per-frame
+    factor, so the kick lasts as long at 30fps as it does at 60.
+    """
+    out = np.zeros(max(frames, 1))
+    hits = _breakouts(values)
+    if hits:
+        # The same mapping the timeline uses to fire its callouts: the frame at which the
+        # reveal head first reaches that point of the series.
+        at = np.searchsorted(np.asarray(cut), np.asarray(hits, int))
+        out[at[(at >= 0) & (at < len(out))]] = 1.0
+    decay = float(np.exp(-1.0 / max(_PULSE_TAU * fps, 1.0)))
+    for i in range(1, len(out)):
+        out[i] = max(out[i], out[i - 1] * decay)
+    return out
+
+
 def _date_ticks(ax, span_days):
     """Match the date format to how much time is actually in frame.
 
@@ -680,22 +1024,29 @@ def _titles(fig, ctx, title, subtitle, footer):
     to keep in step with these. Font sizes deliberately do not shrink with the box: a
     narrower frame on a phone wants text that is *larger* relative to the chart, not
     smaller, and ctx.s already scales them against the output resolution.
+
+    Returns the three artists keyed by the layer each one is, which is what a `Stage` needs
+    to bring them on. Keyed rather than returned in order because a chart may have no
+    subtitle, and a caller counting positions would then fade the footer as the subtitle.
     """
     t = ctx.theme
     top = 0.955 if not ctx.tall else 0.965
+    layers = {}
     if title:
         x, y = ctx.at(0.07, top)
-        fig.text(x, y, title, color=t["text"], fontsize=34 * ctx.s,
-                 fontweight="bold", va="top")
+        layers["title"] = fig.text(x, y, title, color=t["text"], fontsize=34 * ctx.s,
+                                   fontweight="bold", va="top")
     if subtitle:
         x, y = ctx.at(0.07, top - (0.052 if not ctx.tall else 0.030))
-        fig.text(x, y, subtitle, color=t["muted"], fontsize=17 * ctx.s, va="top",
-                 fontfamily=MONO_STACK)
+        layers["subtitle"] = fig.text(x, y, subtitle, color=t["muted"],
+                                      fontsize=17 * ctx.s, va="top",
+                                      fontfamily=MONO_STACK)
     footer = _footer_text(footer)
     if footer:
         x, y = ctx.at(0.93, 0.035)
-        fig.text(x, y, footer, color=t["muted"], fontsize=13 * ctx.s,
-                 ha="right", va="center", alpha=0.8)
+        layers["footer"] = fig.text(x, y, footer, color=t["muted"], fontsize=13 * ctx.s,
+                                    ha="right", va="center", alpha=0.8)
+    return layers
 
 
 def _plot_area(ctx, has_title):
@@ -1395,11 +1746,12 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     color = t["up"] if up else t["down"]
 
     fig = _new_fig(ctx)
-    _titles(fig, ctx, cfg.get("title") or _chart_title(tk),
-            cfg.get("subtitle")
-            or f"{_range_label(df.index, intraday)}   ·   {_headline(tk, y[0], y[-1])}"
-               f"{_units_note(tk)}{_scale_note(log)}",
-            cfg.get("footer"))
+    layers = _titles(fig, ctx, cfg.get("title") or _chart_title(tk),
+                     cfg.get("subtitle")
+                     or f"{_range_label(df.index, intraday)}   ·   "
+                        f"{_headline(tk, y[0], y[-1])}"
+                        f"{_units_note(tk)}{_scale_note(log)}",
+                     cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
     _style_axes(ax, ctx, y_fmt=_value_axis(tk, y.min(), y.max()), x_dates=not intraday,
                 log=log)
@@ -1417,12 +1769,21 @@ def render_line(cfg, ctx, out, progress=None, still=None):
     glow = _glow(ax, color, ctx)
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
                       solid_joinstyle="round", zorder=4)
-    (head,) = ax.plot([], [], "o", color=color, markersize=9 * ctx.s,
+    head_size = 9 * ctx.s
+    (head,) = ax.plot([], [], "o", color=color, markersize=head_size,
                       markeredgecolor=ctx.bg, markeredgewidth=2 * ctx.s, zorder=5)
     readout = ax.text(0, 0, "", color=t["text"], fontsize=22 * ctx.s,
                       fontweight="bold", ha="left", va="center", zorder=6,
                       fontfamily=MONO_STACK)
     fill = [None]
+
+    # Built after the axes are styled and pointed, because the entrance reads the alphas
+    # the furniture already has and puts them back when it is over.
+    stage = Stage(cfg, ctx, n_frames, hold, texts=layers, axes=(ax,))
+    # A head that reacts when the line takes out a high it had given ground from. Planned
+    # off the dense series, so it costs nothing per frame and a still lands on the same
+    # size the video would have drawn there.
+    pulse = pulse_track(yd, cut, n_frames + hold, ctx.fps) if stage.reactive else None
 
     def draw(i):
         i = cam.apply(ax, i)
@@ -1435,6 +1796,8 @@ def render_line(cfg, ctx, out, progress=None, still=None):
         for ln, vals in ma_pairs:
             ln.set_data(xd[:km], vals[:km])
         head.set_data([xs[-1]], [ys[-1]])
+        if pulse is not None:
+            head.set_markersize(head_size * (1.0 + _PULSE_GAIN * float(pulse[i])))
         if fill[0] is not None:
             fill[0].remove()
         # The fill is anchored to the bottom of the frame, not to a fixed price, so a
@@ -1450,6 +1813,9 @@ def render_line(cfg, ctx, out, progress=None, still=None):
                 _position_ticks(ax, ctx, df.index, ax.get_xlim())
             else:
                 _date_ticks(ax, cam.width(i))
+        # Last, because a moving camera has just rebuilt the tick artists the entrance
+        # fades and would otherwise hand back at full strength mid-cascade.
+        stage.apply(i)
         return ()
 
     if still is not None:
@@ -1489,8 +1855,9 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
     fig = _new_fig(ctx)
     sub = ("Indexed to 100" if normalize else _level_word(cols)) + \
           f"   ·   {_range_label(closes.index, intraday)}{_scale_note(log)}"
-    _titles(fig, ctx, cfg.get("title") or " vs ".join(_chart_title(c) for c in cols),
-            cfg.get("subtitle") or sub, cfg.get("footer"))
+    layers = _titles(fig, ctx,
+                     cfg.get("title") or " vs ".join(_chart_title(c) for c in cols),
+                     cfg.get("subtitle") or sub, cfg.get("footer"))
     ax = fig.add_axes(_plot_area(ctx, True))
 
     allv = np.concatenate(list(series.values()))
@@ -1522,6 +1889,8 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
                             fontweight="bold", ha="left", va="center", zorder=6,
                             fontfamily=MONO_STACK)
 
+    stage = Stage(cfg, ctx, n_frames, hold, texts=layers, axes=(ax,))
+
     def draw(i):
         i = cam.apply(ax, i)
         k = cut[min(i, n_frames - 1)]
@@ -1545,6 +1914,7 @@ def render_compare(cfg, ctx, out, progress=None, still=None):
                 _position_ticks(ax, ctx, closes.index, ax.get_xlim())
             else:
                 _date_ticks(ax, cam.width(i))
+        stage.apply(i)
         return ()
 
     if still is not None:
@@ -1606,10 +1976,11 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     t = ctx.theme
     fig = _new_fig(ctx)
     pct = (c[-1] / o[0] - 1) * 100
-    _titles(fig, ctx, cfg.get("title") or tk,
-            cfg.get("subtitle")
-            or f"{_range_label(df.index, intraday)}   ·   {pct:+.1f}%{_scale_note(log)}",
-            cfg.get("footer"))
+    layers = _titles(fig, ctx, cfg.get("title") or tk,
+                     cfg.get("subtitle")
+                     or f"{_range_label(df.index, intraday)}   ·   "
+                        f"{pct:+.1f}%{_scale_note(log)}",
+                     cfg.get("footer"))
 
     rect = _plot_area(ctx, True)
     vol_h = rect[3] * 0.20
@@ -1687,6 +2058,10 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
     colors = [bull if c[i] >= o[i] else bear for i in range(n)]
     w = 0.34
 
+    # Both axes, because the volume strip is furniture the same way the price grid is —
+    # bringing one up without the other would read as half a frame.
+    stage = Stage(cfg, ctx, n_frames, hold, texts=layers, axes=(ax, axv))
+
     def draw(i):
         i = cam.apply(ax, i)
         axv.set_ylim(vol_bot[i], vol_top[i])
@@ -1715,6 +2090,7 @@ def render_candles(cfg, ctx, out, progress=None, still=None):
         vbars.set_color(vcols)
         vbars.set_alpha(0.45)
         readout.set_text(f"{_money(c[k-1])}   {_stamp(df.index[k-1], df.index, intraday)}")
+        stage.apply(i)
         return ()
 
     if still is not None:
@@ -1791,8 +2167,8 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
 
     t = ctx.theme
     fig = _new_fig(ctx)
-    _titles(fig, ctx, cfg.get("title") or "Comparison",
-            cfg.get("subtitle") or "", cfg.get("footer"))
+    layers = _titles(fig, ctx, cfg.get("title") or "Comparison",
+                     cfg.get("subtitle") or "", cfg.get("footer"))
     rect = _plot_area(ctx, True)
     ax = fig.add_axes([rect[0] + 0.04, rect[1], rect[2] - 0.02, rect[3]])
     ax.set_facecolor(ctx.bg)
@@ -1828,6 +2204,12 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
                              fontweight="bold", va="center", ha="left",
                              fontfamily=MONO_STACK, zorder=4))
 
+    stage = Stage(cfg, ctx, n_frames, hold, texts=layers, axes=(ax,))
+    # Measured off the limits above rather than assumed: this chart's frame reaches well
+    # past its longest bar already, so the spring almost always gets all of its overshoot,
+    # but that is the axis padding's doing and not something to restate here.
+    room = settle_room(*ax.get_xlim(), np.zeros(n), finals)
+
     def fmt(v):
         if unit == "$":
             return _money(v)
@@ -1838,11 +2220,16 @@ def render_bars(cfg, ctx, out, progress=None, still=None):
         for j, (b, txt) in enumerate(zip(bars, texts)):
             start = (j / max(n - 1, 1)) * stagger
             local = 0.0 if gt <= start else (gt - start) / max(1 - stagger, 1e-6)
-            v = finals[j] * float(ease(cfg["easing"], min(local, 1.0)))
+            h = stage.settle(min(local, 1.0), room)
+            v = finals[j] * h
             b.set_width(v)
             anchor = v if finals[j] >= 0 else 0.0
             txt.set_position((anchor + span * 0.015, ypos[j]))
-            txt.set_text(fmt(v))
+            # The bar may sit past its number for a few frames; the number never does. A
+            # figure that reads high and then corrects itself is the one thing on this
+            # chart nobody would think to check.
+            txt.set_text(fmt(finals[j] * min(h, 1.0)))
+        stage.apply(i)
         return ()
 
     if still is not None:
@@ -2021,11 +2408,12 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     rising = y[-1] >= y[0]
     color = t["up"] if rising else t["down"]
     fig = _new_fig(ctx)
-    _titles(fig, ctx, cfg.get("title") or _chart_title(tk),
-            cfg.get("subtitle")
-            or f"{_range_label(df.index, intraday)}   ·   {_headline(tk, y[0], y[-1])}"
-               f"{_units_note(tk)}{_scale_note(log)}",
-            cfg.get("footer"))
+    layers = _titles(fig, ctx, cfg.get("title") or _chart_title(tk),
+                     cfg.get("subtitle")
+                     or f"{_range_label(df.index, intraday)}   ·   "
+                        f"{_headline(tk, y[0], y[-1])}"
+                        f"{_units_note(tk)}{_scale_note(log)}",
+                     cfg.get("footer"))
     rect = _plot_area(ctx, True)
     ax = fig.add_axes(rect)
     _style_axes(ax, ctx, y_fmt=_value_axis(tk, y.min(), y.max()), x_dates=not intraday,
@@ -2062,9 +2450,13 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
     glow = _glow(ax, color, ctx)
     (line,) = ax.plot([], [], color=color, lw=2.6 * ctx.s, solid_capstyle="round",
                       zorder=4)
-    (head,) = ax.plot([], [], "o", color=color, markersize=9 * ctx.s,
+    head_size = 9 * ctx.s
+    (head,) = ax.plot([], [], "o", color=color, markersize=head_size,
                       markeredgecolor=ctx.bg, markeredgewidth=2 * ctx.s, zorder=5)
     fill = [None]
+
+    stage = Stage(cfg, ctx, n_frames, hold, texts=layers, axes=(ax,))
+    pulse = pulse_track(yd, cut, n_frames + hold, ctx.fps) if stage.reactive else None
 
     marks = []
     for note in notes:
@@ -2098,6 +2490,8 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
         for ln, vals in ma_pairs:
             ln.set_data(xd[:km], vals[:km])
         head.set_data([xs[-1]], [ys[-1]])
+        if pulse is not None:
+            head.set_markersize(head_size * (1.0 + _PULSE_GAIN * float(pulse[i])))
         if fill[0] is not None:
             fill[0].remove()
         fill[0] = ax.fill_between(xs, cam.bottom(i), ys, color=color, alpha=0.10,
@@ -2124,6 +2518,7 @@ def render_timeline(cfg, ctx, out, progress=None, still=None):
                 _position_ticks(ax, ctx, df.index, ax.get_xlim())
             else:
                 _date_ticks(ax, cam.width(i))
+        stage.apply(i)
         return ()
 
     if still is not None:
@@ -2158,10 +2553,10 @@ def render_race(cfg, ctx, out, progress=None, still=None):
     t = ctx.theme
     n = len(names)
     fig = _new_fig(ctx)
-    _titles(fig, ctx, cfg.get("title") or "Performance race",
-            cfg.get("subtitle")
-            or ("Indexed to 100" if normalize else _level_word(names)),
-            cfg.get("footer"))
+    layers = _titles(fig, ctx, cfg.get("title") or "Performance race",
+                     cfg.get("subtitle")
+                     or ("Indexed to 100" if normalize else _level_word(names)),
+                     cfg.get("footer"))
     rect = _plot_area(ctx, True)
     ax = fig.add_axes([rect[0] + 0.05, rect[1], rect[2] - 0.03, rect[3]])
     ax.set_facecolor(ctx.bg)
@@ -2192,6 +2587,8 @@ def render_race(cfg, ctx, out, progress=None, still=None):
     smooth = 1.0 - float(np.exp(-11.0 / ctx.fps))
     xmax = mat.max() * 1.18
 
+    stage = Stage(cfg, ctx, n_frames, hold, texts=layers, axes=(ax,))
+
     def draw(i):
         nonlocal pos
         k = cut[min(i, n_frames - 1)]
@@ -2211,6 +2608,7 @@ def render_race(cfg, ctx, out, progress=None, still=None):
         moment = (_at_position(closes.index, xd[k]) if intraday
                   else mdates.num2date(xd[k]))
         clock.set_text(_stamp(moment, closes.index, intraday, "%b %Y"))
+        stage.apply(i)
         return ()
 
     if still is not None:
@@ -2349,7 +2747,7 @@ def render_waterfall(cfg, ctx, out, progress=None, still=None):
     t = ctx.theme
     fig = _new_fig(ctx)
     title, subtitle = _waterfall_titles(cfg, meta)
-    _titles(fig, ctx, title, subtitle, cfg.get("footer"))
+    layers = _titles(fig, ctx, title, subtitle, cfg.get("footer"))
     rect = _plot_area(ctx, True)
     # Wider than the shared rect, which reserves its right margin for the line charts'
     # end-of-series labels. A waterfall's labels are under its bars, so that margin is dead
@@ -2366,6 +2764,10 @@ def render_waterfall(cfg, ctx, out, progress=None, still=None):
     _style_axes(ax, ctx, y_fmt=_compact_axis(lo, hi, cur), x_dates=False)
     ax.grid(False, axis="x")  # a category axis has nothing to line up against
 
+    # Built here rather than beside the draw loop because the frame below has to know
+    # whether a bar is going to overshoot before it decides how much sky to leave it.
+    stage = Stage(cfg, ctx, n_frames, hold, texts=layers, axes=(ax,))
+
     # Headroom is measured against the bar that actually needs it rather than applied flat,
     # because the two are rarely the same bar: the tallest is usually the opening revenue
     # pillar, which prints one line, while the pillar printing two is shorter. A flat
@@ -2373,6 +2775,11 @@ def render_waterfall(cfg, ctx, out, progress=None, still=None):
     crown = max(top + span * (0.10 if row["share"] and shares else 0.055)
                 for top, row in zip(tops, rows))
     ax.set_ylim(lo - (span * 0.07 if lo < 0 else 0), max(crown, hi + span * 0.055))
+    # The opening pillar is as tall as the whole frame by construction, so it is the one
+    # bar on any chart here that has nowhere to overshoot into. The spring softens to fit
+    # rather than the frame opening up to hold it — the bridge is composed identically
+    # whichever style draws it, which is what keeps a still worth using as a thumbnail.
+    room = settle_room(*ax.get_ylim(), bases, tops)
     ax.set_xlim(-0.68, n - 0.32)
     ax.set_xticks(np.arange(n))
     ax.set_xticklabels([_wrap(r["label"], *((9, 3) if ctx.tall else (14, 2)))
@@ -2409,22 +2816,30 @@ def render_waterfall(cfg, ctx, out, progress=None, still=None):
         gt = min(f / max(n_frames - 1, 1), 1.0)
         for i, row in enumerate(rows):
             local = float(np.clip((gt - i * step) / grow, 0.0, 1.0))
-            h = float(ease(cfg["easing"], local))
+            h = stage.settle(local, room)
             reach = (tops[i] - bases[i]) * h
             bars[i].set_height(reach)
             head = bases[i] + reach
+            # Every label rides the bar, so it reads the springing head. Every *figure* is
+            # read off the clamped one: a settling bar is allowed to go past its level for
+            # a few frames, and no number beside it is allowed to go past the filing. A
+            # revenue that overshoots and corrects itself is the one error on this chart
+            # nobody would think to check for.
+            shown = min(h, 1.0)
+            landed = bases[i] + (tops[i] - bases[i]) * shown
             up = tops[i] >= bases[i]
             values[i].set_position((i, head + (off if up else -off)))
             values[i].set_va("bottom" if up else "top")
-            values[i].set_text(_signed_compact(row["value"] * h, cur)
-                               if row["kind"] == "delta" else _compact(head, cur))
+            values[i].set_text(_signed_compact(row["value"] * shown, cur)
+                               if row["kind"] == "delta" else _compact(landed, cur))
             values[i].set_alpha(local)
             if shares and row["share"]:
                 notes[i].set_position((i, head + off * 3.6))
-                notes[i].set_text(f"{head / opening * 100:,.0f}% of revenue")
+                notes[i].set_text(f"{landed / opening * 100:,.0f}% of revenue")
                 notes[i].set_alpha(local)
             if links[i] is not None:
                 links[i].set_alpha(float(np.clip(local * 3.0, 0.0, 1.0)) * 0.9)
+        stage.apply(f)
         return ()
 
     if still is not None:

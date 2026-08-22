@@ -666,13 +666,21 @@ select.ctrl{appearance:none;padding-right:30px;cursor:pointer;
             re-timing of it — the reveal, easing and camera keep the speed set there.
             Blank for all of it.</div>
         </div>
+        <!-- Two halves of the same question, and they are deliberately separate. Easing
+             is the reveal's own clock — how fast the chart draws itself. Entrance is what
+             the rest of the frame does around it: the title, the grid and the axis coming
+             on rather than being there from the first frame. Both are selects with a line
+             of prose under them, the same control the camera move uses, because each is a
+             named choice that needs a sentence more than it needs a short label. -->
         <div class="field">
-          <label>Easing</label>
-          <div class="seg" id="easingSeg">
-            <button data-v="out" aria-pressed="true">Ease out</button>
-            <button data-v="inout" aria-pressed="false">Both ends</button>
-            <button data-v="linear" aria-pressed="false">Linear</button>
-          </div>
+          <label for="easing">Easing</label>
+          <select class="ctrl" id="easing"></select>
+          <div class="hint" id="easingHint"></div>
+        </div>
+        <div class="field">
+          <label for="motion">Entrance</label>
+          <select class="ctrl" id="motion"></select>
+          <div class="hint" id="motionHint"></div>
         </div>
       </div>
     </details>
@@ -805,7 +813,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const state = {
-  chart:"line", normalize:1, easing:"out", theme:"midnight", range:"1y",
+  chart:"line", normalize:1, easing:"out", motion:"none", theme:"midnight", range:"1y",
   aspect:"16:9", quality:"final", fps:60, resolution:1080, transparent:0, preset:"auto",
   camera:"locked", travel:"standard", cameraY:"track", log:0, maLag:"none",
   autoNotes:[], bridge:"income", meta:null, maxTickers:1, kits:{},
@@ -828,6 +836,16 @@ fetch("/api/meta").then(r=>r.json()).then(m=>{
     </button>`).join("");
   $("#camera").innerHTML = m.cameras.map(c=>
     `<option value="${c.id}">${c.label}</option>`).join("");
+  // Both built from the registries the server publishes, the same way the chart list and
+  // the camera moves are — another curve or another style is an entry in renderers.py and
+  // no edit here.
+  $("#easing").innerHTML = m.easings.map(e=>
+    `<option value="${e.id}">${e.label}</option>`).join("");
+  $("#motion").innerHTML = m.motions.map(e=>
+    `<option value="${e.id}">${e.label}</option>`).join("");
+  $("#easing").value = state.easing;
+  $("#motion").value = state.motion;
+  applyMotion();
   $("#travelSeg").innerHTML = m.travels.map(v=>
     `<button data-v="${v}" aria-pressed="${v===state.travel}">${
       v[0].toUpperCase()+v.slice(1)}</button>`).join("");
@@ -926,7 +944,9 @@ const SECTIONS = [
   ["gMotion", () => {
     const c = clipSpan();
     return `${+$("#duration").value}s + ${+$("#hold").value}s · ` +
-           segLabel("#easingSeg").toLowerCase() +
+           named("easings", state.easing).toLowerCase() +
+           (state.motion === "none" ? ""
+                                    : ` · ${named("motions", state.motion).toLowerCase()}`) +
            (c.trimmed ? ` · clip ${+c.start.toFixed(2)}–${+c.end.toFixed(2)}s` : "");
   }],
   ["gCamera", () => named("cameras", state.camera)],
@@ -1106,7 +1126,6 @@ function seg(id, key, cast = v=>v, after = null, slateOnly = false){
   });
 }
 seg("#normalizeSeg","normalize",Number);
-seg("#easingSeg","easing");
 seg("#aspectSeg","aspect", v=>v, applyAspect);
 seg("#qualitySeg","quality", v=>v, applyTier);
 seg("#presetSeg","preset", v=>v, null, true);
@@ -1114,6 +1133,22 @@ seg("#bgSeg","transparent",Number);
 seg("#travelSeg","travel");
 seg("#cameraYSeg","cameraY");
 seg("#maLagSeg","maLag");
+
+/* ---------- motion ---------- */
+// The hint under each is the registry's own description, so the sentence a viewer reads and
+// the behaviour the renderer implements come from the same place rather than from a string
+// here that nothing keeps in step.
+function applyMotion(){
+  const pick = (list, id) => (state.meta[list] || []).find(x => x.id === id);
+  $("#easingHint").textContent = (pick("easings", state.easing) || {}).desc || "";
+  $("#motionHint").textContent = (pick("motions", state.motion) || {}).desc || "";
+}
+$("#easing").addEventListener("change", ()=>{
+  state.easing = $("#easing").value; applyMotion(); schedule();
+});
+$("#motion").addEventListener("change", ()=>{
+  state.motion = $("#motion").value; applyMotion(); schedule();
+});
 
 /* ---------- camera ---------- */
 // Travel and vertical only mean something once the frame is actually moving, so a locked
@@ -1411,7 +1446,7 @@ function config(){
     // Empty means no trim at all rather than zero, which is a real in-point.
     clip_in: $("#clipIn").value === "" ? null : +$("#clipIn").value,
     clip_out: $("#clipOut").value === "" ? null : +$("#clipOut").value,
-    easing: state.easing, theme: state.theme,
+    easing: state.easing, motion: state.motion, theme: state.theme,
     camera: state.camera, camera_travel: state.travel, camera_y: state.cameraY,
     aspect: state.aspect, fit: state.fit,
     quality: state.quality, preset: state.preset,
