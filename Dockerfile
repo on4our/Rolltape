@@ -42,7 +42,14 @@ COPY . .
 # ROLLTAPE_SIGNUPS is not set either, and that is not an oversight: a public host should be
 # posting signups to a list provider through ROLLTAPE_SIGNUP_URL. The file fallback is for a
 # laptop, and on a container it collects addresses until the next redeploy discards them.
+#
+# ROLLTAPE_OUT_MAX_GB is set here rather than left at its local default of "no limit",
+# because nothing else deletes a render and a transparent ProRes clip is over a gigabyte —
+# so a host anybody can reach fills its volume and then fails every render on write. Five
+# gigabytes suits the volume sizes these hosts hand out by default; set it to match the one
+# actually mounted.
 ENV ROLLTAPE_OUT_DIR=/data/outputs \
+    ROLLTAPE_OUT_MAX_GB=5 \
     ROLLTAPE_CACHE_DIR=/data/.cache \
     ROLLTAPE_PRESETS=/data/presets.json \
     ROLLTAPE_EXAMPLES_DIR=/data/.examples \

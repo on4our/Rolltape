@@ -388,7 +388,7 @@ data.py         FMP, Twelve Data, Yahoo and Stooq price fetches, in order, FRED 
                 economic series, the disk cache, and the symbol search
 fundamentals.py Income statements from FMP and Yahoo, and the waterfall's bridges
 config.py       Env-var configuration, all defaulting to the local setup
-storage.py      Where finished MP4s go
+storage.py      Where finished MP4s go, and the ceiling that stops them piling up
 jobs.py         The render job registry
 examples.py     The three charts the landing page shows
 signups.py      Email capture, to a list provider or a local file
@@ -400,6 +400,13 @@ railway.json    Railway's build and health settings, one replica deliberately
 
 Income statements are cached in the same directory and stamped with the day they were
 fetched, since "the last five filings" changes the morning a company reports.
+
+Nothing deletes a render on a laptop — the file is one you asked for. Set
+`ROLLTAPE_OUT_MAX_GB` and the oldest are dropped once the directory goes over that many
+gigabytes, which is what a hosted instance wants: nothing else ever removes a render, and a
+transparent ProRes clip is over a gigabyte, so a shared instance fills its disk and then
+fails every render on write. The clip that just finished is never the one deleted, and only
+files a render wrote are ever touched. The Dockerfile sets 5 GB; match it to your volume.
 
 Price data is cached in `.cache/` so repeated renders of the same range don't re-download.
 A finished historical window is cached for good — it can't change. A range with **End**

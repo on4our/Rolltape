@@ -35,7 +35,7 @@ data.py         FMP and Twelve Data (licensed), Yahoo, Stooq — in that order, 
 fundamentals.py Income statements — FMP then Yahoo — and the waterfall's bridges. A
                 separate seam from data.py because a statement is not a price series
 config.py       Env-var configuration; every default reproduces the local setup
-storage.py      Where a finished render lands and what URL plays it
+storage.py      Where a finished render lands, what URL plays it, and the disk ceiling
 jobs.py         The render job registry
 presets.py      Named brand kits, saved to one JSON file
 examples.py     The three configs the landing page draws as its showcase
@@ -662,6 +662,25 @@ title template: `format_title()` fills it in `clean_config()`, so the preview an
 render agree and an API caller gets it too. Its tokens are deliberately limited to what
 the config knows (`{ticker}`, `{tickers}`, `{chart}`) — the date range and return live in
 each chart's subtitle and aren't known until the data is fetched.
+
+**Nothing else deletes a render, so the outputs directory has a ceiling.** `storage.prune()`
+drops the oldest files until the directory is under `config.OUT_MAX_GB`, and the worker
+calls it after each render lands. Four things shape it:
+
+- **Off by default, on in the container.** `OUT_MAX_GB` is 0 locally — a render on a laptop
+  is a file its owner asked for, and deleting it to reclaim space would be the surprise.
+  The Dockerfile sets a real number, because a host anyone can reach fills its volume
+  otherwise and then fails *every* render on write. A transparent ProRes clip is over a
+  gigabyte, so that is an afternoon rather than a year.
+- **The render that just finished is never evicted**, even when it alone is over the
+  ceiling. The job is about to report its URL, and one that 404s the moment it appears is a
+  worse outcome than a directory briefly above its limit — the next render brings it down.
+- **It only ever removes files a render wrote**, matched on the extensions in
+  `RENDER_SUFFIXES`. Anything else on that volume was put there by a person, and enforcing
+  a disk ceiling is not the place to start guessing about what.
+- **A failed prune costs the sweep, not the render.** Same shape as the corporate event
+  lookup one layer out: the render is what was asked for, and tidying up afterwards is
+  never worth losing it over.
 
 **Threading and processes.** matplotlib's pyplot state is global, so `DRAW_LOCK` serialises
 the drawing `app.py` does itself — previews and stills. Renders are not on that lock:

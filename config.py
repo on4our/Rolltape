@@ -82,6 +82,20 @@ DEMO_URL = (os.environ.get("ROLLTAPE_DEMO_URL") or "/app").strip()
 SIGNUP_URL = (os.environ.get("ROLLTAPE_SIGNUP_URL") or "").strip()
 SIGNUPS_PATH = _path("ROLLTAPE_SIGNUPS", "signups.jsonl")
 
+def _float(env, default):
+    try:
+        return float(os.environ.get(env) or default)
+    except ValueError:
+        return default
+
+
+# A ceiling on the outputs directory, in gigabytes. Nothing else ever deletes a render, so
+# without one a long-lived host fills its volume and then fails every render on write — and
+# a transparent ProRes clip is over a gigabyte, so "long-lived" can mean an afternoon. 0 is
+# no limit and the default, because on a laptop a render is a file its owner asked for and
+# deleting it would be the surprise. A container sets a real number; see the Dockerfile.
+OUT_MAX_GB = _float("ROLLTAPE_OUT_MAX_GB", 0)
+
 # Rendered showcase stills. Generated on demand and reused, so this wants to be on the
 # same writable volume as the outputs rather than in the image.
 EXAMPLES_DIR = _path("ROLLTAPE_EXAMPLES_DIR", ".examples")
