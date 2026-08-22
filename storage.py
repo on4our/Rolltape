@@ -30,3 +30,56 @@ def render_target(name):
 def publish(path, name):
     """Make the rendered file reachable and return the URL that plays it."""
     return f"/outputs/{name}"
+
+
+# Only what a render writes. Anything else in the directory was put there by a person, and
+# enforcing a disk ceiling is not the place to start guessing about that.
+RENDER_SUFFIXES = (".mp4", ".mov")
+
+
+def prune(keep=None):
+    """Delete the oldest renders until the directory is under config.OUT_MAX_GB.
+
+    Off unless a ceiling is set — see config.OUT_MAX_GB for why that is the right default
+    on a laptop and the wrong one on a host anybody else can reach.
+
+    `keep` is the render that has just finished, and it survives even when it alone is over
+    the ceiling. The job is about to report a URL, and one that 404s the moment it appears
+    is a worse outcome than a directory briefly above its limit — the next render brings it
+    back down.
+
+    Returns the names removed, which is what makes it checkable from a test.
+    """
+    limit = config.OUT_MAX_GB * 1e9
+    if limit <= 0:
+        return []
+    try:
+        names = os.listdir(config.OUT_DIR)
+    except OSError:
+        return []
+
+    files = []
+    for name in names:
+        if not name.endswith(RENDER_SUFFIXES):
+            continue
+        path = os.path.join(config.OUT_DIR, name)
+        try:
+            info = os.stat(path)
+        except OSError:      # vanished between listing and stat
+            continue
+        files.append((info.st_mtime, info.st_size, name, path))
+
+    total = sum(size for _, size, _, _ in files)
+    removed = []
+    for _, size, name, path in sorted(files):     # oldest first
+        if total <= limit:
+            break
+        if name == keep:
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            continue
+        total -= size
+        removed.append(name)
+    return removed

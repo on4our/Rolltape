@@ -436,6 +436,15 @@ def worker():
             # Size has to be read before publish; a remote backend may move the file.
             size_mb = round(os.path.getsize(path) / 1e6, 2)
             url = storage.publish(path, job["file"])
+            # A full volume fails every later render, so the ceiling is enforced here,
+            # where a file has just landed and the size is known to have changed. It must
+            # never fail the job that just succeeded — same reasoning as the corporate
+            # event lookup, one layer out: the render is what was asked for, and tidying
+            # up afterwards is not worth losing it over.
+            try:
+                storage.prune(keep=job["file"])
+            except Exception:  # noqa: BLE001
+                pass
             jobstore.update(job_id, status="done", url=url, size_mb=size_mb,
                             seconds=round(time.time() - started, 1))
         except Exception as exc:  # noqa: BLE001

@@ -7,15 +7,19 @@ interface can send has to be caught here. Run with: python -m unittest
 
 import os
 import re
+import shutil
+import tempfile
 import time
 import unittest
 from unittest import mock
 
 import app
+import config
 import data
 import fundamentals
 import presets
 import renderers
+import storage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -330,6 +334,97 @@ class OutputNamingTests(unittest.TestCase):
         self.assertEqual(rows[cut]["total"], 180)
         # And the two are not about to land on the same file.
         self.assertNotEqual(rows[full]["file"], rows[cut]["file"])
+
+
+class OutputRetentionTests(unittest.TestCase):
+    """The ceiling on the outputs directory.
+
+    Nothing else ever deletes a render, so on a host anybody can reach this is what stands
+    between a busy afternoon and a volume with no room to write the next file. Real files in
+    a temp directory rather than a mocked filesystem — which ones survive is the whole
+    question — but sized in bytes rather than megabytes, because the suite runs on every
+    change and writing real gigabytes to prove arithmetic would be a poor trade.
+    """
+
+    CAP = 1e-6          # gigabytes, so the ceiling lands on 1000 bytes
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._out, self._cap = config.OUT_DIR, config.OUT_MAX_GB
+        config.OUT_DIR = self.dir
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def tearDown(self):
+        config.OUT_DIR, config.OUT_MAX_GB = self._out, self._cap
+
+    def write(self, name, size, age_s=0):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(b"\0" * size)
+        when = time.time() - age_s
+        os.utime(path, (when, when))
+        return path
+
+    def names(self):
+        return sorted(os.listdir(self.dir))
+
+    def test_no_ceiling_deletes_nothing(self):
+        # The local default. A render on a laptop is a file its owner asked for, and
+        # deleting it to reclaim space would be the surprise.
+        config.OUT_MAX_GB = 0
+        for i in range(4):
+            self.write(f"clip{i}.mp4", 4000, age_s=100 - i)
+        self.assertEqual(storage.prune(), [])
+        self.assertEqual(len(self.names()), 4)
+
+    def test_the_oldest_go_first(self):
+        config.OUT_MAX_GB = self.CAP
+        self.write("old.mp4", 600, age_s=300)
+        self.write("middle.mp4", 600, age_s=200)
+        self.write("newest.mp4", 600, age_s=100)
+        self.assertEqual(storage.prune(), ["old.mp4", "middle.mp4"])
+        self.assertEqual(self.names(), ["newest.mp4"])
+
+    def test_it_stops_as_soon_as_it_is_under_the_ceiling(self):
+        # 1200 bytes against a 1000-byte ceiling: dropping the oldest is enough, and the
+        # newer file has to survive.
+        config.OUT_MAX_GB = self.CAP
+        self.write("old.mp4", 800, age_s=300)
+        self.write("new.mp4", 400, age_s=100)
+        self.assertEqual(storage.prune(), ["old.mp4"])
+        self.assertEqual(self.names(), ["new.mp4"])
+
+    def test_the_render_that_just_finished_is_never_deleted(self):
+        # The job is about to report this URL. One that 404s the moment it appears is a
+        # worse outcome than a directory briefly over its limit.
+        config.OUT_MAX_GB = self.CAP
+        self.write("just-rendered.mov", 5000, age_s=0)
+        self.assertEqual(storage.prune(keep="just-rendered.mov"), [])
+        self.assertEqual(self.names(), ["just-rendered.mov"])
+
+    def test_a_huge_new_render_evicts_everything_else_first(self):
+        config.OUT_MAX_GB = self.CAP
+        self.write("older.mp4", 500, age_s=300)
+        self.write("old.mp4", 500, age_s=200)
+        self.write("big.mov", 4000, age_s=0)
+        self.assertEqual(storage.prune(keep="big.mov"), ["older.mp4", "old.mp4"])
+        self.assertEqual(self.names(), ["big.mov"])
+
+    def test_it_only_ever_touches_renders(self):
+        # Anything else on that volume was put there by a person. A disk ceiling is not the
+        # place to start guessing about what.
+        config.OUT_MAX_GB = self.CAP
+        self.write("clip.mp4", 5000, age_s=300)
+        for other in ("notes.txt", ".gitkeep", "presets.json"):
+            self.write(other, 5000, age_s=400)
+        self.assertEqual(storage.prune(), ["clip.mp4"])
+        self.assertEqual(self.names(), [".gitkeep", "notes.txt", "presets.json"])
+
+    def test_a_missing_directory_is_not_an_error(self):
+        # prune runs after a render lands, and the render is what mattered — see the worker.
+        config.OUT_MAX_GB = 1
+        config.OUT_DIR = os.path.join(self.dir, "gone")
+        self.assertEqual(storage.prune(), [])
 
 
 class SafeAreaTests(unittest.TestCase):
